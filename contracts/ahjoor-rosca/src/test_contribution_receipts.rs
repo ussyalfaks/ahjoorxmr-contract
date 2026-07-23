@@ -102,3 +102,35 @@ fn test_contribution_receipt_data_structure() {
     // Initial counter is still 0 after init
     assert_eq!(client.get_contribution_receipt_count(), 0);
 }
+
+#[test]
+fn test_contribution_receipts_minted_on_finalize_round() {
+    let (env, client, admin, token_admin, _token_client, _token_admin_client, members) =
+        setup_with_members(3, 1000);
+
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin,
+        &3600,
+        &make_default_config(),
+        &None,
+    );
+
+    let m0 = members.get(0).unwrap();
+    let m1 = members.get(1).unwrap();
+
+    // 2 out of 3 members contribute
+    client.contribute(&m0, &token_admin, &100);
+    client.contribute(&m1, &token_admin, &100);
+
+    // Fast-forward past deadline
+    env.ledger().set_timestamp(3601);
+
+    // Finalize round triggers receipt minting for paid members (m0 and m1)
+    client.finalize_round();
+
+    // 2 receipts minted (IDs 0 and 1)
+    assert_eq!(client.get_contribution_receipt_count(), 2);
+}

@@ -82,3 +82,111 @@ pub struct ContributionReceiptMinted {
 ```
 
 Event topics: `("contribution_receipt_minted", member)`
+
+---
+
+## 2. Receipt Issuance Mechanism and Lifecycle
+
+Contribution receipts are **minted automatically** during round finalization at the conclusion of each ROSCA round.
+
+### Issuing Function
+
+Receipts are minted by the contract entrypoint:
+
+```rust
+pub fn finalize_round(env: Env)
+```
+
+Defined in `contracts/ahjoor-rosca/src/lib.rs`.
+
+### Caller & Access Control
+
+- **Role Requirement**: Only the ROSCA contract **Admin** (`admin.require_auth()`) can execute `finalize_round`.
+- **System Guards**: Contract must not be paused (`check_not_paused`) and not frozen (`check_not_frozen`).
+
+### Prerequisites & Timing
+
+- The round deadline must have expired (`env.ledger().timestamp() > deadline`). If called before the deadline, it panics with `Error::DeadlineNotPassed`.
+
+### Member Eligibility
+
+- Receipts are issued **only to members who have fully paid** their required contribution for the round (`paid_members` set).
+- Members who paid via multiple partial installments are included once their cumulative payments reach the required `contribution_amount`.
+- Defaulters (members who failed to pay by the round deadline) do **not** receive a contribution receipt for that round.
+
+---
+
+### Minting Algorithm (Step-by-Step)
+
+During `finalize_round()`, the contract performs the following steps for minting receipts:
+
+```text
+               +----------------------------------+
+               |      finalize_round(env)         |
+               +----------------------------------+
+                                |
+                                v
+               +----------------------------------+
+               | Fetch paid_members & current_round|
+               +----------------------------------+
+                                |
+                                v
+                +--------------------------------+
+                | Read ContributionReceiptCounter|
+                +--------------------------------+
+                                |
+                                v
+                   +------------------------+
+                   |  For each paid_member  |
+                   +------------------------+
+                                |
+         +----------------------+----------------------+
+         |                                             |
+         v                                             v
++-------------------------------+         +----------------------------+
+| 1. Construct SHA-256 Preimage |         | 2. Build Receipt Struct    |
+| (counter || round || member)  |         | (receipt_id, member, round,|
++-------------------------------+         | amount, token, timestamp,  |
+         |                                | receipt_hash)              |
+         +----------------------+---------+----------------------------+
+                                |
+                                v
+                 +-----------------------------+
+                 | 3. Set persistent storage:  |
+                 | ContributionReceipt(counter)|
+                 +-----------------------------+
+                                |
+                                v
+                 +-----------------------------+
+                 | 4. Append counter to        |
+                 | MemberReceiptIds(member)    |
+                 +-----------------------------+
+                                |
+                                v
+                 +-----------------------------+
+                 | 5. Emit Event:              |
+                 | ContributionReceiptMinted   |
+                 +-----------------------------+
+                                |
+                                v
+                 +-----------------------------+
+                 | 6. counter += 1             |
+                 +-----------------------------+
+                                |
+                                v
+                 +-----------------------------+
+                 | Save updated Counter        |
+                 +-----------------------------+
+```
+
+1. **Retrieve Token & Counter**: Reads token contract address (`DataKey::Token`) and current global counter (`DataKey3::ContributionReceiptCounter`, defaulting to `0`).
+2. **Iterate Paid Members**: Iterates sequentially over `paid_members`:
+   - Looks up `amount_contributed` from `DataKey::MemberContributions`.
+   - Computes deterministic SHA-256 hash `receipt_hash` over `(counter || round || member_xdr)`.
+   - Constructs `ContributionReceipt` with `minted_at = env.ledger().timestamp()`.
+   - Writes receipt to persistent storage (`DataKey3::ContributionReceipt(counter)`).
+   - Appends `counter` to the vector stored under `DataKey3::MemberReceiptIds(member)`.
+   - Bumps storage TTL for both persistent entries to ensure longevity (`PERSISTENT_LIFETIME_THRESHOLD`, `PERSISTENT_BUMP_AMOUNT`).
+   - Emits `ContributionReceiptMinted` event.
+   - Increments `counter` by `1`.
+3. **Persist Global Counter**: Writes updated `counter` back to `DataKey3::ContributionReceiptCounter` in instance storage.
