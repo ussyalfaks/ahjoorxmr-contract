@@ -298,5 +298,6 @@ A: Call `bump_storage()` periodically (recommended every ~30 days of inactivity)
 ## Documentation
 
 - [Payments Authorization and Capture Flow](docs/payments-flow.md) - lifecycle guide for `authorize_payment`, `capture_payment`, missed capture expiry, and related events.
+- [Contribution Receipts](docs/contribution-receipts.md) — guide to NFT-style contribution receipt format, issuance lifecycle, and member lookup endpoints.
 - [Contract Error Codes](docs/errors.md) — consolidated reference of every numeric `#[contracterror]` code exposed by the Ahjoor contracts.
 - [State Archival Troubleshooting](docs/state-archival.md) — check archived status, restore a dormant ROSCA contract, and prevent future archival.
