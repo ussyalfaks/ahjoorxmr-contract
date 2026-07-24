@@ -367,7 +367,7 @@ pub enum DataKey3 {
     // NFT-style contribution receipts
     ContributionReceiptCounter,
     ContributionReceipt(u32),
-    MemberReceiptIds(Address),
+    MemberReceiptIds,
     // #456: Waitlist priority ordering mode
     WaitlistPriorityMode,       // WaitlistMode — settable by admin
 }
@@ -438,8 +438,9 @@ pub enum PersistentKey {
     MemberCreditScores,        // Map<Address, MemberScore> — per-member credit score (#269)
     /// #364: Point-in-time cycle snapshot keyed by cycle number
     CycleSnapshot(u32),        // cycle_number → CycleSnapshotData
-    /// #457: Ledger at which a member's credit score was last updated (cross-contract oracle)
     CreditScoreUpdatedAt(Address), // u32 — ledger sequence of last credit score update
+    /// #448: Member contribution receipt IDs index
+    MemberReceiptIds(Address), // Vec<u32> — list of receipt IDs for a member
 }
 
 /// #364: Immutable point-in-time snapshot of group state at cycle end.

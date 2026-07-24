@@ -1479,6 +1479,68 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey4::LastRoundDeadline, &deadline);
 
+        // Mint NFT-style contribution receipts for every member who paid this round.
+        {
+            let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+            let mut counter: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey3::ContributionReceiptCounter)
+                .unwrap_or(0);
+            let member_contributions: Map<Address, i128> = env
+                .storage()
+                .instance()
+                .get(&DataKey::MemberContributions)
+                .unwrap_or(Map::new(&env));
+            let now_ts = env.ledger().timestamp();
+
+            for member in paid_members.iter() {
+                let amount_contributed = member_contributions.get(member.clone()).unwrap_or(0);
+
+                // Compute a deterministic receipt hash from (counter, member, round, amount).
+                let mut preimage = Bytes::new(&env);
+                preimage.extend_from_array(&counter.to_be_bytes());
+                preimage.extend_from_array(&current_round.to_be_bytes());
+                let member_xdr = member.clone().to_xdr(&env);
+                preimage.append(&member_xdr);
+                let hash: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+                let receipt = ContributionReceipt {
+                    receipt_id: counter,
+                    member: member.clone(),
+                    round: current_round,
+                    amount_contributed,
+                    token: token_addr.clone(),
+                    minted_at: now_ts,
+                    receipt_hash: hash.clone(),
+                };
+
+                env.storage()
+                    .persistent()
+                    .set(&DataKey3::ContributionReceipt(counter), &receipt);
+                env.storage().persistent().extend_ttl(
+                    &DataKey3::ContributionReceipt(counter),
+                    PERSISTENT_LIFETIME_THRESHOLD,
+                    PERSISTENT_BUMP_AMOUNT,
+                );
+
+                events::emit_contribution_receipt_minted(
+                    &env,
+                    counter,
+                    member.clone(),
+                    current_round,
+                    amount_contributed,
+                    hash,
+                );
+
+                counter += 1;
+            }
+
+            env.storage()
+                .instance()
+                .set(&DataKey3::ContributionReceiptCounter, &counter);
+        }
+
         // Execute payout BEFORE applying new suspensions so the recipient selection
         // uses the pre-round suspension state (newly delinquent members don't affect
         // this round's payout).
@@ -1700,82 +1762,7 @@ impl AhjoorContract {
             }
         }
 
-        // Mint NFT-style contribution receipts for every member who paid this round.
-        {
-            let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-            let mut counter: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey3::ContributionReceiptCounter)
-                .unwrap_or(0);
-            let member_contributions: Map<Address, i128> = env
-                .storage()
-                .instance()
-                .get(&DataKey::MemberContributions)
-                .unwrap_or(Map::new(&env));
-            let now_ts = env.ledger().timestamp();
 
-            for member in paid_members.iter() {
-                let amount_contributed = member_contributions.get(member.clone()).unwrap_or(0);
-
-                // Compute a deterministic receipt hash from (counter, member, round, amount).
-                let mut preimage = Bytes::new(&env);
-                preimage.extend_from_array(&counter.to_be_bytes());
-                preimage.extend_from_array(&current_round.to_be_bytes());
-                let member_xdr = member.clone().to_xdr(&env);
-                preimage.append(&member_xdr);
-                let hash: BytesN<32> = env.crypto().sha256(&preimage).into();
-
-                let receipt = ContributionReceipt {
-                    receipt_id: counter,
-                    member: member.clone(),
-                    round: current_round,
-                    amount_contributed,
-                    token: token_addr.clone(),
-                    minted_at: now_ts,
-                    receipt_hash: hash.clone(),
-                };
-
-                env.storage()
-                    .persistent()
-                    .set(&DataKey3::ContributionReceipt(counter), &receipt);
-                env.storage().persistent().extend_ttl(
-                    &DataKey3::ContributionReceipt(counter),
-                    PERSISTENT_LIFETIME_THRESHOLD,
-                    PERSISTENT_BUMP_AMOUNT,
-                );
-
-                // Append to member's receipt index.
-                let mut ids: Vec<u32> = env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey3::MemberReceiptIds(member.clone()))
-                    .unwrap_or(Vec::new(&env));
-                ids.push_back(counter);
-                env.storage()
-                    .persistent()
-                    .set(&DataKey3::MemberReceiptIds(member.clone()), &ids);
-                env.storage().persistent().extend_ttl(
-                    &DataKey3::MemberReceiptIds(member.clone()),
-                    PERSISTENT_LIFETIME_THRESHOLD,
-                    PERSISTENT_BUMP_AMOUNT,
-                );
-
-                events::emit_contribution_receipt_minted(
-                    &env,
-                    counter,
-                    member.clone(),
-                    current_round,
-                    amount_contributed,
-                    hash,
-                );
-
-                counter += 1;
-            }
-            env.storage()
-                .instance()
-                .set(&DataKey3::ContributionReceiptCounter, &counter);
-        }
 
         env.storage()
             .instance()
@@ -11295,10 +11282,24 @@ impl AhjoorContract {
 
     /// Return all receipt IDs minted for `member` across all rounds.
     pub fn get_member_receipt_ids(env: Env, member: Address) -> Vec<u32> {
-        env.storage()
-            .persistent()
-            .get(&DataKey3::MemberReceiptIds(member))
-            .unwrap_or(Vec::new(&env))
+        let counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::ContributionReceiptCounter)
+            .unwrap_or(0);
+        let mut ids = Vec::new(&env);
+        for id in 0..counter {
+            if let Some(receipt) = env
+                .storage()
+                .persistent()
+                .get::<_, ContributionReceipt>(&DataKey3::ContributionReceipt(id))
+            {
+                if receipt.member == member {
+                    ids.push_back(id);
+                }
+            }
+        }
+        ids
     }
 
     /// Return the total number of contribution receipts minted so far.

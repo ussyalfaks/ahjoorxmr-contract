@@ -190,3 +190,102 @@ During `finalize_round()`, the contract performs the following steps for minting
    - Emits `ContributionReceiptMinted` event.
    - Increments `counter` by `1`.
 3. **Persist Global Counter**: Writes updated `counter` back to `DataKey3::ContributionReceiptCounter` in instance storage.
+
+---
+
+## 3. Receipt Retrieval, Querying, and Verification
+
+ROSCA members, client applications, and off-chain indexers can retrieve and cryptographically verify contribution receipts using the read-only contract query functions or Soroban event RPC subscriptions.
+
+### Read-Only Query API
+
+Defined in `contracts/ahjoor-rosca/src/lib.rs`:
+
+#### 1. `get_contribution_receipt(env: Env, receipt_id: u32) -> ContributionReceipt`
+
+Retrieves a single contribution receipt by its unique `receipt_id`.
+
+- **Parameters**: `receipt_id` (`u32`) - unique numeric identifier of the receipt.
+- **Returns**: `ContributionReceipt` struct containing full receipt details.
+- **Errors**: Panics with `ExtError2::ReceiptNotFound` (numeric code `203`) if the `receipt_id` does not exist in storage.
+
+#### 2. `get_member_receipt_ids(env: Env, member: Address) -> Vec<u32>`
+
+Retrieves all receipt IDs minted for a specific member address across all rounds.
+
+- **Parameters**: `member` (`Address`) - Stellar address of the member.
+- **Returns**: `Vec<u32>` - list of numeric receipt IDs ordered chronologically by minting order. Returns an empty vector `[]` if the member has no receipts.
+
+#### 3. `get_contribution_receipt_count(env: Env) -> u32`
+
+Returns the cumulative total number of contribution receipts minted by the contract instance so far.
+
+- **Parameters**: None.
+- **Returns**: `u32` - total receipt count.
+
+---
+
+### Stellar CLI Usage Examples
+
+#### Look up a receipt by ID
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source alice \
+  --network testnet \
+  -- get_contribution_receipt \
+  --receipt_id 0
+```
+
+#### List all receipt IDs for a member
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source alice \
+  --network testnet \
+  -- get_member_receipt_ids \
+  --member G...ADDRESS
+```
+
+#### Query total receipt count
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source alice \
+  --network testnet \
+  -- get_contribution_receipt_count
+```
+
+---
+
+### Off-Chain Receipt Verification
+
+Clients or third-party verifiers can verify that a receipt is authentic and un-tampered by re-computing its SHA-256 hash:
+
+1. Retrieve the receipt struct via `get_contribution_receipt(receipt_id)`.
+2. Construct the binary payload:
+   - `counter_bytes` = 4-byte big-endian byte array of `receipt_id`.
+   - `round_bytes` = 4-byte big-endian byte array of `round`.
+   - `member_xdr` = Soroban XDR byte array of `member` Address.
+   - `payload` = `counter_bytes` + `round_bytes` + `member_xdr`.
+3. Compute 256-bit SHA-256 hash over `payload`.
+4. Assert that `SHA256(payload) == receipt.receipt_hash`.
+
+If the hashes match, the receipt is confirmed to be authentic and generated directly by the Ahjoor ROSCA smart contract.
+
+---
+
+### Event Subscriptions
+
+Applications can listen for real-time receipt issuance by subscribing to Soroban RPC event streams for topic:
+
+```json
+{
+  "topics": ["contribution_receipt_minted", "<MEMBER_ADDRESS>"]
+}
+```
+
+Each event payload provides the `receipt_id`, `member`, `round`, `amount_contributed`, and `receipt_hash`.

@@ -86,7 +86,6 @@ fn test_contribution_receipt_data_structure() {
     let (_env, client, admin, token_admin, _token_client, _token_admin_client, members) =
         setup_with_members(3, 1000);
 
-    // Prior to round completion, receipt count is 0
     assert_eq!(client.get_contribution_receipt_count(), 0);
 
     client.init(
@@ -99,7 +98,6 @@ fn test_contribution_receipt_data_structure() {
         &None,
     );
 
-    // Initial counter is still 0 after init
     assert_eq!(client.get_contribution_receipt_count(), 0);
 }
 
@@ -121,16 +119,82 @@ fn test_contribution_receipts_minted_on_finalize_round() {
     let m0 = members.get(0).unwrap();
     let m1 = members.get(1).unwrap();
 
-    // 2 out of 3 members contribute
     client.contribute(&m0, &token_admin, &100);
     client.contribute(&m1, &token_admin, &100);
 
-    // Fast-forward past deadline
     env.ledger().set_timestamp(3601);
-
-    // Finalize round triggers receipt minting for paid members (m0 and m1)
     client.finalize_round();
 
-    // 2 receipts minted (IDs 0 and 1)
     assert_eq!(client.get_contribution_receipt_count(), 2);
+}
+
+#[test]
+fn test_get_contribution_receipt_and_lookup_by_member() {
+    let (env, client, admin, token_admin, _token_client, _token_admin_client, members) =
+        setup_with_members(3, 1000);
+
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin,
+        &3600,
+        &make_default_config(),
+        &None,
+    );
+
+    let m0 = members.get(0).unwrap();
+    let m1 = members.get(1).unwrap();
+    let m2 = members.get(2).unwrap();
+
+    client.contribute(&m0, &token_admin, &100);
+    client.contribute(&m1, &token_admin, &100);
+
+    env.ledger().set_timestamp(3601);
+    client.finalize_round();
+
+    assert_eq!(client.get_contribution_receipt_count(), 2);
+
+    let receipt0 = client.get_contribution_receipt(&0);
+    assert_eq!(receipt0.receipt_id, 0);
+    assert_eq!(receipt0.member, m0);
+    assert_eq!(receipt0.round, 0);
+    assert_eq!(receipt0.amount_contributed, 100);
+    assert_eq!(receipt0.token, token_admin);
+    assert_eq!(receipt0.minted_at, 3601);
+
+    let receipt1 = client.get_contribution_receipt(&1);
+    assert_eq!(receipt1.receipt_id, 1);
+    assert_eq!(receipt1.member, m1);
+
+    let m0_receipt_ids = client.get_member_receipt_ids(&m0);
+    let m1_receipt_ids = client.get_member_receipt_ids(&m1);
+    let m2_receipt_ids = client.get_member_receipt_ids(&m2);
+
+    assert_eq!(m0_receipt_ids.len(), 1);
+    assert_eq!(m0_receipt_ids.get(0).unwrap(), 0);
+
+    assert_eq!(m1_receipt_ids.len(), 1);
+    assert_eq!(m1_receipt_ids.get(0).unwrap(), 1);
+
+    assert_eq!(m2_receipt_ids.len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #116)")]
+fn test_get_contribution_receipt_not_found() {
+    let (_env, client, admin, token_admin, _token_client, _token_admin_client, members) =
+        setup_with_members(3, 1000);
+
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin,
+        &3600,
+        &make_default_config(),
+        &None,
+    );
+
+    client.get_contribution_receipt(&999);
 }
