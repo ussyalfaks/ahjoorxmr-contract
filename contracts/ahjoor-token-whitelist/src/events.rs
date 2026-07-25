@@ -68,6 +68,7 @@ pub struct TokenMetadataSet {
 
 #[contractevent]
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct TokenOracleUpdated {
     pub token: Address,
     pub old_oracle: Option<Address>,
@@ -78,6 +79,7 @@ pub fn emit_token_metadata_set(e: &Env, token: Address, symbol: soroban_sdk::Str
     TokenMetadataSet { token, symbol, decimals }.publish(e);
 }
 
+#[allow(dead_code)]
 pub fn emit_token_oracle_updated(e: &Env, token: Address, old_oracle: Option<Address>, new_oracle: Option<Address>) {
     TokenOracleUpdated { token, old_oracle, new_oracle }.publish(e);
 }
@@ -135,11 +137,15 @@ pub fn emit_token_suspension_lifted(e: &Env, token: Address, lifted_by: Address,
     TokenSuspensionLifted { token, lifted_by, ledger }.publish(e);
 }
 
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TokenAutoReinstated {
+    pub token: Address,
+    pub ledger: u32,
+}
+
 pub fn emit_token_auto_reinstated(e: &Env, token: Address, ledger: u32) {
-    e.events().publish(
-        (Symbol::new(e, "TokenAutoReinstated"),),
-        (token, ledger),
-    );
+    TokenAutoReinstated { token, ledger }.publish(e);
 }
 
 #[contractevent]

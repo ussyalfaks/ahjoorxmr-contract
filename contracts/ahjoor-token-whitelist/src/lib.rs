@@ -1,4 +1,6 @@
 #![no_std]
+#![allow(deprecated, unused_imports, unused_variables, dead_code, unused_mut)]
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Vec,
 };

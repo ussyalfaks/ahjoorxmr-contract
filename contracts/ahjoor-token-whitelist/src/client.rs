@@ -4,6 +4,7 @@ use crate::Error;
 use crate::TokenQuota;
 
 #[contractclient(name = "TokenWhitelistClient")]
+#[allow(dead_code)]
 pub trait TokenWhitelistInterface {
     fn is_token_allowed(env: Env, token: Address) -> bool;
 

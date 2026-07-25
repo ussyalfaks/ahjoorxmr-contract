@@ -1,4 +1,7 @@
 #![no_std]
+#![allow(deprecated, unused_imports, unused_variables, dead_code, unused_mut, unused_assignments)]
+
+
 use ahjoor_token_whitelist::TokenWhitelistClient;
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{

@@ -1,4 +1,6 @@
 #![no_std]
+#![allow(deprecated, unused_imports, unused_variables, dead_code, unused_mut)]
+
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN, Env, Map, String, Symbol, Vec};
 use ahjoor_token_whitelist::TokenWhitelistClient;
 
