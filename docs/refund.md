@@ -95,6 +95,69 @@ The refund contract tracks an **Abuse Score** per customer to prevent spam and d
 - **Decay over time:** The abuse score decays automatically as ledgers advance. By default, the score halves (`5000 bps` factor) every `10,000` ledgers. Both the decay period and the decay factor are configurable by the admin (`set_abuse_score_decay_params`).
 - **Manual Reset:** An admin can manually reset a customer's abuse score to zero using `reset_customer_abuse_score`.
 
+## Counter-Offer Negotiation
+
+When a customer requests a refund of a completed payment, the merchant may counter-offer a partial amount instead of the full requested refund. The contract supports a single round of negotiation.
+
+### How a customer requests a refund and a merchant counters
+
+1. **Customer requests a refund** — the customer calls `request_refund` with the full amount. The refund enters the `Requested` state.
+2. **Merchant counters** — the merchant calls `counter_offer_refund(refund_id, amount)` to propose a partial refund. The amount must be positive and must not exceed the original refund amount. A counter-offer timer starts (default: **48 hours**, configurable by admin via `set_counter_offer_expiry_seconds`). The refund moves to the `CounterOffered` state.
+3. **Customer responds** — before expiry, the customer must either accept or reject the counter-offer (see resolution paths below).
+
+### Number of negotiation rounds
+
+Only **one counter-offer** is permitted per refund. If the merchant attempts to submit a second counter-offer, the contract panics with `"Counter-offer already submitted for this refund"`.
+
+### Resolution paths
+
+| Action | Caller | Effect |
+|---|---|---|
+| **Accept** | Customer calls `accept_counter_offer(refund_id)` | The counter-offer amount is transferred to the customer. Refund status → `Processed`. |
+| **Reject** | Customer calls `reject_counter_offer(refund_id)` | The counter-offer is removed. Refund escalates to admin review. Status → `UnderAppeal`. |
+| **Expiry → escalate** | Anyone calls `check_counter_offer_expiry(refund_id)` after the deadline | The counter-offer is removed. Refund escalates to admin. Status → `UnderAppeal`. |
+| **Expiry → settle** | Anyone calls `settle_expired_counter_offer(refund_id)` after the deadline | Resolves according to the default resolution (admin-configurable via `set_counter_offer_resolution`): <br>• `true` (default): the **original** refund amount is paid out. Status → `Processed`.<br>• `false`: the refund is rejected. Status → `Rejected`. |
+
+### Admin configuration
+
+- **`set_counter_offer_expiry_seconds(admin, seconds)`** — sets the customer response window (must be positive).
+- **`set_counter_offer_resolution(admin, accept)`** — sets the default behaviour when a counter-offer expires without customer action.
+- **Default expiry:** 48 hours (172,800 seconds).
+- **Default resolution:** accept the original refund amount (`true`).
+
+### Events
+
+- `RefundCounterOffered { refund_id, merchant, counter_amount, expires_at }`
+- `RefundCounterAccepted { refund_id, customer, amount }`
+- `RefundCounterRejected { refund_id, customer }`
+- `CounterOfferExpired { refund_id, resolution, original_amount }`
+
+### Example (CLI)
+
+Merchant counters:
+
+```bash
+stellar contract invoke --id <REFUND_CONTRACT_ID> --network testnet -- counter_offer_refund --refund-id <ID> --amount 600
+```
+
+Customer accepts:
+
+```bash
+stellar contract invoke --id <REFUND_CONTRACT_ID> --network testnet -- accept_counter_offer --refund-id <ID>
+```
+
+Customer rejects:
+
+```bash
+stellar contract invoke --id <REFUND_CONTRACT_ID> --network testnet -- reject_counter_offer --refund-id <ID>
+```
+
+Anyone settles an expired counter-offer:
+
+```bash
+stellar contract invoke --id <REFUND_CONTRACT_ID> --network testnet -- settle_expired_counter_offer --refund-id <ID>
+```
+
 ## Notes for integrators
 
 - Originating contracts should set refund `owner` and `amount` precisely to avoid disputes.
