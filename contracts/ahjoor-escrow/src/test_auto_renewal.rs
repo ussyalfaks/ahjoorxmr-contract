@@ -349,7 +349,6 @@ fn test_get_renewal_history_ordered() {
 
 /// cancel_auto_renewal panics if caller is not the buyer.
 #[test]
-#[should_panic(expected = "Only buyer can cancel auto-renewal")]
 fn test_cancel_auto_renewal_non_buyer_panics() {
     let s = setup();
     let buyer = Address::generate(&s.env);
@@ -370,12 +369,12 @@ fn test_cancel_auto_renewal_non_buyer_panics() {
     );
 
     // Seller tries to cancel — should panic
-    s.client.cancel_auto_renewal(&seller, &escrow_id);
+    let __typed_err_result = s.client.try_cancel_auto_renewal(&seller, &escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowError::OnlyBuyerCanCancelAutoRenewal.into());
 }
 
 /// cancel_auto_renewal panics if no AutoRenewConfig is set.
 #[test]
-#[should_panic(expected = "No AutoRenewConfig set on this escrow")]
 fn test_cancel_auto_renewal_no_config_panics() {
     let s = setup();
     let buyer = Address::generate(&s.env);
@@ -388,8 +387,8 @@ fn test_cancel_auto_renewal_no_config_panics() {
         &buyer, &seller, &arbiter, &200, &s.token_addr, &deadline, &None,
         &Vec::new(&s.env), &false, &0u32,
     );
-
-    s.client.cancel_auto_renewal(&buyer, &escrow_id);
+    let __typed_err_result = s.client.try_cancel_auto_renewal(&buyer, &escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowError::NoAutoRenewConfigSetEscrow.into());
 }
 
 /// Max renewals cap: renewals_completed == max_renewals means no further renewal.

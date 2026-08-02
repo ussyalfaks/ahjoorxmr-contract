@@ -899,6 +899,29 @@ pub fn emit_refund_policy_updated(e: &Env, merchant: Address) {
     RefundPolicyUpdated { merchant }.publish(e);
 }
 
+/// Event: legacy (#274) reserve balance migrated into canonical (#334) reserve (#585)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantReserveMigrated {
+    pub merchant: Address,
+    pub migrated_amount: i128,
+    pub new_canonical_balance: i128,
+}
+
+pub fn emit_merchant_reserve_migrated(
+    e: &Env,
+    merchant: Address,
+    migrated_amount: i128,
+    new_canonical_balance: i128,
+) {
+    MerchantReserveMigrated {
+        merchant,
+        migrated_amount,
+        new_canonical_balance,
+    }
+    .publish(e);
+}
+
 pub fn emit_store_credit_redeemed(
     e: &Env,
     payment_id: u32,

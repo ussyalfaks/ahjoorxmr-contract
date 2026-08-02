@@ -50,6 +50,24 @@ pub struct PayoutOrderFinalized {
     pub payout_order: Vec<Address>,
 }
 
+/// Event: PayoutOrder compacted after a member exit (#389).
+///
+/// Emitted when `approve_exit` runs the compactor. `skipped_reason` is `0`
+/// when compaction ran, `1` when compaction was skipped because the exiting
+/// member's slot had already been paid out by an earlier round (in which
+/// case `old_len == new_len`), and `2` when the layout was left alone
+/// because the member was absent from `PayoutOrder` (defensive).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutOrderCompacted {
+    pub exited_member: Address,
+    pub slot_index: u32,
+    pub old_len: u32,
+    pub new_len: u32,
+    pub current_round: u32,
+    pub skipped_reason: u32,
+}
+
 /// Event: Member defaulted on a round
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -447,6 +465,26 @@ pub fn emit_closed(e: &Env, round: u32, defaulters: Vec<Address>) {
 
 pub fn emit_payout_order_finalized(e: &Env, round: u32, payout_order: Vec<Address>) {
     PayoutOrderFinalized { round, payout_order }.publish(e);
+}
+
+pub fn emit_payout_order_compacted(
+    e: &Env,
+    exited_member: Address,
+    slot_index: u32,
+    old_len: u32,
+    new_len: u32,
+    current_round: u32,
+    skipped_reason: u32,
+) {
+    PayoutOrderCompacted {
+        exited_member,
+        slot_index,
+        old_len,
+        new_len,
+        current_round,
+        skipped_reason,
+    }
+    .publish(e);
 }
 
 pub fn emit_defaulted(

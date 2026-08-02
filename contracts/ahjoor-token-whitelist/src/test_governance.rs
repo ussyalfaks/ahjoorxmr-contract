@@ -240,3 +240,93 @@ fn test_cannot_enact_before_delay() {
     // Enactment delay not elapsed yet
     client.enact_listing(&proposal_id);
 }
+
+// ─── #591: balance snapshot at first vote ────────────────────────────────────
+
+#[test]
+fn test_balance_change_after_vote_does_not_affect_recorded_weight() {
+    let (env, admin, client, gov_token) = setup_governance();
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    let new_token = Address::generate(&env);
+
+    mint_gov_tokens(&env, &gov_token, &admin, &proposer, 200);
+    mint_gov_tokens(&env, &gov_token, &admin, &voter, 600);
+
+    let rationale = BytesN::from_array(&env, &[9u8; 32]);
+    let proposal_id = client.propose_token_listing(&proposer, &new_token, &rationale);
+
+    // Voter casts a vote using their full balance at the time.
+    client.vote_listing(&voter, &proposal_id, &true, &600i128);
+
+    // Voter's balance changes after voting (e.g. they transfer tokens away).
+    // A flash-loan style balance manipulation must not affect the already
+    // recorded weight, since weight is fixed at first-vote time.
+    mint_gov_tokens(&env, &gov_token, &admin, &voter, 5_000);
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 101);
+    client.finalise_listing_proposal(&proposal_id);
+
+    let proposal = client.get_listing_proposal(&proposal_id);
+    // Recorded weight remains 600, not affected by the post-vote balance increase.
+    assert_eq!(proposal.approve_weight, 600);
+    assert_eq!(proposal.status, ProposalStatus::PendingEnactment);
+}
+
+#[test]
+#[should_panic(expected = "VoteWeightExceedsBalance")]
+fn test_vote_weight_capped_by_snapshot_not_live_balance_on_revote() {
+    let (env, admin, client, gov_token) = setup_governance();
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    let new_token = Address::generate(&env);
+
+    mint_gov_tokens(&env, &gov_token, &admin, &proposer, 200);
+    mint_gov_tokens(&env, &gov_token, &admin, &voter, 300);
+
+    let rationale = BytesN::from_array(&env, &[10u8; 32]);
+    let proposal_id = client.propose_token_listing(&proposer, &new_token, &rationale);
+
+    // First vote establishes the snapshot at balance 300.
+    client.vote_listing(&voter, &proposal_id, &true, &300i128);
+
+    // Balance later increases, but a re-vote weight above the snapshot must
+    // still be rejected — the snapshot, not the live balance, is the cap.
+    mint_gov_tokens(&env, &gov_token, &admin, &voter, 1_000);
+
+    client.vote_listing(&voter, &proposal_id, &true, &1_000i128);
+}
+
+#[test]
+fn test_vote_weight_uses_snapshot_not_live_balance() {
+    let (env, admin, client, gov_token) = setup_governance();
+
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+    let sink = Address::generate(&env);
+    let new_token = Address::generate(&env);
+
+    mint_gov_tokens(&env, &gov_token, &admin, &proposer, 200);
+    // Voter flash-acquires a large balance right before voting.
+    mint_gov_tokens(&env, &gov_token, &admin, &voter, 1_000);
+
+    let rationale = BytesN::from_array(&env, &[11u8; 32]);
+    let proposal_id = client.propose_token_listing(&proposer, &new_token, &rationale);
+
+    // Vote weight is snapshotted at first vote.
+    client.vote_listing(&voter, &proposal_id, &true, &1_000i128);
+
+    // Voter moves the tokens elsewhere before finalisation — the recorded
+    // weight must not be affected by this post-vote balance change.
+    soroban_sdk::token::Client::new(&env, &gov_token).transfer(&voter, &sink, &1_000i128);
+    assert_eq!(soroban_sdk::token::Client::new(&env, &gov_token).balance(&voter), 0);
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 101);
+    client.finalise_listing_proposal(&proposal_id);
+
+    let proposal = client.get_listing_proposal(&proposal_id);
+    assert_eq!(proposal.approve_weight, 1_000);
+    assert_eq!(proposal.status, ProposalStatus::PendingEnactment);
+}

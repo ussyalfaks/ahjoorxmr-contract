@@ -161,7 +161,7 @@ fn test_rosca_round_completes_payout_on_full_contribution() {
     );
 
     // Round history should record exactly one payout for round 0.
-    let history = t.rosca.get_round_history();
+    let history = t.rosca.get_round_history(&0u32, &0u32, &100u32);
     assert_eq!(history.len(), 1);
     let record = history.get(0).unwrap();
     assert_eq!(record.recipient, expected_recipient);
@@ -199,7 +199,7 @@ fn test_rosca_finalize_round_flags_defaulter_and_pays_partial_pot() {
     // finalize_round pays out before applying new suspensions, so round
     // history should still show a completed payout for round 0 even though
     // contributions were partial.
-    let history = t.rosca.get_round_history();
+    let history = t.rosca.get_round_history(&0u32, &0u32, &100u32);
     assert_eq!(history.len(), 1);
 
     let (round_after, _, _, _, _) = t.rosca.get_state();

@@ -8388,7 +8388,7 @@ impl AhjoorPaymentsContract {
     }
 
     /// Returns the loyalty points balance for a customer (after expiry check).
-    pub fn get_loyalty_balance(env: Env, customer: Address) -> i128 {
+    pub fn get_loyalty_points_balance(env: Env, customer: Address) -> i128 {
         Self::maybe_expire_points(&env, &customer);
         env.storage()
             .persistent()

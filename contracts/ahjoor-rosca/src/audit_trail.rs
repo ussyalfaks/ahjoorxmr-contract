@@ -1,5 +1,5 @@
-use crate::{events, ContributionEntry, CycleRecord, DataKey2};
-use soroban_sdk::{Address, Env, Map, Vec};
+use crate::{events, ContributionEntry, CycleRecord, DataKey2, DataKey5};
+use soroban_sdk::{Address, Env, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_000;
@@ -8,6 +8,10 @@ const TEMP_BUMP_AMOUNT: u32 = 15_000;
 
 /// Default retention window: keep 100 cycles in persistent storage
 const DEFAULT_RETENTION_WINDOW: u32 = 100;
+
+/// #544: maximum number of cycles `get_member_contribution_history` will scan
+/// in a single call, so cost stays bounded regardless of total group history.
+pub(crate) const MAX_CONTRIBUTION_HISTORY_RANGE: u32 = 100;
 
 /// Records a complete cycle audit trail atomically at round closure.
 /// This captures all significant events: contributions, payouts, defaults, skips, and penalties.
@@ -41,22 +45,20 @@ pub(crate) fn record_cycle_audit(
         cycle_end_timestamp,
     };
 
-    // Store in persistent storage
-    let mut cycle_records: Map<u32, CycleRecord> = env
-        .storage()
-        .persistent()
-        .get(&DataKey2::CycleRecords)
-        .unwrap_or(Map::new(env));
-
-    cycle_records.set(cycle_number, record);
+    // #544: store this cycle under its own key instead of a single blob Map
+    // shared by every cycle, so reads/writes cost O(1) regardless of how
+    // many cycles the group has completed.
+    let entry_key = DataKey5::CycleRecordEntry(cycle_number);
+    env.storage().persistent().set(&entry_key, &record);
     env.storage()
         .persistent()
-        .set(&DataKey2::CycleRecords, &cycle_records);
-    env.storage().persistent().extend_ttl(
-        &DataKey2::CycleRecords,
-        PERSISTENT_LIFETIME_THRESHOLD,
-        PERSISTENT_BUMP_AMOUNT,
-    );
+        .extend_ttl(&entry_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+    if !env.storage().persistent().has(&DataKey5::OldestPersistentCycle) {
+        env.storage()
+            .persistent()
+            .set(&DataKey5::OldestPersistentCycle, &cycle_number);
+    }
 
     events::emit_cycle_record_created(env, cycle_number, total_pool_amount, payout_recipient);
 
@@ -66,6 +68,10 @@ pub(crate) fn record_cycle_audit(
 
 /// Archives old cycle records to temporary storage based on retention window.
 /// Records older than the retention window are moved from persistent to temporary storage.
+///
+/// Walks forward from the last known oldest persistent cycle rather than
+/// scanning every persisted cycle, so cost stays bounded (amortized O(1) per
+/// call in the common case of the current cycle advancing by one each round).
 fn archive_old_records(env: &Env, current_cycle: u32) {
     let retention_window: u32 = env
         .storage()
@@ -79,107 +85,76 @@ fn archive_old_records(env: &Env, current_cycle: u32) {
 
     let archive_threshold = current_cycle - retention_window;
 
-    let mut cycle_records: Map<u32, CycleRecord> = env
+    let oldest: u32 = env
         .storage()
         .persistent()
-        .get(&DataKey2::CycleRecords)
-        .unwrap_or(Map::new(env));
+        .get(&DataKey5::OldestPersistentCycle)
+        .unwrap_or(0);
 
-    let mut archived_records: Map<u32, CycleRecord> = env
-        .storage()
-        .temporary()
-        .get(&DataKey2::ArchivedCycleRecords)
-        .unwrap_or(Map::new(env));
-
-    // Find records to archive
-    let mut cycles_to_archive = Vec::new(env);
-    for (cycle_num, _) in cycle_records.iter() {
-        if cycle_num < archive_threshold {
-            cycles_to_archive.push_back(cycle_num);
-        }
+    if oldest >= archive_threshold {
+        return;
     }
 
-    // Move records to temporary storage
-    for cycle_num in cycles_to_archive.iter() {
-        if let Some(record) = cycle_records.get(cycle_num) {
-            archived_records.set(cycle_num, record);
-            cycle_records.remove(cycle_num);
+    for cycle_num in oldest..archive_threshold {
+        let entry_key = DataKey5::CycleRecordEntry(cycle_num);
+        if let Some(record) = env.storage().persistent().get::<_, CycleRecord>(&entry_key) {
+            let archived_key = DataKey5::ArchivedCycleRecordEntry(cycle_num);
+            env.storage().temporary().set(&archived_key, &record);
+            env.storage()
+                .temporary()
+                .extend_ttl(&archived_key, TEMP_LIFETIME_THRESHOLD, TEMP_BUMP_AMOUNT);
+            env.storage().persistent().remove(&entry_key);
             events::emit_cycle_record_archived(env, cycle_num);
         }
     }
 
-    // Update storage
-    if !cycles_to_archive.is_empty() {
-        env.storage()
-            .persistent()
-            .set(&DataKey2::CycleRecords, &cycle_records);
-        env.storage()
-            .temporary()
-            .set(&DataKey2::ArchivedCycleRecords, &archived_records);
-        env.storage().temporary().extend_ttl(
-            &DataKey2::ArchivedCycleRecords,
-            TEMP_LIFETIME_THRESHOLD,
-            TEMP_BUMP_AMOUNT,
-        );
-    }
+    env.storage()
+        .persistent()
+        .set(&DataKey5::OldestPersistentCycle, &archive_threshold);
 }
 
 /// Retrieves a cycle record from either persistent or archived storage.
 pub(crate) fn get_cycle_record(env: &Env, cycle_number: u32) -> Option<CycleRecord> {
-    // First check persistent storage
-    let cycle_records: Map<u32, CycleRecord> = env
+    if let Some(record) = env
         .storage()
         .persistent()
-        .get(&DataKey2::CycleRecords)
-        .unwrap_or(Map::new(env));
-
-    if let Some(record) = cycle_records.get(cycle_number) {
+        .get::<_, CycleRecord>(&DataKey5::CycleRecordEntry(cycle_number))
+    {
         return Some(record);
     }
 
-    // Then check archived storage
-    let archived_records: Map<u32, CycleRecord> = env
-        .storage()
+    env.storage()
         .temporary()
-        .get(&DataKey2::ArchivedCycleRecords)
-        .unwrap_or(Map::new(env));
-
-    archived_records.get(cycle_number)
+        .get(&DataKey5::ArchivedCycleRecordEntry(cycle_number))
 }
 
-/// Returns all contribution entries for a specific member across all cycles.
+/// Returns the contribution entries for `member` within cycles
+/// `from_cycle..=to_cycle` (inclusive), checking persistent then archived
+/// storage for each cycle in the range.
+///
+/// #544: bounded by `MAX_CONTRIBUTION_HISTORY_RANGE` so a single call's cost
+/// is capped by the requested window rather than the group's total history —
+/// callers page through older history with successive calls.
 pub(crate) fn get_member_contribution_history(
     env: &Env,
     member: Address,
+    from_cycle: u32,
+    to_cycle: u32,
 ) -> Vec<ContributionEntry> {
-    let mut history = Vec::new(env);
-
-    // Check persistent storage
-    let cycle_records: Map<u32, CycleRecord> = env
-        .storage()
-        .persistent()
-        .get(&DataKey2::CycleRecords)
-        .unwrap_or(Map::new(env));
-
-    for (_, record) in cycle_records.iter() {
-        for contribution in record.contributions.iter() {
-            if contribution.member == member {
-                history.push_back(contribution);
-            }
-        }
+    if from_cycle > to_cycle {
+        panic!("from_cycle must not exceed to_cycle");
+    }
+    if to_cycle - from_cycle >= MAX_CONTRIBUTION_HISTORY_RANGE {
+        panic!("cycle range exceeds maximum allowed");
     }
 
-    // Check archived storage
-    let archived_records: Map<u32, CycleRecord> = env
-        .storage()
-        .temporary()
-        .get(&DataKey2::ArchivedCycleRecords)
-        .unwrap_or(Map::new(env));
-
-    for (_, record) in archived_records.iter() {
-        for contribution in record.contributions.iter() {
-            if contribution.member == member {
-                history.push_back(contribution);
+    let mut history = Vec::new(env);
+    for cycle_num in from_cycle..=to_cycle {
+        if let Some(record) = get_cycle_record(env, cycle_num) {
+            for contribution in record.contributions.iter() {
+                if contribution.member == member {
+                    history.push_back(contribution);
+                }
             }
         }
     }
@@ -217,11 +192,11 @@ pub(crate) fn get_retention_window(env: &Env) -> u32 {
 
 /// Records the start timestamp for a cycle.
 pub(crate) fn record_cycle_start(env: &Env, cycle_number: u32, timestamp: u64) {
-    let mut timestamps: Map<u32, u64> = env
+    let mut timestamps: soroban_sdk::Map<u32, u64> = env
         .storage()
         .instance()
         .get(&DataKey2::CycleStartTimestamps)
-        .unwrap_or(Map::new(env));
+        .unwrap_or(soroban_sdk::Map::new(env));
 
     timestamps.set(cycle_number, timestamp);
     env.storage()
@@ -231,11 +206,11 @@ pub(crate) fn record_cycle_start(env: &Env, cycle_number: u32, timestamp: u64) {
 
 /// Gets the start timestamp for a cycle.
 pub(crate) fn get_cycle_start_timestamp(env: &Env, cycle_number: u32) -> u64 {
-    let timestamps: Map<u32, u64> = env
+    let timestamps: soroban_sdk::Map<u32, u64> = env
         .storage()
         .instance()
         .get(&DataKey2::CycleStartTimestamps)
-        .unwrap_or(Map::new(env));
+        .unwrap_or(soroban_sdk::Map::new(env));
 
     timestamps.get(cycle_number).unwrap_or(0)
 }

@@ -452,3 +452,107 @@ fn test_suspended_token_denied_via_contract_path_without_contract_entry() {
     // No contract-level entry → falls back to global → suspended → denied
     assert!(!client.is_token_allowed_for_contract(&contract_id, &token));
 }
+
+// ─── Expired entry cleanup ────────────────────────────────────────────────────
+
+/// An expired, time-bounded entry can be permissionlessly removed, and the
+/// storage entry is actually gone afterwards (get returns None).
+#[test]
+fn test_cleanup_removes_expired_entry() {
+    let (env, admin, client) = setup();
+    let contract_id = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let expiry = env.ledger().sequence() + 5;
+    client.set_contract_token(&admin, &contract_id, &token, &Some(expiry));
+    advance_ledger(&env, 10);
+
+    // Anyone (no admin auth) can trigger cleanup once expired.
+    client.cleanup_expired_contract_token(&contract_id, &token);
+
+    assert_eq!(client.get_contract_token_entry(&contract_id, &token), None);
+}
+
+/// Cleanup on a not-yet-expired, time-bounded entry fails and leaves the
+/// entry untouched.
+#[test]
+#[should_panic(expected = "Entry has not expired yet")]
+fn test_cleanup_fails_on_active_entry() {
+    let (env, admin, client) = setup();
+    let contract_id = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let expiry = env.ledger().sequence() + 1000;
+    client.set_contract_token(&admin, &contract_id, &token, &Some(expiry));
+
+    client.cleanup_expired_contract_token(&contract_id, &token);
+}
+
+/// Cleanup on a permanent (None expiry) entry fails and leaves it untouched.
+#[test]
+#[should_panic(expected = "Entry is permanent and cannot be cleaned up")]
+fn test_cleanup_fails_on_permanent_entry() {
+    let (env, admin, client) = setup();
+    let contract_id = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.set_contract_token(&admin, &contract_id, &token, &None);
+
+    client.cleanup_expired_contract_token(&contract_id, &token);
+}
+
+/// Cleanup on a nonexistent entry fails.
+#[test]
+#[should_panic(expected = "No contract-level allowlist entry")]
+fn test_cleanup_fails_on_missing_entry() {
+    let (env, _admin, client) = setup();
+    let contract_id = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.cleanup_expired_contract_token(&contract_id, &token);
+}
+
+/// Cleaning up a mix of expired and active entries only removes the expired
+/// ones; active (and permanent) entries are left untouched.
+#[test]
+fn test_cleanup_mix_of_expired_and_active_entries() {
+    let (env, admin, client) = setup();
+    let contract_a = Address::generate(&env);
+    let contract_b = Address::generate(&env);
+    let contract_c = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let base = env.ledger().sequence();
+    // contract_a: will be expired
+    client.set_contract_token(&admin, &contract_a, &token, &Some(base + 5));
+    // contract_b: stays active
+    client.set_contract_token(&admin, &contract_b, &token, &Some(base + 1000));
+    // contract_c: permanent, never expires
+    client.set_contract_token(&admin, &contract_c, &token, &None);
+
+    advance_ledger(&env, 10);
+
+    // Only contract_a's entry is expired and cleanable.
+    client.cleanup_expired_contract_token(&contract_a, &token);
+    assert_eq!(client.get_contract_token_entry(&contract_a, &token), None);
+
+    // contract_b and contract_c entries are untouched.
+    assert_eq!(
+        client.get_contract_token_entry(&contract_b, &token),
+        Some(Some(base + 1000))
+    );
+    assert_eq!(
+        client.get_contract_token_entry(&contract_c, &token),
+        Some(None)
+    );
+
+    // Attempting cleanup on the still-active or permanent entries fails and
+    // does not remove them.
+    let result_b = client.try_cleanup_expired_contract_token(&contract_b, &token);
+    assert!(result_b.is_err());
+    let result_c = client.try_cleanup_expired_contract_token(&contract_c, &token);
+    assert!(result_c.is_err());
+
+    assert!(client.get_contract_token_entry(&contract_b, &token).is_some());
+    assert!(client.get_contract_token_entry(&contract_c, &token).is_some());
+}

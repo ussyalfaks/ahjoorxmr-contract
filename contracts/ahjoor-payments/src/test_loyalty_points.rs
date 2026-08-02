@@ -70,7 +70,7 @@ fn test_points_accrued_after_payment() {
     let payment_id = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
     client.complete_payment(&payment_id);
 
-    assert_eq!(client.get_loyalty_balance(&customer), 1);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 1);
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn test_full_redemption() {
     // Accrue 10 points via a 10_000_000 payment
     let payment_id = client.create_payment(&customer, &merchant, &10_000_000, &token_addr, &None, &None, &None);
     client.complete_payment(&payment_id);
-    assert_eq!(client.get_loyalty_balance(&customer), 10);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 10);
 
     // Create a new payment and redeem all 10 points
     // discount = 10 * 100 / 10_000 = 0.1 per unit → 10 * 100 bps = 1000 bps of... wait
@@ -96,12 +96,12 @@ fn test_full_redemption() {
     let pid = client2.create_payment(&customer2, &merchant2, &5_000_000, &token_addr2, &None, &None, &None);
     client2.complete_payment(&pid);
     // points = 5_000_000 * 1 / 1_000_000 = 5
-    assert_eq!(client2.get_loyalty_balance(&customer2), 5);
+    assert_eq!(client2.get_loyalty_points_balance(&customer2), 5);
 
     // New payment of 1_000_000; redeem 5 points → discount = 5 * 10_000 / 10_000 = 5 units
     let pid2 = client2.create_payment(&customer2, &merchant2, &1_000_000, &token_addr2, &None, &None, &None);
     client2.redeem_points(&customer2, &pid2, &5);
-    assert_eq!(client2.get_loyalty_balance(&customer2), 0);
+    assert_eq!(client2.get_loyalty_points_balance(&customer2), 0);
 }
 
 #[test]
@@ -112,12 +112,12 @@ fn test_partial_redemption() {
     // Accrue 10 points
     let pid = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
     client.complete_payment(&pid);
-    assert_eq!(client.get_loyalty_balance(&customer), 10);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 10);
 
     // Redeem only 3 points
     let pid2 = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
     client.redeem_points(&customer, &pid2, &3);
-    assert_eq!(client.get_loyalty_balance(&customer), 7);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 7);
 }
 
 #[test]
@@ -128,7 +128,7 @@ fn test_floor_enforcement() {
 
     let pid = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
     client.complete_payment(&pid);
-    let balance = client.get_loyalty_balance(&customer);
+    let balance = client.get_loyalty_points_balance(&customer);
     assert!(balance > 0);
 
     // Try to redeem all points — discount would push below floor
@@ -171,13 +171,13 @@ fn test_points_expiry() {
 
     let pid = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
     client.complete_payment(&pid);
-    assert_eq!(client.get_loyalty_balance(&customer), 1);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 1);
 
     // Advance ledger past expiry
     env.ledger().with_mut(|l| l.sequence_number += 200);
 
     // Balance should be 0 after expiry
-    assert_eq!(client.get_loyalty_balance(&customer), 0);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 0);
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn test_non_transferability() {
 
     let other = Address::generate(&env);
     // Other customer has no points
-    assert_eq!(client.get_loyalty_balance(&other), 0);
+    assert_eq!(client.get_loyalty_points_balance(&other), 0);
 
     // Other customer cannot redeem customer's points on customer's payment
     let pid2 = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
@@ -206,7 +206,7 @@ fn test_points_reversed_on_refund() {
     // Complete a payment to accrue points
     let pid_complete = client.create_payment(&customer, &merchant, &10_000_000, &token_addr, &None, &None, &None);
     client.complete_payment(&pid_complete);
-    assert_eq!(client.get_loyalty_balance(&customer), 10);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 10);
 
     // Full refund via dispute_resolve: dispute a new pending payment for the same amount
     let pid_dispute = client.create_payment(&customer, &merchant, &10_000_000, &token_addr, &None, &None, &None);
@@ -214,7 +214,7 @@ fn test_points_reversed_on_refund() {
     client.resolve_dispute(&pid_dispute, &false);
 
     // 10 points should be reversed (10_000_000 * 1 / 1_000_000 = 10)
-    assert_eq!(client.get_loyalty_balance(&customer), 0);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 0);
 }
 
 #[test]
@@ -226,7 +226,7 @@ fn test_partial_refund_proportional_reversal() {
     // Accrue 10 points
     let pid_complete = client.create_payment(&customer, &merchant, &10_000_000, &token_addr, &None, &None, &None);
     client.complete_payment(&pid_complete);
-    assert_eq!(client.get_loyalty_balance(&customer), 10);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 10);
 
     // Partial refund of 50% on a new disputed payment of the same amount
     let pid_refund = client.create_payment(&customer, &merchant, &10_000_000, &token_addr, &None, &None, &None);
@@ -234,11 +234,45 @@ fn test_partial_refund_proportional_reversal() {
     client.partial_refund(&pid_refund, &5_000_000); // 50% refund → reverse 5 points
 
     // Balance should be 10 - 5 = 5
-    assert_eq!(client.get_loyalty_balance(&customer), 5);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 5);
 
     // Second 50% refund → reverse remaining 5 points
     client.partial_refund(&pid_refund, &5_000_000);
-    assert_eq!(client.get_loyalty_balance(&customer), 0);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 0);
+}
+
+#[test]
+fn test_balance_zero_for_customer_with_no_activity() {
+    let (env, client, _admin, _merchant, _customer, _token_addr) = setup_loyalty_with_token();
+    let never_active = Address::generate(&env);
+    assert_eq!(client.get_loyalty_points_balance(&never_active), 0);
+}
+
+#[test]
+fn test_balance_reflects_earn_then_redeem_sequence() {
+    let (env, client, admin, merchant, customer, token_addr) = setup_loyalty_with_token();
+    // 1 point per 1_000_000 units, 10_000 bps (1 unit) per point, no floor
+    client.configure_loyalty(&admin, &1u32, &10_000u32, &0i128, &0u32);
+
+    // Earn 4 points
+    let pid1 = client.create_payment(&customer, &merchant, &4_000_000, &token_addr, &None, &None, &None);
+    client.complete_payment(&pid1);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 4);
+
+    // Earn 3 more points
+    let pid2 = client.create_payment(&customer, &merchant, &3_000_000, &token_addr, &None, &None, &None);
+    client.complete_payment(&pid2);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 7);
+
+    // Redeem 5 points
+    let pid3 = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
+    client.redeem_points(&customer, &pid3, &5);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 2);
+
+    // Earn 1 more point
+    let pid4 = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
+    client.complete_payment(&pid4);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 3);
 }
 
 #[test]
@@ -249,12 +283,12 @@ fn test_points_balance_never_below_zero() {
     // Accrue only 1 point from a small payment
     let pid = client.create_payment(&customer, &merchant, &1_000_000, &token_addr, &None, &None, &None);
     client.complete_payment(&pid);
-    assert_eq!(client.get_loyalty_balance(&customer), 1);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 1);
 
     // Dispute and refund a much larger amount — reverse must clamp to 0
     let pid_big = client.create_payment(&customer, &merchant, &100_000_000, &token_addr, &None, &None, &None);
     client.dispute_payment(&customer, &pid_big, &soroban_sdk::String::from_str(&env, "overcharge"));
     client.resolve_dispute(&pid_big, &false);
 
-    assert_eq!(client.get_loyalty_balance(&customer), 0);
+    assert_eq!(client.get_loyalty_points_balance(&customer), 0);
 }

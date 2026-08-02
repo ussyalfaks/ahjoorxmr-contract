@@ -169,7 +169,7 @@ savings-goal tracking feature of the ROSCA contract.
 
 ## ahjoor-escrow
 
-### `EscrowError` (codes 1-3)
+### `EscrowError` (codes 1-50)
 
 Defined in `contracts/ahjoor-escrow/src/lib.rs`.
 
@@ -178,6 +178,283 @@ Defined in `contracts/ahjoor-escrow/src/lib.rs`.
 | 1 | InvalidDeadline | ahjoor-escrow | The supplied deadline is invalid (e.g. in the past or out of range). |
 | 2 | InvalidTrancheIndex | ahjoor-escrow | Tranche index is out of range for the escrow. |
 | 3 | TrancheAlreadyClaimed | ahjoor-escrow | Tranche has already been claimed by the beneficiary. |
+| 4 | AlreadyInitialized | ahjoor-escrow | Already initialized. |
+| 5 | AtLeastOneBuyerIsRequired | ahjoor-escrow | At least one buyer is required. |
+| 6 | DeadlineMustBeFuture | ahjoor-escrow | Deadline must be in the future. |
+| 7 | BuyerContributionMustBePositive | ahjoor-escrow | Buyer contribution must be positive. |
+| 8 | DuplicateBuyerInList | ahjoor-escrow | Duplicate buyer in buyer list. |
+| 9 | BatchMustContainAtLeastOneEscrowConfig | ahjoor-escrow | Batch must contain at least one escrow config. |
+| 10 | BatchSizeExceedsMaximum10Escrows | ahjoor-escrow | Batch size exceeds maximum of 10 escrows. |
+| 11 | OnlySellerCanMarkComplete | ahjoor-escrow | Only seller can mark complete. |
+| 12 | EscrowIsNotActive | ahjoor-escrow | Escrow is not active. |
+| 13 | NoInspectorSetUseReleaseEscrowDirectly | ahjoor-escrow | No inspector set; use release_escrow directly. |
+| 14 | EscrowIsNotAwaitingInspection | ahjoor-escrow | Escrow is not awaiting inspection. |
+| 15 | OnlyAssignedInspectorCanSubmitReport | ahjoor-escrow | Only the assigned inspector can submit a report. |
+| 16 | OnlyBuyerOrSellerCanProposeInspectorReplacement | ahjoor-escrow | Only buyer or seller can propose inspector replacement. |
+| 17 | NoInspectorSetEscrow | ahjoor-escrow | No inspector set on this escrow. |
+| 18 | OnlyAdminCanSetInspectorScoreThreshold | ahjoor-escrow | Only admin can set inspector score threshold. |
+| 19 | MinScoreBpsExceedsMaximum | ahjoor-escrow | Min_score_bps must be <= 10000. |
+| 20 | OnlyAdminCanAppealInspectorRuling | ahjoor-escrow | Only admin can appeal inspector ruling. |
+| 21 | InspectorRulingAlreadyAppealedEscrow | ahjoor-escrow | Inspector ruling already appealed for this escrow. |
+| 22 | InspectorScoreBelowMinimumThresholdHighValueEscrow | ahjoor-escrow | Inspector score below minimum threshold for high-value escrow. |
+| 23 | EscrowAmountMustBePositive | ahjoor-escrow | Escrow amount must be positive. |
+| 24 | DeadlineMustBeAfterMinLockUntil | ahjoor-escrow | Deadline must be after min_lock_until. |
+| 25 | ArbiterFeeExceedsMaximum1000Bps | ahjoor-escrow | Arbiter fee exceeds maximum of 1000 bps. |
+| 26 | IncompleteReleaseCondition | ahjoor-escrow | Incomplete release condition. |
+| 27 | ReleaseConditionThresholdMustBePositive | ahjoor-escrow | Release condition threshold must be positive. |
+| 28 | InvalidReleaseComparison | ahjoor-escrow | Invalid release comparison. |
+| 29 | Maximum5SellersAllowed | ahjoor-escrow | Maximum 5 sellers allowed. |
+| 30 | SellerAllocationsMustSumTo10000Bps | ahjoor-escrow | Seller allocations must sum to 10000 bps. |
+| 31 | DisputeTimeoutSecondsMustBePositive | ahjoor-escrow | Dispute_timeout_seconds must be positive. |
+| 32 | OnlyCurrentHolderCanTransferReceipt | ahjoor-escrow | Only current holder can transfer receipt. |
+| 33 | ActiveMilestoneInProgress | ahjoor-escrow | Active milestone in progress. |
+| 34 | InspectionPending | ahjoor-escrow | InspectionPending: inspector must submit report before release. |
+| 35 | OnlyListedBuyerCanApproveMultiBuyerRelease | ahjoor-escrow | Only a listed buyer can approve multi-buyer release. |
+| 36 | BuyerHasAlreadyApprovedRelease | ahjoor-escrow | Buyer has already approved release. |
+| 37 | OnlyBuyerOrArbiterCanReleaseEscrow | ahjoor-escrow | Only buyer or arbiter can release escrow. |
+| 38 | SellerVetoActive | ahjoor-escrow | SellerVetoActive: admin must override_seller_veto before release. |
+| 39 | SellerVetoActive2 | ahjoor-escrow | SellerVetoActive: seller has blocked fund release. |
+| 40 | ConditionNotMet | ahjoor-escrow | Condition not met. |
+| 41 | OnlyBuyerOrSellerCanWaiveCondition | ahjoor-escrow | Only buyer or seller can waive condition. |
+| 42 | NoConditionalReleaseSetEscrow | ahjoor-escrow | No conditional release set for this escrow. |
+| 43 | OnlyBuyerOrSellerCanSubmitEvidence | ahjoor-escrow | Only buyer or seller can submit evidence. |
+| 44 | MaximumEvidenceEntriesReachedParty | ahjoor-escrow | Maximum evidence entries reached for this party. |
+| 45 | OnlyBuyerCanSetRenewalAllowance | ahjoor-escrow | Only buyer can set renewal allowance. |
+| 46 | AutoRenewIsNotEnabledEscrow | ahjoor-escrow | Auto-renew is not enabled for this escrow. |
+| 47 | OnlyBuyerCanCancelAutoRenew | ahjoor-escrow | Only buyer can cancel auto-renew. |
+| 48 | OnlyBuyerCanCancelAutoRenewal | ahjoor-escrow | Only buyer can cancel auto-renewal. |
+| 49 | NoAutoRenewConfigSetEscrow | ahjoor-escrow | No AutoRenewConfig set on this escrow. |
+| 50 | ReleaseAmountMustBePositive | ahjoor-escrow | Release amount must be positive. |
+
+### `EscrowErrorExt` (codes 1-50)
+
+Defined in `contracts/ahjoor-escrow/src/lib.rs`. Split from `EscrowError` because
+`#[contracterror]` is bounded by the Soroban XDR 50-case limit.
+
+| Code | Name | Contract | Description |
+| ---- | ---- | -------- | ----------- |
+| 1 | ReleaseAmountExceedsEscrowBalance | ahjoor-escrow | Release amount exceeds escrow balance. |
+| 2 | AtLeastOneMilestoneRequired | ahjoor-escrow | At least one milestone required. |
+| 3 | TooManyMilestones | ahjoor-escrow | Too many milestones. |
+| 4 | MilestoneAmountMustBePositive | ahjoor-escrow | Milestone amount must be positive. |
+| 5 | NewMilestonesMustStartAsPending | ahjoor-escrow | New milestones must start as Pending. |
+| 6 | EscrowAlreadyTerminal | ahjoor-escrow | Escrow already terminal. |
+| 7 | OnlyBuyerOrArbiterCanApproveMilestones | ahjoor-escrow | Only buyer or arbiter can approve milestones. |
+| 8 | MilestoneIndexOutRange | ahjoor-escrow | Milestone index out of range. |
+| 9 | MilestoneNotPending | ahjoor-escrow | Milestone not pending. |
+| 10 | OnlyBuyerOrSellerCanDisputeEscrow | ahjoor-escrow | Only buyer or seller can dispute escrow. |
+| 11 | DisputeAmountOutOfRange | ahjoor-escrow | Dispute_amount must be > 0 and <= escrow amount. |
+| 12 | BuyerPercentMustBeBetween0And100 | ahjoor-escrow | Buyer_percent must be between 0 and 100. |
+| 13 | EscrowIsNotDisputed | ahjoor-escrow | Escrow is not disputed. |
+| 14 | OnlyArbiterCanResolveDispute | ahjoor-escrow | Only arbiter can resolve dispute. |
+| 15 | EscrowIsNotCoolingOffState | ahjoor-escrow | Escrow is not in cooling-off state. |
+| 16 | OnlyBuyerOrSellerCanFlagResolutionError | ahjoor-escrow | Only buyer or seller can flag a resolution error. |
+| 17 | CoolingOffWindowHasExpired | ahjoor-escrow | Cooling-off window has expired. |
+| 18 | ResolutionAlreadyFlagged | ahjoor-escrow | Resolution already flagged. |
+| 19 | CoolingOffWindowHasNotElapsed | ahjoor-escrow | Cooling-off window has not elapsed. |
+| 20 | ResolutionIsFlaggedAdminMustReviewBeforeFinalization | ahjoor-escrow | Resolution is flagged; admin must review before finalization. |
+| 21 | OnlyAdminCanClearResolutionFlags | ahjoor-escrow | Only admin can clear resolution flags. |
+| 22 | NoFlagToClear | ahjoor-escrow | No flag to clear. |
+| 23 | OnlyAdminCanConfigureCoolingOffPeriod | ahjoor-escrow | Only admin can configure cooling-off period. |
+| 24 | FeeConfigurationExceedsEscrowAmount | ahjoor-escrow | Fee configuration exceeds escrow amount. |
+| 25 | TimeoutMustBePositive | ahjoor-escrow | Timeout must be positive. |
+| 26 | MultiplierMustBePositive | ahjoor-escrow | Multiplier must be positive. |
+| 27 | DeadlineMustBePositive | ahjoor-escrow | Deadline must be positive. |
+| 28 | DisputeAlreadyResolved | ahjoor-escrow | Dispute already resolved. |
+| 29 | DisputeTimeoutDeadlineHasNotPassedYet | ahjoor-escrow | Dispute timeout deadline has not passed yet. |
+| 30 | MaxOracleAgeMustBePositive | ahjoor-escrow | Max_oracle_age must be positive. |
+| 31 | InsuranceTriggerDaysMustBePositive | ahjoor-escrow | Insurance_trigger_days must be positive. |
+| 32 | InsuranceContributionMustBePositive | ahjoor-escrow | Insurance contribution must be positive. |
+| 33 | OnlyBuyerOrSellerCanClaimInsurance | ahjoor-escrow | Only buyer or seller can claim insurance. |
+| 34 | InsuranceAlreadyClaimed | ahjoor-escrow | Insurance already claimed. |
+| 35 | AdminConfirmationRequired | ahjoor-escrow | Admin confirmation required. |
+| 36 | InsuranceTriggerPeriodNotReached | ahjoor-escrow | Insurance trigger period not reached. |
+| 37 | EscrowTokenNotCoveredByInsurancePool | ahjoor-escrow | Escrow token not covered by insurance pool. |
+| 38 | InsurancePoolHasInsufficientBalance | ahjoor-escrow | Insurance pool has insufficient balance. |
+| 39 | FeeExceedsMaximum200Bps | ahjoor-escrow | Fee exceeds maximum of 200 bps. |
+| 40 | WithdrawalAmountMustBePositive | ahjoor-escrow | Withdrawal amount must be positive. |
+| 41 | InsufficientAccruedFees | ahjoor-escrow | Insufficient accrued fees. |
+| 42 | ReleaseConditionNotMet | ahjoor-escrow | Release condition not met. |
+| 43 | EscrowHasNotExpiredYet | ahjoor-escrow | Escrow has not expired yet. |
+| 44 | OnlyBuyerOrSellerCanProposeDeadlineExtension | ahjoor-escrow | Only buyer or seller can propose deadline extension. |
+| 45 | CannotExtendDeadlineWhileEscrowIsDisputed | ahjoor-escrow | Cannot extend deadline while escrow is disputed. |
+| 46 | NewDeadlineMustBeGreaterThanCurrentDeadline | ahjoor-escrow | New deadline must be greater than current deadline. |
+| 47 | OnlyBuyerOrSellerCanAcceptDeadlineExtension | ahjoor-escrow | Only buyer or seller can accept deadline extension. |
+| 48 | ProposerCannotAcceptTheirOwnDeadlineExtension | ahjoor-escrow | Proposer cannot accept their own deadline extension. |
+| 49 | DeadlineExtensionProposalHasExpired | ahjoor-escrow | Deadline extension proposal has expired. |
+| 50 | OnlyBuyerOrSellerCanProposeAmendment | ahjoor-escrow | Only buyer or seller can propose amendment. |
+
+### `EscrowErrorExt2` (codes 1-50)
+
+Defined in `contracts/ahjoor-escrow/src/lib.rs`. Split from `EscrowError` because
+`#[contracterror]` is bounded by the Soroban XDR 50-case limit.
+
+| Code | Name | Contract | Description |
+| ---- | ---- | -------- | ----------- |
+| 1 | CannotAmendTerminalEscrow | ahjoor-escrow | Cannot amend terminal escrow. |
+| 2 | NewAmountMustBePositive | ahjoor-escrow | New amount must be positive. |
+| 3 | OnlyBuyerOrSellerCanSignAmendment | ahjoor-escrow | Only buyer or seller can sign amendment. |
+| 4 | AmendmentNonceMismatch | ahjoor-escrow | Amendment nonce mismatch. |
+| 5 | AmendmentProposalHasExpired | ahjoor-escrow | Amendment proposal has expired. |
+| 6 | AmendmentRequiresBuyerAndSellerSignatures | ahjoor-escrow | Amendment requires buyer and seller signatures. |
+| 7 | OnlyBuyerCanTopUpEscrow | ahjoor-escrow | Only buyer can top up escrow. |
+| 8 | EscrowIsNotActiveOrAwaitingInspection | ahjoor-escrow | Escrow is not active or awaiting inspection. |
+| 9 | AdditionalAmountMustBePositive | ahjoor-escrow | Additional amount must be positive. |
+| 10 | TopUpLimitExceeded | ahjoor-escrow | Top-up limit exceeded. |
+| 11 | OnlySellerCanAcknowledgeTopUp | ahjoor-escrow | Only seller can acknowledge top-up. |
+| 12 | OnlySellerCanRequestPartialRelease | ahjoor-escrow | Only seller can request partial release. |
+| 13 | PartialReleaseOnlyAllowedActiveEscrow | ahjoor-escrow | Partial release only allowed on active escrow. |
+| 14 | PartialReleaseAmountMustBePositive | ahjoor-escrow | Partial release amount must be positive. |
+| 15 | PartialReleaseAmountCannotExceedEscrowAmount | ahjoor-escrow | Partial release amount cannot exceed escrow amount. |
+| 16 | RequestAlreadyPending | ahjoor-escrow | Request already pending. |
+| 17 | OnlyBuyerCanApprovePartialRelease | ahjoor-escrow | Only buyer can approve partial release. |
+| 18 | InvalidRequestID | ahjoor-escrow | Invalid request ID. |
+| 19 | DelegateMustBeDifferentFromSeller | ahjoor-escrow | Delegate must be different from seller. |
+| 20 | SellerNotPartOfEscrow | ahjoor-escrow | Seller is not part of this escrow. |
+| 21 | CanOnlyDelegateBeforeEscrowIsReleased | ahjoor-escrow | Can only delegate before escrow is released. |
+| 22 | OnlyBuyerCanRejectPartialRelease | ahjoor-escrow | Only buyer can reject partial release. |
+| 23 | OnlySellerCanEscalatePartialRelease | ahjoor-escrow | Only seller can escalate partial release. |
+| 24 | ResponseDeadlineNotYetPassed | ahjoor-escrow | Response deadline not yet passed. |
+| 25 | NewBuyerMustBeDifferentFromCurrentBuyer | ahjoor-escrow | New buyer must be different from current buyer. |
+| 26 | BuyerTransferOnlyAllowedActiveEscrows | ahjoor-escrow | Buyer transfer only allowed for active escrows. |
+| 27 | OnlyCurrentBuyerCanTransferBuyerRole | ahjoor-escrow | Only current buyer can transfer buyer role. |
+| 28 | OnlyBuyerOrSellerCanUpdateMetadata | ahjoor-escrow | Only buyer or seller can update metadata. |
+| 29 | OnlyAdminCanUpgradeContract | ahjoor-escrow | Only admin can upgrade contract. |
+| 30 | OnlyAdminCanMigrateContract | ahjoor-escrow | Only admin can migrate contract. |
+| 31 | MigrationAlreadyCompletedVersion | ahjoor-escrow | Migration already completed for this version. |
+| 32 | UnlockAtMustBeFuture | ahjoor-escrow | Unlock_at must be in the future. |
+| 33 | AlreadyClaimed | ahjoor-escrow | Already claimed. |
+| 34 | OnlyBeneficiaryCanClaim | ahjoor-escrow | Only beneficiary can claim. |
+| 35 | UnlockTimeHasNotPassed | ahjoor-escrow | Unlock time has not passed. |
+| 36 | EscrowNotActive | ahjoor-escrow | Escrow not active. |
+| 37 | PastUnlockTimeUseClaimTimelocked | ahjoor-escrow | Past unlock time; use claim_timelocked. |
+| 38 | OnlyBuyerCanCancel | ahjoor-escrow | Only buyer can cancel. |
+| 39 | DisputeActive | ahjoor-escrow | Dispute active. |
+| 40 | OnlyAdminCanSetTokenWhitelistContract | ahjoor-escrow | Only admin can set token whitelist contract. |
+| 41 | ContractAlreadyPaused | ahjoor-escrow | Contract already paused. |
+| 42 | ContractIsNotPaused | ahjoor-escrow | Contract is not paused. |
+| 43 | TokenNotAllowed | ahjoor-escrow | Token not allowed. |
+| 44 | DeadlineDurationMustBePositive | ahjoor-escrow | Deadline_duration must be positive. |
+| 45 | TemplateIsDeactivated | ahjoor-escrow | Template is deactivated. |
+| 46 | ArbiterAlreadyPool | ahjoor-escrow | Arbiter already in pool. |
+| 47 | ArbiterNotPool | ahjoor-escrow | Arbiter not in pool. |
+| 48 | ArbiterPoolIsEmpty | ahjoor-escrow | Arbiter pool is empty. |
+| 49 | OnlyTemplateCreatorCanUpdate | ahjoor-escrow | Only template creator can update. |
+| 50 | OnlyTemplateCreatorCanDeactivate | ahjoor-escrow | Only template creator can deactivate. |
+
+### `EscrowErrorExt3` (codes 1-50)
+
+Defined in `contracts/ahjoor-escrow/src/lib.rs`. Split from `EscrowError` because
+`#[contracterror]` is bounded by the Soroban XDR 50-case limit.
+
+| Code | Name | Contract | Description |
+| ---- | ---- | -------- | ----------- |
+| 1 | TemplateAlreadyDeactivated | ahjoor-escrow | Template already deactivated. |
+| 2 | InactivityReleaseIsNotEnabledEscrow | ahjoor-escrow | Inactivity release is not enabled for this escrow. |
+| 3 | OnlyEscrowSellerCanClaimInactivityRelease | ahjoor-escrow | Only the escrow seller can claim inactivity release. |
+| 4 | BuyerInactivityWindowHasNotElapsed | ahjoor-escrow | Buyer inactivity window has not elapsed. |
+| 5 | PenaltyCannotExceed10000Bps | ahjoor-escrow | Penalty cannot exceed 10000 bps. |
+| 6 | ResponseWindowMustBePositive | ahjoor-escrow | Response window must be positive. |
+| 7 | OnlyBuyerOrSellerCanRequestCancellation | ahjoor-escrow | Only buyer or seller can request cancellation. |
+| 8 | NoPendingCancellationEscrow | ahjoor-escrow | No pending cancellation for this escrow. |
+| 9 | InitiatorCannotAcceptTheirOwnCancellationRequest | ahjoor-escrow | Initiator cannot accept their own cancellation request. |
+| 10 | OnlyBuyerOrSellerCanAcceptCancellation | ahjoor-escrow | Only buyer or seller can accept cancellation. |
+| 11 | InitiatorCannotRejectTheirOwnCancellationRequest | ahjoor-escrow | Initiator cannot reject their own cancellation request. |
+| 12 | OnlyBuyerOrSellerCanRejectCancellation | ahjoor-escrow | Only buyer or seller can reject cancellation. |
+| 13 | ResponseWindowHasNotElapsed | ahjoor-escrow | Response window has not elapsed. |
+| 14 | BountyAmountMustBePositive | ahjoor-escrow | Bounty amount must be positive. |
+| 15 | ClaimDeadlineMustBeFuture | ahjoor-escrow | Claim deadline must be in the future. |
+| 16 | SubmissionDeadlineMustBeAfterClaimDeadline | ahjoor-escrow | Submission deadline must be after claim deadline. |
+| 17 | TokenNotWhitelisted | ahjoor-escrow | Token not whitelisted. |
+| 18 | BountyIsNotAvailableClaiming | ahjoor-escrow | Bounty is not available for claiming. |
+| 19 | ClaimDeadlineHasPassed | ahjoor-escrow | Claim deadline has passed. |
+| 20 | BountyIsNotClaimedStatus | ahjoor-escrow | Bounty is not in claimed status. |
+| 21 | OnlyAssignedSolverCanSubmitWork | ahjoor-escrow | Only the assigned solver can submit work. |
+| 22 | SubmissionDeadlineHasPassed | ahjoor-escrow | Submission deadline has passed. |
+| 23 | OnlyBuyerCanApproveSubmission | ahjoor-escrow | Only buyer can approve submission. |
+| 24 | NoSubmissionHasBeenMade | ahjoor-escrow | No submission has been made. |
+| 25 | OnlyBuyerCanRejectSubmission | ahjoor-escrow | Only buyer can reject submission. |
+| 26 | MaximumRejectionRoundsReached | ahjoor-escrow | Maximum rejection rounds reached. |
+| 27 | OnlyBuyerCanCancelBounty | ahjoor-escrow | Only buyer can cancel bounty. |
+| 28 | CannotCancelBountyCurrentState | ahjoor-escrow | Cannot cancel bounty in current state. |
+| 29 | OnlyAdminCanSetMaxBountyRejectionRounds | ahjoor-escrow | Only admin can set max bounty rejection rounds. |
+| 30 | BountyMustHaveAtLeastOneMilestone | ahjoor-escrow | Bounty must have at least one milestone. |
+| 31 | BountyMustBeClaimedBeforeSubmittingMilestones | ahjoor-escrow | Bounty must be claimed before submitting milestones. |
+| 32 | OnlySolverCanSubmitMilestones | ahjoor-escrow | Only the solver can submit milestones. |
+| 33 | MilestoneIndexOutBounds | ahjoor-escrow | Milestone index out of bounds. |
+| 34 | PreviousMilestoneNotYetVerified | ahjoor-escrow | Previous milestone not yet verified. |
+| 35 | MilestoneIsNotAwaitingSubmission | ahjoor-escrow | Milestone is not awaiting submission. |
+| 36 | MilestoneIsNotAwaitingVerification | ahjoor-escrow | Milestone is not awaiting verification. |
+| 37 | OnlyBountyCreatorCanReplaceVerifier | ahjoor-escrow | Only the bounty creator can replace a verifier. |
+| 38 | VerifierCanOnlyBeReplacedBeforeMilestoneIsSubmitted | ahjoor-escrow | Verifier can only be replaced before the milestone is submitted. |
+| 39 | OnlyBuyerCanConfigureCollateralHealth | ahjoor-escrow | Only buyer can configure collateral health. |
+| 40 | MinCollateralRatioBpsOutOfRange | ahjoor-escrow | Min_collateral_ratio_bps must be 1-10000. |
+| 41 | TopUpAmountMustBePositive | ahjoor-escrow | Top-up amount must be positive. |
+| 42 | EscrowIsNotActiveOrUnderCollateralized | ahjoor-escrow | Escrow is not active or under-collateralized. |
+| 43 | OnlyBuyerCanConfigureMultiPartyApproval | ahjoor-escrow | Only buyer can configure multi-party approval. |
+| 44 | ApproversCountMustBeBetween2And10 | ahjoor-escrow | Approvers count must be between 2 and 10. |
+| 45 | ThresholdMustBeBetween1AndApproversCount | ahjoor-escrow | Threshold must be between 1 and approvers count. |
+| 46 | CannotReconfigureApprovalsAlreadyProgress | ahjoor-escrow | Cannot reconfigure: approvals already in progress. |
+| 47 | CallerIsNotAuthorizedApproverEscrow | ahjoor-escrow | Caller is not an authorized approver for this escrow. |
+| 48 | ApproverHasAlreadyApprovedEscrow | ahjoor-escrow | Approver has already approved this escrow. |
+| 49 | ReleaseScheduleMustContainAtLeastOneTranche | ahjoor-escrow | Release schedule must contain at least one tranche. |
+| 50 | EachTrancheAmountMustBePositive | ahjoor-escrow | Each tranche amount must be positive. |
+
+### `EscrowErrorExt4` (codes 1-48)
+
+Defined in `contracts/ahjoor-escrow/src/lib.rs`. Split from `EscrowError` because
+`#[contracterror]` is bounded by the Soroban XDR 50-case limit.
+
+| Code | Name | Contract | Description |
+| ---- | ---- | -------- | ----------- |
+| 1 | EachTrancheUnlockAtMustBeFuture | ahjoor-escrow | Each tranche unlock_at must be in the future. |
+| 2 | OnlyBeneficiarySellerCanClaimScheduledReleases | ahjoor-escrow | Only the beneficiary (seller) can claim scheduled releases. |
+| 3 | EscrowIsNotClaimableState | ahjoor-escrow | Escrow is not in a claimable state. |
+| 4 | NoTranchesAreCurrentlyClaimable | ahjoor-escrow | No tranches are currently claimable. |
+| 5 | ContractIsPaused | ahjoor-escrow | Contract is paused. |
+| 6 | OnlyAdminCanPauseContract | ahjoor-escrow | Only admin can pause contract. |
+| 7 | OnlyAdminCanResumeContract | ahjoor-escrow | Only admin can resume contract. |
+| 8 | EscrowStillLocked | ahjoor-escrow | Escrow still locked. |
+| 9 | OraclePriceIsStale | ahjoor-escrow | Oracle price is stale. |
+| 10 | InvalidOraclePrice | ahjoor-escrow | Invalid oracle price. |
+| 11 | InsufficientRenewalAllowance | ahjoor-escrow | Insufficient renewal allowance. |
+| 12 | EscrowRenewalDurationMustBePositive | ahjoor-escrow | Escrow renewal duration must be positive. |
+| 13 | OnlyAdminCanSetMaxTopUpBps | ahjoor-escrow | Only admin can set max top-up bps. |
+| 14 | CollateralForfeitBpsCannotExceed10000 | ahjoor-escrow | Collateral_forfeit_bps cannot exceed 10000. |
+| 15 | AtLeastOneSellerRequired | ahjoor-escrow | At least one seller required. |
+| 16 | OnlySellerCanDepositCollateral | ahjoor-escrow | Only seller can deposit collateral. |
+| 17 | EscrowIsNotAwaitingCollateral | ahjoor-escrow | Escrow is not awaiting collateral. |
+| 18 | CollateralDepositWindowHasExpired | ahjoor-escrow | Collateral deposit window has expired. |
+| 19 | RatingMustBeBetween1And5 | ahjoor-escrow | Rating must be between 1 and 5. |
+| 20 | RatingOnlyAllowedAfterEscrowIsReleasedOrResolved | ahjoor-escrow | Rating only allowed after escrow is Released or Resolved. |
+| 21 | OnlyBuyerOrSellerCanSubmitRating | ahjoor-escrow | Only buyer or seller can submit a rating. |
+| 22 | RatingAlreadySubmittedEscrow | ahjoor-escrow | Rating already submitted for this escrow. |
+| 23 | OnlySellerCanSubmitDeliveryProof | ahjoor-escrow | Only seller can submit delivery proof. |
+| 24 | ProofSubmissionLockedEscrowIsUnderDispute | ahjoor-escrow | Proof submission locked: escrow is under dispute. |
+| 25 | InvalidDeliveryProof | ahjoor-escrow | Invalid delivery proof. |
+| 26 | OnlyEscrowSellerCanRaiseVeto | ahjoor-escrow | Only the escrow seller can raise a veto. |
+| 27 | VetoCooldownActive | ahjoor-escrow | VetoCooldownActive: seller must wait for cooldown before raising another veto. |
+| 28 | OnlyBuyerCanApprove | ahjoor-escrow | Only the buyer can approve. |
+| 29 | NoPendingSellerTransfer | ahjoor-escrow | No pending seller transfer. |
+| 30 | OnlyAdminCanSetVetoOverrideWindow | ahjoor-escrow | Only admin can set veto override window. |
+| 31 | WindowSecondsMustBePositive | ahjoor-escrow | Window_seconds must be positive. |
+| 32 | OnlyEscrowSellerCanCancelVeto | ahjoor-escrow | Only the escrow seller can cancel a veto. |
+| 33 | VetoWindowElapsed | ahjoor-escrow | VetoWindowElapsed: override window has passed; only admin can act now. |
+| 34 | OnlyAdminCanOverrideSellerVeto | ahjoor-escrow | Only admin can override a seller veto. |
+| 35 | ActiveDisputeExists | ahjoor-escrow | ActiveDisputeExists: resolve the dispute before overriding veto. |
+| 36 | VetoWindowNotElapsed | ahjoor-escrow | VetoWindowNotElapsed: override window has not yet passed. |
+| 37 | VetoWindowHasNotExpiredYet | ahjoor-escrow | Veto window has not expired yet. |
+| 38 | OnlyCurrentSellerCanInitiateTransfer | ahjoor-escrow | Only the current seller can initiate a transfer. |
+| 39 | EscrowMustBeActiveToTransferSellerRole | ahjoor-escrow | Escrow must be active to transfer seller role. |
+| 40 | OnlyBuyerCanVeto | ahjoor-escrow | Only the buyer can veto. |
+| 41 | OnlyAdminCanSetVetoWindow | ahjoor-escrow | Only admin can set the veto window. |
+| 42 | ReleaseBpsMustBePositiveEachMilestone | ahjoor-escrow | Release_bps must be positive for each milestone. |
+| 43 | MilestoneReleaseBpsMustSumTo10000 | ahjoor-escrow | Milestone release_bps must sum to 10 000. |
+| 44 | OnlyEscrowSellerMaySubmitMilestones | ahjoor-escrow | Only the escrow seller may submit milestones. |
+| 45 | MilestoneMustBePendingOrRejectedToSubmit | ahjoor-escrow | Milestone must be Pending or Rejected to submit. |
+| 46 | MilestoneMustBeSubmittedBeforeApproval | ahjoor-escrow | Milestone must be Submitted before approval. |
+| 47 | OnlyEscrowBuyerMayRejectMilestones | ahjoor-escrow | Only the escrow buyer may reject milestones. |
+| 48 | OnlySubmittedMilestoneCanBeRejected | ahjoor-escrow | Only a Submitted milestone can be rejected. |
 
 ---
 

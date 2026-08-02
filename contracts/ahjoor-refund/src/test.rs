@@ -1290,6 +1290,34 @@ fn test_get_dispute_window_returns_configured_value() {
     assert_eq!(s.refund_client.get_dispute_window(), 3600);
 }
 
+// --- #582: dispute_window minimum floor ---
+
+#[test]
+#[should_panic(expected = "DisputeWindowBelowMinimum")]
+fn test_initialize_rejects_zero_dispute_window() {
+    setup_with_dispute_window(0);
+}
+
+#[test]
+#[should_panic(expected = "DisputeWindowBelowMinimum")]
+fn test_initialize_rejects_dispute_window_below_floor() {
+    setup_with_dispute_window(3599);
+}
+
+#[test]
+fn test_set_dispute_window_updates_value_above_floor() {
+    let s = setup_with_dispute_window(86_400);
+    s.refund_client.set_dispute_window(&s.admin, &7_200u64);
+    assert_eq!(s.refund_client.get_dispute_window(), 7_200);
+}
+
+#[test]
+#[should_panic(expected = "DisputeWindowBelowMinimum")]
+fn test_set_dispute_window_rejects_zero() {
+    let s = setup_with_dispute_window(86_400);
+    s.refund_client.set_dispute_window(&s.admin, &0u64);
+}
+
 #[test]
 #[should_panic(expected = "Dispute window has not elapsed")]
 fn test_auto_approve_early_panics() {
@@ -1391,16 +1419,46 @@ fn test_auto_approve_after_window_transfers_tokens_and_sets_processed() {
     // Verify tokens are in escrow
     let balance_before = s.token_client.balance(&customer);
 
-    // Advance exactly to the boundary: requested_at(0) + dispute_window(86400) = 86400
-    s.env.ledger().set_timestamp(86_400);
+    // Advance one ledger past the boundary: requested_at(0) + dispute_window(86400) = 86400.
+    // The window uses an exclusive boundary (consistent with escrow/rosca's permissionless
+    // timeout functions, see #553): the dispute window has elapsed only once the current
+    // timestamp is strictly greater than requested_at + dispute_window.
+    s.env.ledger().set_timestamp(86_401);
     s.refund_client.auto_approve_refund(&refund_id);
 
     let refund = s.refund_client.get_refund(&refund_id);
     assert_eq!(refund.status, RefundStatus::Processed);
-    assert_eq!(refund.processed_at, Some(86_400));
+    assert_eq!(refund.processed_at, Some(86_401));
 
     // Customer received the tokens back
     assert_eq!(s.token_client.balance(&customer), balance_before + 100);
+}
+
+#[test]
+#[should_panic(expected = "Dispute window has not elapsed")]
+fn test_auto_approve_exactly_at_window_boundary_panics() {
+    // Boundary-ledger test for #553: at the exact instant the dispute window
+    // elapses (now == requested_at + dispute_window) the refund is not yet
+    // auto-approvable — this matches the exclusive-boundary convention used
+    // by escrow's auto_release_expired/expire_cancellation/
+    // expire_seller_transfer_veto and rosca's close_round/finalize_round.
+    let s = setup_with_dispute_window(86_400);
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    s.env.ledger().set_timestamp(0);
+    let pid = create_completed_payment(&s, &customer, &merchant, 200);
+    s.token_admin_client.mint(&customer, &100);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &100,
+        &String::from_str(&s.env, "no response"),
+        &0u32,
+    );
+
+    s.env.ledger().set_timestamp(86_400);
+    s.refund_client.auto_approve_refund(&refund_id);
 }
 
 #[test]
@@ -1603,4 +1661,137 @@ fn test_bulk_process_refunds_oversized_batch_rejected() {
 
     let res = s.refund_client.try_bulk_process_refunds(&s.admin, &ids);
     assert!(res.is_err());
+}
+
+// ===========================================================================
+//  #583: export_refund_policy
+// ===========================================================================
+
+#[test]
+fn test_export_refund_policy_returns_default_when_unset() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+
+    let policy = s.refund_client.export_refund_policy(&merchant);
+    assert_eq!(policy.eligible_window_ledgers, u32::MAX);
+    assert_eq!(policy.max_refund_bps, 10_000);
+    assert_eq!(policy.excluded_tags.len(), 0);
+}
+
+// Seeds the global refund policy directly in storage. `set_global_refund_policy`
+// itself calls `admin.require_auth()` and then `require_admin` (which calls
+// `require_auth()` again), which soroban-sdk's `mock_all_auths` rejects as a
+// duplicate authorization on the same frame — a pre-existing issue in that
+// setter unrelated to #583, so we bypass it here to isolate the view logic.
+fn seed_global_refund_policy(s: &TestSetup, policy: &RefundPolicy) {
+    s.env.as_contract(&s.refund_client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .set(&DataKey2::GlobalRefundPolicy, policy);
+    });
+}
+
+#[test]
+fn test_export_refund_policy_reflects_global_policy_immediately() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+
+    seed_global_refund_policy(
+        &s,
+        &RefundPolicy {
+            eligible_window_ledgers: 1000,
+            max_refund_bps: 5000,
+            excluded_tags: Vec::new(&s.env),
+        },
+    );
+
+    let policy = s.refund_client.export_refund_policy(&merchant);
+    assert_eq!(policy.eligible_window_ledgers, 1000);
+    assert_eq!(policy.max_refund_bps, 5000);
+}
+
+#[test]
+fn test_export_refund_policy_prefers_merchant_over_global() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+
+    seed_global_refund_policy(
+        &s,
+        &RefundPolicy {
+            eligible_window_ledgers: 1000,
+            max_refund_bps: 5000,
+            excluded_tags: Vec::new(&s.env),
+        },
+    );
+    s.refund_client.publish_refund_policy(
+        &merchant,
+        &2000u32,
+        &7500u32,
+        &Vec::new(&s.env),
+    );
+
+    let policy = s.refund_client.export_refund_policy(&merchant);
+    assert_eq!(policy.eligible_window_ledgers, 2000);
+    assert_eq!(policy.max_refund_bps, 7500);
+}
+
+// ===========================================================================
+//  #584: get_refund_stats_by_merchant
+// ===========================================================================
+
+#[test]
+fn test_get_refund_stats_by_merchant_zeroed_for_no_activity() {
+    let s = setup();
+    let merchant = Address::generate(&s.env);
+
+    let stats = s.refund_client.get_refund_stats_by_merchant(&merchant);
+    assert_eq!(stats.total_requested, 0);
+    assert_eq!(stats.total_approved, 0);
+    assert_eq!(stats.total_rejected, 0);
+    assert_eq!(stats.total_processed, 0);
+    assert_eq!(stats.total_amount_refunded, 0);
+}
+
+#[test]
+fn test_get_refund_stats_by_merchant_mixed_activity() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid_a = create_completed_payment(&s, &customer, &merchant, 100);
+    s.token_admin_client.mint(&customer, &300);
+    let rid_a = s.refund_client.request_refund(
+        &customer,
+        &pid_a,
+        &100,
+        &String::from_str(&s.env, "a"),
+        &0u32,
+    );
+    s.refund_client.approve_refund(&s.admin, &rid_a);
+    s.refund_client.process_refund(&s.admin, &rid_a);
+
+    let pid_b = create_completed_payment(&s, &customer, &merchant, 60);
+    let rid_b = s.refund_client.request_refund(
+        &customer,
+        &pid_b,
+        &60,
+        &String::from_str(&s.env, "b"),
+        &0u32,
+    );
+    s.refund_client
+        .reject_refund(&s.admin, &rid_b, &String::from_str(&s.env, "no"));
+
+    let stats = s.refund_client.get_refund_stats_by_merchant(&merchant);
+    assert_eq!(stats.total_requested, 2);
+    assert_eq!(stats.total_approved, 1);
+    assert_eq!(stats.total_rejected, 1);
+    assert_eq!(stats.total_processed, 1);
+    assert_eq!(stats.total_amount_refunded, 100);
+
+    // Matches the existing get_merchant_refund_stats view exactly.
+    assert_eq!(
+        stats.total_requested,
+        s.refund_client.get_merchant_refund_stats(&merchant).total_requested
+    );
 }

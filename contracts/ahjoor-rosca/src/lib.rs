@@ -25,6 +25,13 @@ const TEMP_BUMP_AMOUNT: u32 = 15_000;
 
 pub(crate) const MIGRATION_TIMEOUT_SECONDS: u64 = 604800; // 7 days in seconds
 
+// Maximum number of consecutive close_round calls allowed without an
+// intervening finalize_round. close_round only advances round state; it
+// never pays out the pot, records the audit trail, or mints contribution
+// receipts. This cap forces the admin back to finalize_round instead of
+// letting contributions accumulate un-paid indefinitely.
+pub(crate) const MAX_CONSECUTIVE_UNFINALIZED_ROUNDS: u32 = 3;
+
 pub mod types;
 pub use types::*;
 
@@ -1292,6 +1299,22 @@ impl AhjoorContract {
             .expect("Admin not set");
         admin.require_auth();
 
+        // Guard against an admin calling close_round repeatedly instead of
+        // finalize_round: close_round never pays out the pot, never records
+        // audit trail (CycleRecord/CycleSnapshotData), and never mints
+        // contribution receipts — only finalize_round does. Cap how many
+        // rounds in a row can be closed without an intervening
+        // finalize_round so contributions cannot accumulate un-paid
+        // indefinitely.
+        let unfinalized_streak: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey4::UnfinalizedRoundStreak)
+            .unwrap_or(0);
+        if unfinalized_streak >= MAX_CONSECUTIVE_UNFINALIZED_ROUNDS {
+            panic_with_error!(&env, ExtError2::RoundPendingFinalization);
+        }
+
         let use_timestamp: bool = env
             .storage()
             .instance()
@@ -1357,6 +1380,9 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey4::LastRoundDeadline, &deadline);
+        env.storage()
+            .instance()
+            .set(&DataKey4::UnfinalizedRoundStreak, &(unfinalized_streak + 1));
 
         internals::reset_round_state(&env, current_round);
     }
@@ -1388,8 +1414,18 @@ impl AhjoorContract {
         audit_trail::get_retention_window(&env)
     }
 
-    pub fn get_member_contribution_history(env: Env, member: Address) -> Vec<ContributionEntry> {
-        audit_trail::get_member_contribution_history(&env, member)
+    /// Returns `member`'s contribution entries within cycles
+    /// `from_cycle..=to_cycle` (inclusive). The range is capped at
+    /// `audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE` (100) cycles per call —
+    /// callers with longer histories page through it with successive calls
+    /// instead of loading the whole history at once (#544).
+    pub fn get_member_contribution_history(
+        env: Env,
+        member: Address,
+        from_cycle: u32,
+        to_cycle: u32,
+    ) -> Vec<ContributionEntry> {
+        audit_trail::get_member_contribution_history(&env, member, from_cycle, to_cycle)
     }
 
     pub fn finalize_round(env: Env) {
@@ -1402,6 +1438,12 @@ impl AhjoorContract {
             .expect("Admin not set");
         admin.require_auth();
         Self::process_pending_penalties(&env);
+
+        // finalize_round pays out the pot and records the audit trail /
+        // receipts, so the "rounds closed without finalizing" streak resets.
+        env.storage()
+            .instance()
+            .set(&DataKey4::UnfinalizedRoundStreak, &0u32);
 
         let use_timestamp: bool = env
             .storage()
@@ -5896,11 +5938,87 @@ impl AhjoorContract {
         (contributed, remaining)
     }
 
-    pub fn get_round_history(env: Env) -> Vec<PayoutRecord> {
-        env.storage()
+    /// Paginated round-by-round payout history for a group (#555).
+    ///
+    /// `group_id` is accepted for API/event-payload consistency with other
+    /// group-scoped functions (see `freeze_group`); this contract manages a
+    /// single group per instance, so it is not used to key storage.
+    ///
+    /// Returns the slice `[offset, offset + limit)` of `RoundHistory`. An
+    /// out-of-range `offset` (>= total number of rounds) returns an empty
+    /// vec rather than panicking.
+    pub fn get_round_history(
+        env: Env,
+        _group_id: u32,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<PayoutRecord> {
+        let history: Vec<PayoutRecord> = env
+            .storage()
             .persistent()
             .get(&PersistentKey::RoundHistory)
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or(Vec::new(&env));
+
+        let total = history.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(limit).min(total);
+
+        let mut page = Vec::new(&env);
+        for i in start..end {
+            page.push_back(history.get(i).unwrap());
+        }
+        page
+    }
+
+    /// Admin view of the current pending-penalty queue (#556).
+    ///
+    /// Penalties move through `request_penalty_grace` (deferred into the
+    /// queue when requested within the grace window) →
+    /// `process_pending_penalties` (applied once the grace period elapses
+    /// or the round advances) → `apply_penalty`. This surfaces which
+    /// members currently have an unprocessed pending penalty, without
+    /// mutating state or triggering processing.
+    ///
+    /// `group_id` is accepted for API consistency with other group-scoped
+    /// functions (see `freeze_group`); this contract manages a single group
+    /// per instance, so it is not used to key storage.
+    pub fn get_pending_penalties(env: Env, _group_id: u32) -> Vec<(Address, PendingPenaltyInfo)> {
+        let pending_penalties: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::PendingPenalties)
+            .unwrap_or(Map::new(&env));
+
+        let penalty_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PenaltyAmount)
+            .unwrap_or(0);
+        let grace_period_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey4::GracePeriodLedgers)
+            .unwrap_or(0);
+        let round_deadline: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey4::LastRoundDeadline)
+            .or(env.storage().instance().get(&DataKey::RoundDeadline))
+            .unwrap_or(0);
+        let grace_expires_at = round_deadline.saturating_add(grace_period_ledgers as u64);
+
+        let mut result = Vec::new(&env);
+        for (member, round) in pending_penalties.iter() {
+            result.push_back((
+                member,
+                PendingPenaltyInfo {
+                    round,
+                    penalty_amount,
+                    grace_expires_at,
+                },
+            ));
+        }
+        result
     }
 
     pub fn get_state(env: Env) -> (u32, Vec<Address>, u64, PayoutStrategy, Address) {
@@ -6583,6 +6701,28 @@ impl AhjoorContract {
         env.storage()
             .temporary()
             .set(&DataKey2::ExitRequests, &requests);
+
+        // #389: Compact PayoutOrder so renumbered slots no longer point at
+        // the exited member. Skipped automatically when the member's slot was
+        // already paid out by an earlier round. `skip_reason = 0` means the
+        // compactor ran; `1` means past-slot guard tripped; `2` means the
+        // member was absent from `PayoutOrder` (defensive).
+        let current_round: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentRound)
+            .unwrap_or(0);
+        let (_, slot_index, old_len, new_len, skip_reason) =
+            internals::compact_payout_order(&env, &member, current_round);
+        events::emit_payout_order_compacted(
+            &env,
+            member.clone(),
+            slot_index,
+            old_len,
+            new_len,
+            current_round,
+            skip_reason,
+        );
 
         Self::update_credit_score_internal(&env, &member, Symbol::new(&env, "early_exit"));
         events::emit_exit_ok(&env, member.clone(), refund_amount);
@@ -11315,6 +11455,7 @@ impl AhjoorContract {
 }
 
 mod test;
+mod test_audit_trail;
 mod test_contrib_delegation;
 mod test_cosigner_guarantee;
 mod test_emergency_reserve;

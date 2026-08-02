@@ -12,6 +12,22 @@ const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_000;
 
 const SUSPENSION_HISTORY_LIMIT: u32 = 10;
+const MAX_BATCH_ADD_TOKENS: u32 = 20;
+
+/// #589: Default/maximum page size for `get_whitelisted_tokens`.
+const DEFAULT_WHITELIST_PAGE_SIZE: u32 = 50;
+
+/// #588: Maximum allowed `period_ledgers` for a token quota (~30 days at 5s ledgers).
+const MAX_QUOTA_PERIOD_LEDGERS: u32 = 518_400;
+
+/// Companion fix: maximum allowed `to_ledger - from_ledger` window for `get_token_volume`.
+/// Bounded to keep the per-ledger storage-read loop within the host's CPU/memory budget.
+const MAX_VOLUME_QUERY_RANGE: u32 = 500;
+
+/// #540: fixed number of aggregate buckets covering a quota period. Keeps
+/// `record_token_volume`'s cost constant regardless of `period_ledgers`
+/// instead of scaling linearly with it.
+const VOLUME_AGG_BUCKET_COUNT: u32 = 24;
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +47,18 @@ pub enum Error {
 pub struct TokenQuota {
     pub max_volume_per_period: i128,
     pub period_ledgers: u32,
+}
+
+/// #540: one slot of the fixed-size rolling window used by `record_token_volume`.
+/// `bucket_id` is `ledger / bucket_span`; a slot is live (counted toward the
+/// current period total) only while `current_bucket_id - bucket_id` is less
+/// than `VOLUME_AGG_BUCKET_COUNT`, otherwise it holds stale volume from a
+/// previous cycle through this slot and is ignored.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeAggBucket {
+    pub bucket_id: u32,
+    pub volume: i128,
 }
 
 pub type TokenSuspension = SuspensionRecord;
@@ -73,11 +101,18 @@ pub enum DataKey {
     Admin,
     ProposedAdmin,
     WhitelistedTokens,
+    /// O(1) membership index for a whitelisted token. Each entry is its own
+    /// storage key so lookups don't pay for deserializing the full
+    /// WhitelistedTokens Vec, which is retained only for enumeration.
+    WhitelistMembership(Address),
     SuspensionRecord(Address),
     ContractTokenAllowlist(Address, Address),
     SuspensionHistory(Address),
     TokenQuota(Address),
     TokenVolumeBucket(Address, u32),
+    /// #540: fixed-size aggregate bucket slot (token, slot_index) used to
+    /// track rolling period volume without iterating every ledger.
+    TokenVolumeAggBucket(Address, u32),
     RiskTier(u32),
     TokenTier(Address),
     TokenLimitOverride(Address),
@@ -90,6 +125,7 @@ pub enum DataKey {
     QuorumBps,
     ListingProposal(u32),
     VoteRecord(u32, Address),
+    VoteWeightSnapshot(u32, Address),
 }
 
 #[contracttype]
@@ -122,6 +158,14 @@ const DEFAULT_QUORUM_BPS: u32 = 5_000;
 
 mod events;
 mod client;
+#[cfg(test)]
+mod test;
+#[cfg(test)]
+mod test_contract_allowlist;
+#[cfg(test)]
+mod test_governance;
+#[cfg(test)]
+mod test_suspension;
 
 pub use client::TokenWhitelistClient;
 
@@ -149,15 +193,14 @@ impl TokenWhitelistContract {
     pub fn add_token(env: Env, admin: Address, token: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        let membership_key = DataKey::WhitelistMembership(token.clone());
+        if env.storage().persistent().has(&membership_key) {
+            panic!("Token already whitelisted");
+        }
         let mut whitelist: Vec<Address> = env
             .storage().persistent()
             .get(&DataKey::WhitelistedTokens)
             .unwrap_or_else(|| Vec::new(&env));
-        for existing_token in whitelist.iter() {
-            if existing_token == token {
-                panic!("Token already whitelisted");
-            }
-        }
         whitelist.push_back(token.clone());
         env.storage().persistent().set(&DataKey::WhitelistedTokens, &whitelist);
         env.storage().persistent().extend_ttl(
@@ -165,28 +208,68 @@ impl TokenWhitelistContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        env.storage().persistent().set(&membership_key, &true);
+        env.storage().persistent().extend_ttl(
+            &membership_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_token_whitelisted(&env, token, admin);
+    }
+
+    /// Onboard multiple tokens in a single transaction. Admin-gated.
+    /// Reverts before adding any token if the batch is empty, exceeds the
+    /// length cap, or contains a token already on the whitelist.
+    pub fn batch_add_tokens(env: Env, admin: Address, tokens: Vec<Address>) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        if tokens.is_empty() {
+            panic!("Batch cannot be empty");
+        }
+        if tokens.len() > MAX_BATCH_ADD_TOKENS {
+            panic!("Batch size exceeds maximum allowed");
+        }
+        let mut whitelist: Vec<Address> = env
+            .storage().persistent()
+            .get(&DataKey::WhitelistedTokens)
+            .unwrap_or_else(|| Vec::new(&env));
+        for token in tokens.iter() {
+            for existing_token in whitelist.iter() {
+                if existing_token == token {
+                    panic!("Token already whitelisted");
+                }
+            }
+            whitelist.push_back(token.clone());
+        }
+        env.storage().persistent().set(&DataKey::WhitelistedTokens, &whitelist);
+        env.storage().persistent().extend_ttl(
+            &DataKey::WhitelistedTokens,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        for token in tokens.iter() {
+            events::emit_token_whitelisted(&env, token, admin.clone());
+        }
     }
 
     pub fn remove_token(env: Env, admin: Address, token: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        let membership_key = DataKey::WhitelistMembership(token.clone());
+        if !env.storage().persistent().has(&membership_key) {
+            panic!("Token not whitelisted");
+        }
         let whitelist: Vec<Address> = env
             .storage().persistent()
             .get(&DataKey::WhitelistedTokens)
             .unwrap_or_else(|| Vec::new(&env));
-        let mut found = false;
         let mut new_whitelist = Vec::new(&env);
         for existing_token in whitelist.iter() {
-            if existing_token == token {
-                found = true;
-            } else {
+            if existing_token != token {
                 new_whitelist.push_back(existing_token);
             }
-        }
-        if !found {
-            panic!("Token not whitelisted");
         }
         env.storage().persistent().set(&DataKey::WhitelistedTokens, &new_whitelist);
         env.storage().persistent().extend_ttl(
@@ -194,6 +277,7 @@ impl TokenWhitelistContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        env.storage().persistent().remove(&membership_key);
         if env.storage().persistent().has(&DataKey::SuspensionRecord(token.clone())) {
             env.storage().persistent().remove(&DataKey::SuspensionRecord(token.clone()));
         }
@@ -252,12 +336,9 @@ impl TokenWhitelistContract {
     }
 
     pub fn get_token_metadata(env: Env, token: Address) -> TokenMetadata {
-        let whitelist: Vec<Address> = env.storage().persistent().get(&DataKey::WhitelistedTokens).unwrap_or_else(|| Vec::new(&env));
-        let mut found = false;
-        for t in whitelist.iter() {
-            if t == token { found = true; break; }
+        if !env.storage().persistent().has(&DataKey::WhitelistMembership(token.clone())) {
+            panic!("TokenNotWhitelisted");
         }
-        if !found { panic!("TokenNotWhitelisted"); }
         env.storage().persistent().get(&DataKey::TokenMetadata(token)).expect("Metadata not set")
     }
 
@@ -288,41 +369,24 @@ impl TokenWhitelistContract {
         res
     }
 
-    /// Check if a token is in the global whitelist (ignores suspension)
+    /// Check if a token is in the global whitelist (ignores suspension).
+    /// O(1): backed by a per-token storage key, not a scan of the full list.
     pub fn is_whitelisted(env: Env, token: Address) -> bool {
-        let whitelist: Vec<Address> = env
-            .storage().persistent()
-            .get(&DataKey::WhitelistedTokens)
-            .unwrap_or_else(|| Vec::new(&env));
-        for existing_token in whitelist.iter() {
-            if existing_token == token {
-                return true;
-            }
-        }
-        false
+        env.storage().persistent().has(&DataKey::WhitelistMembership(token))
     }
 
-    /// Check if a token is allowed (whitelist + suspension check)
+    /// Check if a token is allowed (whitelist + suspension check).
+    /// O(1): backed by a per-token storage key, not a scan of the full list.
     pub fn is_token_allowed(env: Env, token: Address) -> bool {
-        let whitelist: Vec<Address> = env
-            .storage().persistent()
-            .get(&DataKey::WhitelistedTokens)
-            .unwrap_or_else(|| Vec::new(&env));
+        let membership_key = DataKey::WhitelistMembership(token.clone());
+        if !env.storage().persistent().has(&membership_key) {
+            return false;
+        }
         env.storage().persistent().extend_ttl(
-            &DataKey::WhitelistedTokens,
+            &membership_key,
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
-        let mut in_whitelist = false;
-        for existing_token in whitelist.iter() {
-            if existing_token == token {
-                in_whitelist = true;
-                break;
-            }
-        }
-        if !in_whitelist {
-            return false;
-        }
         let maybe_record: Option<SuspensionRecord> = env
             .storage().persistent()
             .get(&DataKey::SuspensionRecord(token.clone()));
@@ -337,7 +401,9 @@ impl TokenWhitelistContract {
         true
     }
 
-    pub fn get_whitelisted_tokens(env: Env) -> Vec<Address> {
+    /// #589: Returns a bounded page of the whitelist instead of the full list.
+    /// `limit` is capped at `DEFAULT_WHITELIST_PAGE_SIZE` (50) per call.
+    pub fn get_whitelisted_tokens(env: Env, offset: u32, limit: u32) -> Vec<Address> {
         let whitelist: Vec<Address> = env
             .storage().persistent()
             .get(&DataKey::WhitelistedTokens)
@@ -347,7 +413,14 @@ impl TokenWhitelistContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
-        whitelist
+        let wlen = whitelist.len();
+        let start = offset.min(wlen);
+        let l = limit.min(DEFAULT_WHITELIST_PAGE_SIZE).min(wlen - start);
+        let mut page = Vec::new(&env);
+        for i in start..start + l {
+            page.push_back(whitelist.get(i).unwrap());
+        }
+        page
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -390,15 +463,9 @@ impl TokenWhitelistContract {
     ) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
-        let whitelist: Vec<Address> = env
-            .storage().persistent()
-            .get(&DataKey::WhitelistedTokens)
-            .unwrap_or_else(|| Vec::new(&env));
-        let mut in_whitelist = false;
-        for t in whitelist.iter() {
-            if t == token { in_whitelist = true; break; }
+        if !env.storage().persistent().has(&DataKey::WhitelistMembership(token.clone())) {
+            panic!("Token not whitelisted");
         }
-        if !in_whitelist { panic!("Token not whitelisted"); }
         let current_ledger = env.ledger().sequence();
         let maybe_existing: Option<SuspensionRecord> = env
             .storage().persistent()
@@ -542,9 +609,48 @@ impl TokenWhitelistContract {
         events::emit_contract_token_allowlist_updated(&env, contract_id, token, false, None);
     }
 
+    /// Remove contract-token allowlist entries whose `expiry_ledger` has passed.
+    /// Permissionless: safe to call repeatedly, and has no effect on entries
+    /// that are still active or already absent.
+    pub fn cleanup_allowlist_entries(
+        env: Env,
+        entries: Vec<(Address, Address)>,
+    ) {
+        let current_ledger = env.ledger().sequence();
+        for (contract_id, token) in entries.iter() {
+            let key = DataKey::ContractTokenAllowlist(contract_id.clone(), token.clone());
+            if let Some(Some(expiry)) = env.storage().persistent().get::<_, Option<u32>>(&key) {
+                if current_ledger >= expiry {
+                    env.storage().persistent().remove(&key);
+                    events::emit_contract_token_allowlist_updated(&env, contract_id, token, false, None);
+                }
+            }
+        }
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     pub fn get_contract_token_entry(env: Env, contract_id: Address, token: Address) -> Option<Option<u32>> {
         let key = DataKey::ContractTokenAllowlist(contract_id, token);
         env.storage().persistent().get::<_, Option<u32>>(&key)
+    }
+
+    /// Permissionlessly remove a contract-level allowlist entry once its
+    /// time-bounded expiry has passed, freeing the stale storage entry.
+    /// Mirrors the auto_* maintenance pattern used elsewhere in the codebase
+    /// (e.g. auto_release_expired). Permanent entries (None expiry) never
+    /// expire and are not eligible for cleanup.
+    pub fn cleanup_expired_contract_token(env: Env, contract_id: Address, token: Address) {
+        let key = DataKey::ContractTokenAllowlist(contract_id.clone(), token.clone());
+        let stored: Option<u32> = env
+            .storage().persistent()
+            .get(&key)
+            .expect("No contract-level allowlist entry");
+        let expiry = stored.expect("Entry is permanent and cannot be cleaned up");
+        if env.ledger().sequence() < expiry {
+            panic!("Entry has not expired yet");
+        }
+        env.storage().persistent().remove(&key);
+        events::emit_contract_token_allowlist_updated(&env, contract_id, token, false, None);
     }
 
     pub fn is_token_allowed_for_contract(env: Env, contract_id: Address, token: Address) -> bool {
@@ -571,20 +677,15 @@ impl TokenWhitelistContract {
     ) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
-        let whitelist: Vec<Address> = env
-            .storage().persistent()
-            .get(&DataKey::WhitelistedTokens)
-            .unwrap_or_else(|| Vec::new(&env));
-        let mut is_wl = false;
-        for existing_token in whitelist.iter() {
-            if existing_token == token { is_wl = true; break; }
+        if !env.storage().persistent().has(&DataKey::WhitelistMembership(token.clone())) {
+            panic!("Token not whitelisted");
         }
-        if !is_wl { panic!("Token not whitelisted"); }
         if env.storage().persistent().has(&DataKey::TokenQuota(token.clone())) {
             panic!("Token already has quota");
         }
         if max_volume_per_period <= 0 { panic!("max_volume_per_period must be positive"); }
         if period_ledgers == 0 { panic!("period_ledgers must be positive"); }
+        if period_ledgers > MAX_QUOTA_PERIOD_LEDGERS { panic!("period_ledgers exceeds maximum allowed"); }
         let quota = TokenQuota { max_volume_per_period, period_ledgers };
         env.storage().persistent().set(&DataKey::TokenQuota(token.clone()), &quota);
         env.storage().persistent().extend_ttl(&DataKey::TokenQuota(token.clone()), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
@@ -602,6 +703,7 @@ impl TokenWhitelistContract {
         Self::require_admin(&env, &admin);
         if max_volume_per_period <= 0 { panic!("max_volume_per_period must be positive"); }
         if period_ledgers == 0 { panic!("period_ledgers must be positive"); }
+        if period_ledgers > MAX_QUOTA_PERIOD_LEDGERS { panic!("period_ledgers exceeds maximum allowed"); }
         if !env.storage().persistent().has(&DataKey::TokenQuota(token.clone())) {
             panic!("Token has no quota");
         }
@@ -630,19 +732,42 @@ impl TokenWhitelistContract {
             return Ok(());
         };
         let current_ledger = env.ledger().sequence();
-        let start_ledger = current_ledger.saturating_sub(quota.period_ledgers - 1);
+
+        // #540: sum the rolling window from a fixed number of aggregate
+        // buckets instead of iterating every ledger in the period, so cost
+        // stays constant regardless of how large `period_ledgers` is.
+        let bucket_span = (quota.period_ledgers / VOLUME_AGG_BUCKET_COUNT).max(1);
+        let current_bucket_id = current_ledger / bucket_span;
         let mut current_period_volume: i128 = 0;
-        for bucket_ledger in start_ledger..=current_ledger {
-            let bucket_volume: i128 = env
+        for slot in 0..VOLUME_AGG_BUCKET_COUNT {
+            if let Some(bucket) = env
                 .storage().persistent()
-                .get(&DataKey::TokenVolumeBucket(token.clone(), bucket_ledger))
-                .unwrap_or(0);
-            current_period_volume += bucket_volume;
+                .get::<_, VolumeAggBucket>(&DataKey::TokenVolumeAggBucket(token.clone(), slot))
+            {
+                if current_bucket_id.saturating_sub(bucket.bucket_id) < VOLUME_AGG_BUCKET_COUNT {
+                    current_period_volume += bucket.volume;
+                }
+            }
         }
         if current_period_volume + amount > quota.max_volume_per_period {
             events::emit_token_quota_exceeded(&env, token, amount, current_period_volume);
             return Err(Error::QuotaExceeded);
         }
+
+        let slot = current_bucket_id % VOLUME_AGG_BUCKET_COUNT;
+        let agg_key = DataKey::TokenVolumeAggBucket(token.clone(), slot);
+        let existing: Option<VolumeAggBucket> = env.storage().persistent().get(&agg_key);
+        let new_volume = match existing {
+            Some(b) if b.bucket_id == current_bucket_id => b.volume + amount,
+            _ => amount,
+        };
+        env.storage().persistent().set(
+            &agg_key,
+            &VolumeAggBucket { bucket_id: current_bucket_id, volume: new_volume },
+        );
+        env.storage().persistent().extend_ttl(&agg_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+        // Exact per-ledger record retained for `get_token_volume` transparency/audit queries.
         let bucket_key = DataKey::TokenVolumeBucket(token.clone(), current_ledger);
         let mut bucket_volume: i128 = env.storage().persistent().get(&bucket_key).unwrap_or(0);
         bucket_volume += amount;
@@ -652,6 +777,12 @@ impl TokenWhitelistContract {
     }
 
     pub fn get_token_volume(env: Env, token: Address, from_ledger: u32, to_ledger: u32) -> i128 {
+        if from_ledger > to_ledger {
+            panic!("from_ledger must not exceed to_ledger");
+        }
+        if to_ledger - from_ledger > MAX_VOLUME_QUERY_RANGE {
+            panic!("ledger range exceeds maximum allowed");
+        }
         let mut volume: i128 = 0;
         for bucket_ledger in from_ledger..=to_ledger {
             let bucket_volume: i128 = env
@@ -756,12 +887,21 @@ impl TokenWhitelistContract {
     pub fn vote_listing(env: Env, voter: Address, proposal_id: u32, approve: bool, weight: i128) {
         voter.require_auth();
         if weight <= 0 { panic!("weight must be positive"); }
-        let governance_token: Address = env
-            .storage().instance()
-            .get(&DataKey::GovernanceToken)
-            .expect("GovernanceTokenNotConfigured");
-        let voter_balance = token::Client::new(&env, &governance_token).balance(&voter);
-        if weight > voter_balance { panic!("VoteWeightExceedsBalance"); }
+        let snapshot_key = DataKey::VoteWeightSnapshot(proposal_id, voter.clone());
+        let snapshot_balance: i128 = match env.storage().persistent().get(&snapshot_key) {
+            Some(balance) => balance,
+            None => {
+                let governance_token: Address = env
+                    .storage().instance()
+                    .get(&DataKey::GovernanceToken)
+                    .expect("GovernanceTokenNotConfigured");
+                let balance = token::Client::new(&env, &governance_token).balance(&voter);
+                env.storage().persistent().set(&snapshot_key, &balance);
+                env.storage().persistent().extend_ttl(&snapshot_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+                balance
+            }
+        };
+        if weight > snapshot_balance { panic!("VoteWeightExceedsBalance"); }
         let mut proposal: ListingProposal = env
             .storage().persistent()
             .get(&DataKey::ListingProposal(proposal_id))
@@ -831,18 +971,17 @@ impl TokenWhitelistContract {
             .expect("ProposalNotFound");
         if proposal.status != ProposalStatus::PendingEnactment { panic!("ProposalNotPendingEnactment"); }
         if env.ledger().sequence() <= proposal.enactment_deadline_ledger { panic!("EnactmentDelayNotElapsed"); }
-        let mut whitelist: Vec<Address> = env
-            .storage().persistent()
-            .get(&DataKey::WhitelistedTokens)
-            .unwrap_or_else(|| Vec::new(&env));
-        let mut already_listed = false;
-        for t in whitelist.iter() {
-            if t == proposal.token { already_listed = true; break; }
-        }
-        if !already_listed {
+        let membership_key = DataKey::WhitelistMembership(proposal.token.clone());
+        if !env.storage().persistent().has(&membership_key) {
+            let mut whitelist: Vec<Address> = env
+                .storage().persistent()
+                .get(&DataKey::WhitelistedTokens)
+                .unwrap_or_else(|| Vec::new(&env));
             whitelist.push_back(proposal.token.clone());
             env.storage().persistent().set(&DataKey::WhitelistedTokens, &whitelist);
             env.storage().persistent().extend_ttl(&DataKey::WhitelistedTokens, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+            env.storage().persistent().set(&membership_key, &true);
+            env.storage().persistent().extend_ttl(&membership_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         }
         proposal.status = ProposalStatus::Enacted;
         env.storage().persistent().set(&DataKey::ListingProposal(proposal_id), &proposal);

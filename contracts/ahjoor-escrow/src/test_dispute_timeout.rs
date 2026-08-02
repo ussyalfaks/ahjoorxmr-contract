@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use crate::{AhjoorEscrowContract, AhjoorEscrowContractClient, DisputeDefaultWinner};
+use crate::{AhjoorEscrowContract, AhjoorEscrowContractClient, DisputeDefaultWinner, EscrowErrorExt};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::Client as TokenClient,
@@ -165,7 +165,6 @@ fn test_enforce_dispute_timeout_seller_default() {
 }
 
 #[test]
-#[should_panic(expected = "Dispute timeout deadline has not passed yet")]
 fn test_enforce_timeout_before_deadline() {
     let (env, _admin, buyer, seller, arbiter, token, client) = setup_test_env();
 
@@ -190,12 +189,11 @@ fn test_enforce_timeout_before_deadline() {
     env.ledger().with_mut(|li| {
         li.timestamp += 3 * 24 * 60 * 60; // 3 days
     });
-
-    client.enforce_dispute_timeout(&escrow_id);
+    let __typed_err_result = client.try_enforce_dispute_timeout(&escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::DisputeTimeoutDeadlineHasNotPassedYet.into());
 }
 
 #[test]
-#[should_panic(expected = "Escrow is not disputed")]
 fn test_enforce_timeout_on_non_disputed_escrow() {
     let (env, _admin, buyer, seller, arbiter, token, client) = setup_test_env();
 
@@ -214,11 +212,11 @@ fn test_enforce_timeout_on_non_disputed_escrow() {
     );
 
     // Try to enforce timeout without dispute
-    client.enforce_dispute_timeout(&escrow_id);
+    let __typed_err_result = client.try_enforce_dispute_timeout(&escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::EscrowIsNotDisputed.into());
 }
 
 #[test]
-#[should_panic(expected = "Dispute already resolved")]
 fn test_enforce_timeout_on_resolved_dispute() {
     let (env, _admin, buyer, seller, arbiter, token, client) = setup_test_env();
 
@@ -246,7 +244,8 @@ fn test_enforce_timeout_on_resolved_dispute() {
     });
 
     // Try to enforce timeout on already resolved dispute
-    client.enforce_dispute_timeout(&escrow_id);
+    let __typed_err_result = client.try_enforce_dispute_timeout(&escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::DisputeAlreadyResolved.into());
 }
 
 #[test]

@@ -103,7 +103,6 @@ fn test_flagged_then_reviewed() {
 // Test: flag after window expires is rejected
 // ---------------------------------------------------------------------------
 #[test]
-#[should_panic(expected = "Cooling-off window has expired")]
 fn test_flag_after_window_expired() {
     let (env, client, admin, buyer, _seller, arbiter, _token_addr, _token_client, _) = setup_cooling_off();
     let escrow_id = 0u32;
@@ -116,14 +115,14 @@ fn test_flag_after_window_expired() {
     env.ledger().with_mut(|l| l.timestamp += cooling_off + 1);
 
     // Attempt to flag after window — should panic
-    client.flag_resolution_error(&buyer, &escrow_id, &make_reason_hash(&env));
+    let __typed_err_result = client.try_flag_resolution_error(&buyer, &escrow_id, &make_reason_hash(&env));
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::CoolingOffWindowHasExpired.into());
 }
 
 // ---------------------------------------------------------------------------
 // Test: finalize before window expires is rejected
 // ---------------------------------------------------------------------------
 #[test]
-#[should_panic(expected = "Cooling-off window has not elapsed")]
 fn test_finalize_before_window_elapsed() {
     let (env, client, admin, _buyer, _seller, arbiter, _token_addr, _token_client, _) = setup_cooling_off();
     let escrow_id = 0u32;
@@ -133,7 +132,8 @@ fn test_finalize_before_window_elapsed() {
     client.resolve_dispute(&arbiter, &escrow_id, &50u32);
 
     // Try to finalize immediately — should panic
-    client.finalize_resolution(&escrow_id);
+    let __typed_err_result = client.try_finalize_resolution(&escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::CoolingOffWindowHasNotElapsed.into());
 }
 
 // ---------------------------------------------------------------------------

@@ -210,6 +210,23 @@ Only the contract **admin** can modify the whitelist. The admin is set once at d
 | `remove_token(admin, token)` | Remove a token from the global whitelist. |
 | `is_whitelisted(token) → bool` | Return whether a token is on the global whitelist (read-only). |
 
+### Suspension
+
+Suspension is a temporary admin-controlled restriction on an already whitelisted token. It is distinct from full removal:
+
+- `remove_token(admin, token)` permanently deletes the token from the global whitelist and clears any active suspension record for that token.
+- `suspend_token_timed(admin, token, duration, reason_hash)` keeps the token on the whitelist but blocks `is_token_allowed(token)` until the suspension window expires.
+- A suspended token is not “delisted”; it remains globally whitelisted, but calls that rely on `is_token_allowed` will be rejected while the suspension is active.
+
+Only the contract admin can suspend a token, and the token must already be present in the global whitelist before suspension is allowed. A suspension is timed by ledger height: the contract stores an `expiry_ledger` and an optional `reason_hash` for the suspension record. While the token is suspended, `is_token_allowed(token)` returns `false` for downstream contracts that check the whitelist contract.
+
+A suspended token can be reinstated in either of two ways:
+
+1. Automatic expiry: when `is_token_allowed(token)` is queried after the suspension expiry ledger, the contract lazily clears the suspension record and returns `true`.
+2. Manual lift: the admin can call `lift_token_suspension(admin, token)` before expiry to remove the suspension early.
+
+The admin can also extend an active suspension with `extend_token_suspension(admin, token, additional_ledgers)`, which appends more ledgers to the existing expiry window. Suspension history is retained for the most recent suspensions, capped at ten recorded entries.
+
 ### Example CLI call
 
 ```bash
@@ -218,6 +235,19 @@ stellar contract invoke \
   --network testnet \
   -- is_whitelisted --token <TOKEN_ADDRESS>
 ```
+
+### Contract Allowlist
+
+In addition to the global token whitelist, the `ahjoor-token-whitelist` contract supports a **Contract Allowlist**.
+
+**Difference from Global Whitelist:**
+While the global token whitelist permits a token to be used across *all* Ahjoor groups (ROSCA, Escrow, and Payments), the contract allowlist permits a token to be used exclusively within a *specific* deployed group contract (e.g., a specific Escrow or ROSCA instance). Contract allowlist entries can also be configured with an optional `expiry_ledger` to restrict the token's usage to a certain timeframe.
+
+**Who Controls It:**
+Just like the global whitelist, only the **admin** of the `ahjoor-token-whitelist` contract can add or remove entries from the contract allowlist. This is done via the `set_contract_token` and `remove_contract_token` functions.
+
+**Gated Operations:**
+When a group contract (like an Escrow or ROSCA) checks if a token is permitted via the `is_token_allowed_for_contract` function, the whitelist contract first checks the contract allowlist. If the token is explicitly allowed for that specific group contract and the expiry ledger hasn't passed, the operation is permitted. Otherwise, it falls back to checking the global whitelist. This gating mechanism secures fund deposits, contributions, and any other token transfers managed by the group contracts.
 
 ## State Archival & TTL
 
@@ -297,7 +327,17 @@ A: Call `bump_storage()` periodically (recommended every ~30 days of inactivity)
 
 ## Documentation
 
-- [Payments Authorization and Capture Flow](docs/payments-flow.md) - lifecycle guide for `authorize_payment`, `capture_payment`, missed capture expiry, and related events.
-- [Contribution Receipts](docs/contribution-receipts.md) — guide to NFT-style contribution receipt format, issuance lifecycle, and member lookup endpoints.
-- [Contract Error Codes](docs/errors.md) — consolidated reference of every numeric `#[contracterror]` code exposed by the Ahjoor contracts.
-- [State Archival Troubleshooting](docs/state-archival.md) — check archived status, restore a dormant ROSCA contract, and prevent future archival.
+For a comprehensive table of contents and topic breakdown, see the **[Documentation Index](docs/README.md)**.
+
+- [**Documentation Index**](docs/README.md) — Complete table of contents organized by contract and feature.
+- [Payments Authorization and Capture Flow](docs/payments-flow.md) — Lifecycle guide for `authorize_payment`, `capture_payment`, missed capture expiry, and related events.
+- [Contribution Receipts](docs/contribution-receipts.md) — Guide to NFT-style contribution receipt format, issuance lifecycle, and member lookup endpoints.
+- [Contract Error Codes](docs/errors.md) — Consolidated reference of every numeric `#[contracterror]` code exposed by the Ahjoor contracts.
+- [State Archival Troubleshooting](docs/state-archival.md) — Check archived status, restore a dormant ROSCA contract, and prevent future archival.
+- [Escrow Dispute Flow](docs/escrow-dispute-flow.md) — Dispute lifecycle, arbiter timeouts, default winner rules, and cooling-off period mechanics.
+- [DAO Mediation](docs/dao-mediation.md) — On-chain DAO mediation and voting process for disputed merchant payments.
+- [Multi-Token Invoices](docs/multi-token-invoice.md) — Invoicing with multi-token support, oracle price feeds, and settlement.
+- [ROSCA Co-signer Guarantee](docs/rosca-cosigner-guarantee.md) — Co-signer nomination and default coverage mechanisms for ROSCA groups.
+- [Refund Contract Guide](docs/refund.md) — Refund request/approval flows, senior escalation, and abuse score tracking.
+- [ROSCA Migration Guide](docs/migration-guide.md) — Upgrade and migration process for deployed ROSCA contracts.
+

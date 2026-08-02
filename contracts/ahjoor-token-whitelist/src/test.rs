@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use crate::{TokenWhitelistContract, TokenWhitelistContractClient};
+use crate::{
+    TokenWhitelistContract, TokenWhitelistContractClient, MAX_QUOTA_PERIOD_LEDGERS,
+    MAX_VOLUME_QUERY_RANGE,
+};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     Address, BytesN, Env,
@@ -27,7 +30,7 @@ fn test_initialize() {
     assert_eq!(client.get_admin(), admin);
 
     // Verify whitelist is empty initially
-    let tokens = client.get_whitelisted_tokens();
+    let tokens = client.get_whitelisted_tokens(&0, &50);
     assert_eq!(tokens.len(), 0);
 
     // Check initialization event
@@ -56,7 +59,7 @@ fn test_add_token() {
     assert!(client.is_token_allowed(&token));
 
     // Verify it's in the whitelist
-    let tokens = client.get_whitelisted_tokens();
+    let tokens = client.get_whitelisted_tokens(&0, &50);
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens.get(0).unwrap(), token);
 
@@ -98,7 +101,7 @@ fn test_remove_token() {
     assert!(!client.is_token_allowed(&token));
 
     // Verify it's not in the whitelist
-    let tokens = client.get_whitelisted_tokens();
+    let tokens = client.get_whitelisted_tokens(&0, &50);
     assert_eq!(tokens.len(), 0);
 
     // Check events were emitted
@@ -151,7 +154,7 @@ fn test_multiple_tokens() {
     assert!(client.is_token_allowed(&token2));
     assert!(client.is_token_allowed(&token3));
 
-    let tokens = client.get_whitelisted_tokens();
+    let tokens = client.get_whitelisted_tokens(&0, &50);
     assert_eq!(tokens.len(), 3);
 
     // Remove one token
@@ -160,7 +163,7 @@ fn test_multiple_tokens() {
     assert!(!client.is_token_allowed(&token2));
     assert!(client.is_token_allowed(&token3));
 
-    let tokens = client.get_whitelisted_tokens();
+    let tokens = client.get_whitelisted_tokens(&0, &50);
     assert_eq!(tokens.len(), 2);
 }
 
@@ -361,7 +364,7 @@ fn test_non_suspended_baseline() {
     client.add_token(&admin, &token);
     assert!(client.is_token_allowed(&token));
 
-    let tokens = client.get_whitelisted_tokens();
+    let tokens = client.get_whitelisted_tokens(&0, &50);
     assert_eq!(tokens.len(), 1);
 
     client.remove_token(&admin, &token);
@@ -398,4 +401,230 @@ fn test_suspend_nonwhitelisted_token_fails() {
 
     let reason = BytesN::from_array(&env, &[1u8; 32]);
     client.suspend_token_timed(&admin, &token, &50u32, &reason);
+}
+
+// ── #540/#588: set_token_quota / update_token_quota period_ledgers upper bound ──
+
+#[test]
+#[should_panic(expected = "period_ledgers exceeds maximum allowed")]
+fn test_set_token_quota_rejects_oversized_period() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+    client.add_token(&admin, &token);
+
+    client.set_token_quota(&admin, &token, &1_000i128, &(MAX_QUOTA_PERIOD_LEDGERS + 1));
+}
+
+#[test]
+fn test_set_token_quota_accepts_max_period() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+    client.add_token(&admin, &token);
+
+    client.set_token_quota(&admin, &token, &1_000i128, &MAX_QUOTA_PERIOD_LEDGERS);
+    let quota = client.get_token_quota(&token).unwrap();
+    assert_eq!(quota.period_ledgers, MAX_QUOTA_PERIOD_LEDGERS);
+}
+
+#[test]
+#[should_panic(expected = "period_ledgers exceeds maximum allowed")]
+fn test_update_token_quota_rejects_oversized_period() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+    client.add_token(&admin, &token);
+    client.set_token_quota(&admin, &token, &1_000i128, &100u32);
+
+    client.update_token_quota(&admin, &token, &1_000i128, &(MAX_QUOTA_PERIOD_LEDGERS + 1));
+}
+
+// ── Companion: get_token_volume bounded range ────────────────────────────────
+
+#[test]
+#[should_panic(expected = "ledger range exceeds maximum allowed")]
+fn test_get_token_volume_rejects_oversized_range() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+    client.add_token(&admin, &token);
+
+    client.get_token_volume(&token, &0u32, &(MAX_VOLUME_QUERY_RANGE + 1));
+}
+
+#[test]
+fn test_get_token_volume_accepts_max_range() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+    client.add_token(&admin, &token);
+
+    let volume = client.get_token_volume(&token, &0u32, &MAX_VOLUME_QUERY_RANGE);
+    assert_eq!(volume, 0);
+}
+
+#[test]
+#[should_panic(expected = "from_ledger must not exceed to_ledger")]
+fn test_get_token_volume_rejects_inverted_range() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+    client.add_token(&admin, &token);
+
+    client.get_token_volume(&token, &10u32, &5u32);
+}
+
+// ── #540: record_token_volume quota enforcement with aggregate buckets ──────
+
+#[test]
+fn test_record_token_volume_within_quota_accumulates() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+    client.add_token(&admin, &token);
+    client.set_token_quota(&admin, &token, &100i128, &50u32);
+    env.ledger().set_sequence_number(1_000);
+
+    client.record_token_volume(&token, &40);
+    client.record_token_volume(&token, &50);
+    // 40 + 50 = 90, still within the 100 quota.
+}
+
+#[test]
+fn test_record_token_volume_rejects_when_quota_exceeded() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+    client.add_token(&admin, &token);
+    client.set_token_quota(&admin, &token, &100i128, &50u32);
+    env.ledger().set_sequence_number(1_000);
+
+    client.record_token_volume(&token, &60);
+    let result = client.try_record_token_volume(&token, &60);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_record_token_volume_window_rolls_over_after_period_elapses() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+    client.add_token(&admin, &token);
+    client.set_token_quota(&admin, &token, &100i128, &48u32);
+    env.ledger().set_sequence_number(1_000);
+
+    client.record_token_volume(&token, &90);
+    // Immediately re-recording within the same window should fail.
+    assert!(client.try_record_token_volume(&token, &20).is_err());
+
+    // Advance well past the full period so every aggregate bucket rolls out
+    // of the window; volume should reset and admit new activity.
+    env.ledger().set_sequence_number(1_000 + 48 * 2);
+    client.record_token_volume(&token, &20);
+}
+
+// ── #540: record_token_volume cost stays bounded at the maximum configured period ──
+
+#[test]
+fn test_record_token_volume_cost_bounded_at_max_period() {
+    let (env, admin, client) = setup_test();
+
+    let small_period_token = Address::generate(&env);
+    client.add_token(&admin, &small_period_token);
+    client.set_token_quota(&admin, &small_period_token, &1_000_000_000i128, &100u32);
+    env.ledger().set_sequence_number(1_000);
+
+    env.cost_estimate().budget().reset_default();
+    assert!(client.try_record_token_volume(&small_period_token, &1i128).is_ok());
+    let small_period_cost = env.cost_estimate().budget().cpu_instruction_cost();
+
+    let max_period_token = Address::generate(&env);
+    client.add_token(&admin, &max_period_token);
+    client.set_token_quota(&admin, &max_period_token, &1_000_000_000i128, &MAX_QUOTA_PERIOD_LEDGERS);
+    env.ledger().set_sequence_number(MAX_QUOTA_PERIOD_LEDGERS + 1_000);
+
+    env.cost_estimate().budget().reset_default();
+    assert!(client.try_record_token_volume(&max_period_token, &1i128).is_ok());
+    let max_period_cost = env.cost_estimate().budget().cpu_instruction_cost();
+
+    // Cost is driven by the fixed VOLUME_AGG_BUCKET_COUNT, not by
+    // period_ledgers, so it should stay within a small constant factor of the
+    // cost at a tiny period rather than scaling toward the ~518,400x a
+    // per-ledger scan would need at the maximum configured period.
+    assert!(
+        max_period_cost < small_period_cost * 3,
+        "record_token_volume cost scaled with period_ledgers: small_period={}, max_period={}",
+        small_period_cost,
+        max_period_cost
+    );
+}
+
+#[test]
+fn test_is_token_allowed_cost_is_constant_at_scale() {
+    let (env, admin, client) = setup_test();
+
+    // Measure lookup cost against a small whitelist.
+    let small_token = Address::generate(&env);
+    client.add_token(&admin, &small_token);
+
+    env.cost_estimate().budget().reset_default();
+    assert!(client.is_token_allowed(&small_token));
+    let small_whitelist_cost = env.cost_estimate().budget().cpu_instruction_cost();
+
+    // Grow the whitelist substantially.
+    for _ in 0..500u32 {
+        let t = Address::generate(&env);
+        client.add_token(&admin, &t);
+    }
+    let large_token = Address::generate(&env);
+    client.add_token(&admin, &large_token);
+
+    // Measure lookup cost against the large whitelist, for both a token
+    // added early and a token added last.
+    env.cost_estimate().budget().reset_default();
+    assert!(client.is_token_allowed(&small_token));
+    let large_whitelist_cost_early = env.cost_estimate().budget().cpu_instruction_cost();
+
+    env.cost_estimate().budget().reset_default();
+    assert!(client.is_token_allowed(&large_token));
+    let large_whitelist_cost_last = env.cost_estimate().budget().cpu_instruction_cost();
+
+    // With an O(1) membership lookup, cost should not meaningfully grow as
+    // the whitelist grows from 1 to 502 entries. A linear scan would be
+    // roughly 500x more expensive here; allow a generous margin above 1x to
+    // avoid flakiness while still catching a regression to linear scans.
+    assert!(
+        large_whitelist_cost_early < small_whitelist_cost * 3,
+        "lookup cost grew with whitelist size: small={}, large_early={}",
+        small_whitelist_cost,
+        large_whitelist_cost_early
+    );
+    assert!(
+        large_whitelist_cost_last < small_whitelist_cost * 3,
+        "lookup cost grew with whitelist size: small={}, large_last={}",
+        small_whitelist_cost,
+        large_whitelist_cost_last
+    );
+}
+
+#[test]
+fn test_is_whitelisted_cost_is_constant_at_scale() {
+    let (env, admin, client) = setup_test();
+
+    let small_token = Address::generate(&env);
+    client.add_token(&admin, &small_token);
+
+    env.cost_estimate().budget().reset_default();
+    assert!(client.is_whitelisted(&small_token));
+    let small_whitelist_cost = env.cost_estimate().budget().cpu_instruction_cost();
+
+    for _ in 0..500u32 {
+        let t = Address::generate(&env);
+        client.add_token(&admin, &t);
+    }
+    let large_token = Address::generate(&env);
+    client.add_token(&admin, &large_token);
+
+    env.cost_estimate().budget().reset_default();
+    assert!(client.is_whitelisted(&large_token));
+    let large_whitelist_cost = env.cost_estimate().budget().cpu_instruction_cost();
+
+    assert!(
+        large_whitelist_cost < small_whitelist_cost * 3,
+        "lookup cost grew with whitelist size: small={}, large={}",
+        small_whitelist_cost,
+        large_whitelist_cost
+    );
 }

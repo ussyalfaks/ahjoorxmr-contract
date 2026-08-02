@@ -5,7 +5,7 @@ use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    vec, Address, Env, String,
+    Address, Env,
 };
 
 struct TestSetup<'a> {

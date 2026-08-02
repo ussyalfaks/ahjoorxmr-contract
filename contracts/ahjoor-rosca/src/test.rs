@@ -1149,7 +1149,7 @@ fn test_read_interface_lifecycle() {
     assert_eq!(info.members.len(), 2);
     assert_eq!(info.current_round, 0);
     assert_eq!(info.next_recipient, u1); // Round 0 recipient
-    assert_eq!(client.get_round_history().len(), 0);
+    assert_eq!(client.get_round_history(&0u32, &0u32, &100u32).len(), 0);
 
     // 2. STAGE: Mid-Round Contribution
     client.contribute(&u1, &token_admin, &100);
@@ -1167,7 +1167,7 @@ fn test_read_interface_lifecycle() {
     client.contribute(&u2, &token_admin, &100); // This triggers complete_round_payout
 
     // Verify History
-    let history = client.get_round_history();
+    let history = client.get_round_history(&0u32, &0u32, &100u32);
     assert_eq!(history.len(), 1);
     let record = history.get(0).unwrap();
     assert_eq!(record.recipient, u1);
@@ -2801,6 +2801,199 @@ fn test_exit_approval_event_emitted() {
     assert_eq!(refund_amount, 0);
 }
 
+// ---------------------------------------------------------------
+// #389: Regression — exiting a member up-front (before their slot
+// has been visited by the round rotation) compacts PayoutOrder,
+// so subsequent members are promoted and slots stay strictly
+// sequential rather than leaving a dangling entry.
+// ---------------------------------------------------------------
+#[test]
+fn test_exit_compacts_payout_order_on_early_exit() {
+    let env = Env::default();
+    let (client, _admin, u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    // Initial layout: PayoutOrder.len() == 3 (members u1, u2, u3).
+    assert_eq!(client.get_group_info().total_rounds, 3);
+
+    // u1 (slot 0) requests + admin approves before any round contributions,
+    // so current_round = 0 and u1's slot_index = 0. Not the past-slot guard
+    // since 0 > 0 is false.
+    client.request_emergency_exit(&u1);
+    client.approve_exit(&u1);
+
+    // After compact: PayoutOrder becomes [u2, u3], length 2.
+    assert_eq!(client.get_group_info().total_rounds, 2);
+
+    // Round 0 → idx 0 % 2 = 0 → u2 (originally at slot 1, now promoted).
+    let u2_before = _tc.balance(&_u2);
+    client.contribute(&_u2, &_ta, &100);
+    client.contribute(&_u3, &_ta, &100);
+    let u2_after = _tc.balance(&_u2);
+    assert_eq!(
+        u2_after, u2_before - 100 + 200,
+        "u2 (promoted to slot 0) should receive round 0 pot after early exit"
+    );
+}
+
+// ---------------------------------------------------------------
+// #389: Regression — exiting AFTER a round has advanced past the
+// member's slot keeps PayoutOrder intact. The per-round payout
+// logic in `complete_round_payout` continues to skip the exited
+// member via the `ExitedMembers` contains check.
+// ---------------------------------------------------------------
+#[test]
+fn test_exit_skips_compaction_on_late_exit() {
+    let env = Env::default();
+    let (client, _admin, u1, u2, u3, _tc, _ta) = setup_exit_env(&env);
+
+    // u1 contributes, then we advance past the round deadline and close_round
+    // so CurrentRound advances from 0 to 1. u1's slot (0) was visited.
+    client.contribute(&u1, &_ta, &100);
+    env.ledger().set_timestamp(3601);
+    client.close_round();
+
+    assert_eq!(client.get_group_info().current_round, 1);
+    assert_eq!(client.get_group_info().total_rounds, 3);
+
+    // u1 exits after their round was paid — compactor must NOT renumber.
+    client.request_emergency_exit(&u1);
+    client.approve_exit(&u1);
+
+    // Layout preserved: total_rounds stays at 3, payout order still 3 entries.
+    assert_eq!(
+        client.get_group_info().total_rounds,
+        3,
+        "Late-exit compactor must skip when current_round > slot_index"
+    );
+
+    // Round 1 → idx = 1 % 3 = 1 → u2 still receives, with u1 correctly
+    // skipped by the contains-check.
+    let u2_before = _tc.balance(&u2);
+    client.contribute(&u2, &_ta, &100);
+    client.contribute(&u3, &_ta, &100);
+    let u2_after = _tc.balance(&u2);
+    assert!(
+        u2_after > u2_before,
+        "u2 should still receive round 1 payout (compactor skipped)"
+    );
+}
+
+// ---------------------------------------------------------------
+// #389: Regression — the PayoutOrderCompacted event is emitted
+// with the correct topic and `skipped_reason` enum value (0 when
+// compaction ran, 1 when the past-slot guard tripped).
+// ---------------------------------------------------------------
+#[test]
+fn test_exit_emits_payout_order_compacted_event() {
+    // ---- Early-exit path: skipped_reason = 0 ----
+    let env = Env::default();
+    let (client, _admin, u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    client.request_emergency_exit(&u1);
+    client.approve_exit(&u1);
+
+    // The new event is published mid-flight in approve_exit, so we scan all
+    // events by topic rather than relying on `last()`.
+    let target_topic = Symbol::new(&env, "payout_order_compacted");
+    let all_events = env.events().all();
+    let mut matched: Option<(soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Map<Symbol, soroban_sdk::Val>)> = None;
+    for (_, topics, data) in all_events.iter() {
+        let topics_vec: soroban_sdk::Vec<soroban_sdk::Val> = topics.into_val(&env);
+        if let Some(first) = topics_vec.first() {
+            let first_sym: Symbol = first.into_val(&env);
+            if first_sym == target_topic {
+                matched = Some((topics_vec.clone(), data.into_val(&env)));
+                break;
+            }
+        }
+    }
+    let (_topics, data) = matched.expect("PayoutOrderCompacted event must be emitted");
+
+    let exited_member: Address = data
+        .get(Symbol::new(&env, "exited_member"))
+        .unwrap()
+        .into_val(&env);
+    let slot_index: u32 = data
+        .get(Symbol::new(&env, "slot_index"))
+        .unwrap()
+        .into_val(&env);
+    let old_len: u32 = data
+        .get(Symbol::new(&env, "old_len"))
+        .unwrap()
+        .into_val(&env);
+    let new_len: u32 = data
+        .get(Symbol::new(&env, "new_len"))
+        .unwrap()
+        .into_val(&env);
+    let current_round: u32 = data
+        .get(Symbol::new(&env, "current_round"))
+        .unwrap()
+        .into_val(&env);
+    let skipped_reason: u32 = data
+        .get(Symbol::new(&env, "skipped_reason"))
+        .unwrap()
+        .into_val(&env);
+    assert_eq!(exited_member, u1);
+    assert_eq!(slot_index, 0);
+    assert_eq!(old_len, 3);
+    assert_eq!(new_len, 2);
+    assert_eq!(current_round, 0);
+    assert_eq!(skipped_reason, 0, "compactor ran (early exit)");
+}
+
+// ---------------------------------------------------------------
+// #389: Regression — late-exit emits PayoutOrderCompacted with
+// skipped_reason = 1 (past-slot guard) and unchanged lengths.
+// ---------------------------------------------------------------
+#[test]
+fn test_exit_emits_payout_order_compacted_skipped_reason_1() {
+    let env = Env::default();
+    let (client, _admin, u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    // Advance past round 0 so u1's slot (0) is already in the past.
+    client.contribute(&u1, &_ta, &100);
+    env.ledger().set_timestamp(3601);
+    client.close_round();
+
+    client.request_emergency_exit(&u1);
+    client.approve_exit(&u1);
+
+    let target_topic = Symbol::new(&env, "payout_order_compacted");
+    let all_events = env.events().all();
+    let mut data: Option<soroban_sdk::Map<Symbol, soroban_sdk::Val>> = None;
+    for (_, topics, event_data) in all_events.iter() {
+        let topics_vec: soroban_sdk::Vec<soroban_sdk::Val> = topics.into_val(&env);
+        if let Some(first) = topics_vec.first() {
+            let first_sym: Symbol = first.into_val(&env);
+            if first_sym == target_topic {
+                data = Some(event_data.into_val(&env));
+                break;
+            }
+        }
+    }
+    let data = data.expect("PayoutOrderCompacted event must be emitted");
+
+    let skipped_reason: u32 = data
+        .get(Symbol::new(&env, "skipped_reason"))
+        .unwrap()
+        .into_val(&env);
+    let old_len: u32 = data
+        .get(Symbol::new(&env, "old_len"))
+        .unwrap()
+        .into_val(&env);
+    let new_len: u32 = data
+        .get(Symbol::new(&env, "new_len"))
+        .unwrap()
+        .into_val(&env);
+    let current_round: u32 = data
+        .get(Symbol::new(&env, "current_round"))
+        .unwrap()
+        .into_val(&env);
+    assert_eq!(skipped_reason, 1, "past-slot guard tripped");
+    assert_eq!(old_len, new_len, "layout unchanged on past-slot skip");
+    assert_eq!(current_round, 1);
+}
+
 // --- PAUSE AND RESUME TESTS ---
 
 #[test]
@@ -4126,7 +4319,7 @@ fn test_round_history_persistent_ttl() {
         .set_sequence_number(setup.env.ledger().sequence() + 110_000);
 
     // RoundHistory must still be accessible (persistent storage, individual TTL)
-    let history = setup.client.get_round_history();
+    let history = setup.client.get_round_history(&0u32, &0u32, &100u32);
     assert_eq!(history.len(), 1);
     assert_eq!(history.get(0).unwrap().amount, 200);
 }
@@ -4152,8 +4345,86 @@ fn test_round_history_ttl_extended_each_round() {
         .ledger()
         .set_sequence_number(setup.env.ledger().sequence() + 110_000);
 
-    let history = setup.client.get_round_history();
+    let history = setup.client.get_round_history(&0u32, &0u32, &100u32);
     assert_eq!(history.len(), 2);
+}
+
+// ===========================================================================
+//  #555: get_round_history pagination
+// ===========================================================================
+
+/// get_round_history(group_id, offset, limit) returns the correct page of
+/// RoundHistory for a group with more rounds than fit on one page.
+#[test]
+fn test_get_round_history_pagination_returns_correct_slice() {
+    let setup = setup_with_members(2, 5_000);
+    default_init(&setup);
+
+    let u1 = setup.members.get(0).unwrap();
+    let u2 = setup.members.get(1).unwrap();
+
+    // Complete 5 rounds (round-robin: u1, u2, u1, u2, u1).
+    for _ in 0..5 {
+        setup.client.contribute(&u1, &setup.token_admin, &100);
+        setup.client.contribute(&u2, &setup.token_admin, &100);
+    }
+
+    let full = setup.client.get_round_history(&0u32, &0u32, &100u32);
+    assert_eq!(full.len(), 5);
+
+    // First page: 2 records, matching the start of the full history.
+    let page1 = setup.client.get_round_history(&0u32, &0u32, &2u32);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1.get(0).unwrap().recipient, full.get(0).unwrap().recipient);
+    assert_eq!(page1.get(1).unwrap().recipient, full.get(1).unwrap().recipient);
+
+    // Second page: next 2 records.
+    let page2 = setup.client.get_round_history(&0u32, &2u32, &2u32);
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2.get(0).unwrap().recipient, full.get(2).unwrap().recipient);
+    assert_eq!(page2.get(1).unwrap().recipient, full.get(3).unwrap().recipient);
+
+    // Final (partial) page: only 1 record remains.
+    let page3 = setup.client.get_round_history(&0u32, &4u32, &2u32);
+    assert_eq!(page3.len(), 1);
+    assert_eq!(page3.get(0).unwrap().recipient, full.get(4).unwrap().recipient);
+}
+
+/// An out-of-range offset returns an empty vec rather than panicking.
+#[test]
+fn test_get_round_history_out_of_range_offset_returns_empty() {
+    let setup = setup_with_members(2, 1_000);
+    default_init(&setup);
+
+    let u1 = setup.members.get(0).unwrap();
+    let u2 = setup.members.get(1).unwrap();
+
+    setup.client.contribute(&u1, &setup.token_admin, &100);
+    setup.client.contribute(&u2, &setup.token_admin, &100);
+
+    // Only 1 round exists; offset way past the end must not panic.
+    let page = setup.client.get_round_history(&0u32, &50u32, &10u32);
+    assert_eq!(page.len(), 0);
+
+    // Offset exactly at the total count is also "out of range".
+    let page_at_boundary = setup.client.get_round_history(&0u32, &1u32, &10u32);
+    assert_eq!(page_at_boundary.len(), 0);
+}
+
+/// A zero limit returns an empty vec regardless of a valid offset.
+#[test]
+fn test_get_round_history_zero_limit_returns_empty() {
+    let setup = setup_with_members(2, 1_000);
+    default_init(&setup);
+
+    let u1 = setup.members.get(0).unwrap();
+    let u2 = setup.members.get(1).unwrap();
+
+    setup.client.contribute(&u1, &setup.token_admin, &100);
+    setup.client.contribute(&u2, &setup.token_admin, &100);
+
+    let page = setup.client.get_round_history(&0u32, &0u32, &0u32);
+    assert_eq!(page.len(), 0);
 }
 
 /// ExitRequests in temporary storage: a request is stored, accessible, and
@@ -4777,6 +5048,95 @@ fn test_grace_period_ledger_vs_timestamp() {
     let info = client.get_group_info();
     // Round has advanced: verify we are in round 1
     assert!(info.current_round >= 1, "should have progressed past round 0");
+}
+
+// ===========================================================================
+//  #556: get_pending_penalties admin view
+// ===========================================================================
+
+/// Empty vec when no penalties are pending.
+#[test]
+fn test_get_pending_penalties_empty_when_none_pending() {
+    let (_env, client, _admin, _token_addr, _members, _token_admin_client) =
+        setup_grace_env(false, 600, 0);
+
+    let pending = client.get_pending_penalties(&0u32);
+    assert_eq!(pending.len(), 0);
+}
+
+/// A group with a mix of an already-processed (auto-flushed on round
+/// advance) and a still-pending penalty: get_pending_penalties must surface
+/// only the member whose penalty is genuinely still awaiting processing.
+#[test]
+fn test_get_pending_penalties_mix_of_processed_and_pending() {
+    let (env, client, _admin, token_addr, members, _token_admin_client) =
+        setup_grace_env(false, 600, 0);
+    let token_client = TokenClient::new(&env, &token_addr);
+
+    let member0 = members.get(0).unwrap();
+    let member1 = members.get(1).unwrap();
+    let member2 = members.get(2).unwrap();
+
+    // Round 0 (deadline = 3600): member2 defaults.
+    env.ledger().with_mut(|l| l.timestamp = 100);
+    client.contribute(&member0, &token_addr, &100);
+    client.contribute(&member1, &token_addr, &100);
+
+    env.ledger().with_mut(|l| l.timestamp = 3800);
+    client.finalize_round();
+
+    // Still within round 0's grace window (deadline 3600 + grace 600 = 4200):
+    // member2's penalty is deferred, not charged yet.
+    env.ledger().with_mut(|l| l.timestamp = 3850);
+    let member2_balance_before = token_client.balance(&member2);
+    client.request_penalty_grace(&member2);
+
+    let pending_after_round0 = client.get_pending_penalties(&0u32);
+    assert_eq!(pending_after_round0.len(), 1);
+    assert_eq!(pending_after_round0.get(0).unwrap().0, member2);
+    // Deferred, not yet charged: balance unchanged.
+    assert_eq!(token_client.balance(&member2), member2_balance_before);
+
+    // Round 1: member1 defaults this time.
+    let round1_deadline = client.get_group_info().round_deadline;
+    client.contribute(&member0, &token_addr, &100);
+    client.contribute(&member2, &token_addr, &100);
+
+    env.ledger().with_mut(|l| l.timestamp = round1_deadline + 100);
+    client.finalize_round();
+    let member1_balance_before_request = token_client.balance(&member1);
+
+    // Still within round 1's own grace window (round1_deadline + 600).
+    // Requesting grace for member1 first runs process_pending_penalties,
+    // which flushes member2's stale round-0 entry (the round has advanced
+    // past it) before deferring member1's brand-new one.
+    let round1_grace_expires_at = round1_deadline + 600;
+    env.ledger()
+        .with_mut(|l| l.timestamp = round1_deadline + 150);
+    client.request_penalty_grace(&member1);
+
+    // member2 was auto-processed: the penalty was actually charged, on top
+    // of member2's normal round-1 contribution of 100.
+    assert_eq!(
+        token_client.balance(&member2),
+        member2_balance_before - 100 - 10
+    );
+
+    // member1 is the only one still awaiting processing.
+    let pending = client.get_pending_penalties(&0u32);
+    assert_eq!(pending.len(), 1);
+    let (pending_member, info) = pending.get(0).unwrap();
+    assert_eq!(pending_member, member1);
+    assert_eq!(info.round, 2);
+    assert_eq!(info.penalty_amount, 10);
+    assert_eq!(info.grace_expires_at, round1_grace_expires_at);
+
+    // member1's penalty hasn't been charged yet — deferred, not applied —
+    // so requesting grace left member1's balance unchanged.
+    assert_eq!(
+        token_client.balance(&member1),
+        member1_balance_before_request
+    );
 }
 
 /// #390 — set_use_timestamp_schedule must reject calls after round 1 starts.

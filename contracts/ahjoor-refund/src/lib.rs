@@ -13,6 +13,11 @@ const INSTANCE_BUMP_AMOUNT: u32 = 120_000;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_000;
 
+/// #582: Minimum allowed `dispute_window`, in seconds (1 hour), below which
+/// `auto_approve_refund` would become callable immediately or near-immediately
+/// after a refund request, defeating the intended merchant review window.
+const MIN_DISPUTE_WINDOW_SECONDS: u64 = 3_600;
+
 // ---------------------------------------------------------------------------
 // Minimal payment contract client — only the fields we need from get_payment.
 // ---------------------------------------------------------------------------
@@ -480,6 +485,12 @@ impl AhjoorRefundContract {
         // Validate fee cap (max 200 bps = 2%)
         if refund_fee_bps > 200 {
             panic!("Refund fee cannot exceed 200 basis points (2%)");
+        }
+
+        // #582: Enforce a minimum dispute window so auto_approve_refund cannot
+        // become immediately callable.
+        if dispute_window < MIN_DISPUTE_WINDOW_SECONDS {
+            panic!("DisputeWindowBelowMinimum");
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -1601,7 +1612,7 @@ impl AhjoorRefundContract {
             .expect("Dispute window not configured");
 
         let now = env.ledger().timestamp();
-        if now < refund.requested_at + dispute_window {
+        if now <= refund.requested_at + dispute_window {
             panic!("Dispute window has not elapsed");
         }
 
@@ -1949,7 +1960,7 @@ impl AhjoorRefundContract {
             .expect("Customer cancel window not configured");
 
         let now = env.ledger().timestamp();
-        if now < refund.requested_at + cancel_window {
+        if now <= refund.requested_at + cancel_window {
             panic!("Customer cancel window has not elapsed");
         }
 
@@ -2294,7 +2305,7 @@ impl AhjoorRefundContract {
         let deadline = refund.requested_at + auto_reject_window + extension;
         let now = env.ledger().timestamp();
 
-        if now < deadline {
+        if now <= deadline {
             panic!("Auto-reject window has not elapsed");
         }
 
@@ -2690,6 +2701,13 @@ impl AhjoorRefundContract {
             })
     }
 
+    /// Get refund statistics scoped to a single merchant (#584). Alias of
+    /// `get_merchant_refund_stats` under the name used by merchant dashboards
+    /// and buyer-trust-tier/abuse-scoring consumers.
+    pub fn get_refund_stats_by_merchant(env: &Env, merchant: Address) -> RefundStats {
+        Self::get_merchant_refund_stats(env, merchant)
+    }
+
     /// Update the refund fee in basis points. Admin only. Max 200 bps (2%).
     pub fn update_refund_fee(env: Env, admin: Address, new_fee_bps: u32) {
         Self::require_admin(&env, &admin);
@@ -2726,6 +2744,22 @@ impl AhjoorRefundContract {
             .instance()
             .get(&DataKey::DisputeWindow)
             .expect("Dispute window not configured")
+    }
+
+    /// Admin sets the dispute window in seconds. Rejects values below
+    /// `MIN_DISPUTE_WINDOW_SECONDS` (#582), which would otherwise let
+    /// `auto_approve_refund` bypass the intended merchant review period.
+    pub fn set_dispute_window(env: Env, admin: Address, dispute_window: u64) {
+        Self::require_admin(&env, &admin);
+        if dispute_window < MIN_DISPUTE_WINDOW_SECONDS {
+            panic!("DisputeWindowBelowMinimum");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeWindow, &dispute_window);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Get refund details
@@ -4604,6 +4638,36 @@ impl AhjoorRefundContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// #586: Admin view of refunds currently awaiting senior review.
+    /// Only refunds with status `EscalatedToSenior` are returned (resolved
+    /// escalations move to `Processed`/`Rejected` and drop out of this view).
+    /// `limit` is capped at 50 per call.
+    pub fn list_pending_senior_escalations(env: Env, offset: u32, limit: u32) -> Vec<u32> {
+        let effective_limit = limit.min(50);
+        let counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundCounter)
+            .unwrap_or(0);
+
+        let mut result = Vec::new(&env);
+        let mut matched: u32 = 0;
+        for refund_id in 0..counter {
+            let refund: Refund = match env.storage().persistent().get(&DataKey::Refund(refund_id)) {
+                Some(r) => r,
+                None => continue,
+            };
+            if refund.status != RefundStatus::EscalatedToSenior {
+                continue;
+            }
+            if matched >= offset && result.len() < effective_limit {
+                result.push_back(refund_id);
+            }
+            matched += 1;
+        }
+        result
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Feature: Refund Customer Abuse Score
     // ─────────────────────────────────────────────────────────────────────────
@@ -5382,6 +5446,49 @@ impl AhjoorRefundContract {
             .set(&DataKey2::ReserveAlertThresholdBps, &alert_bps);
     }
 
+    /// #585: Admin-triggered one-time migration of a merchant's legacy (#274)
+    /// reserve balance into the canonical (#334) reserve balance. Moves the
+    /// full legacy balance, zeroes the legacy entry, and returns the amount
+    /// migrated (0 if the merchant had no legacy balance). Total merchant
+    /// reserve balance is preserved exactly — no funds are created or lost,
+    /// only relocated between the two storage keys the two subsystems track.
+    pub fn migrate_merchant_reserve(env: Env, admin: Address, merchant: Address) -> i128 {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        let legacy_key = DataKey::MerchantReserve(merchant.clone());
+        let legacy_balance: i128 = env.storage().persistent().get(&legacy_key).unwrap_or(0);
+        if legacy_balance == 0 {
+            return 0;
+        }
+
+        env.storage().persistent().set(&legacy_key, &0i128);
+
+        let canonical_key = DataKey2::MerchantReserveBalance(merchant.clone());
+        let canonical_balance: i128 = env.storage().persistent().get(&canonical_key).unwrap_or(0);
+        let new_canonical_balance = canonical_balance + legacy_balance;
+        env.storage()
+            .persistent()
+            .set(&canonical_key, &new_canonical_balance);
+        env.storage().persistent().extend_ttl(
+            &canonical_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_merchant_reserve_migrated(
+            &env,
+            merchant,
+            legacy_balance,
+            new_canonical_balance,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        legacy_balance
+    }
+
     pub fn set_merchant_response_deadline(
         env: Env,
         admin: Address,
@@ -5634,6 +5741,13 @@ impl AhjoorRefundContract {
             })
     }
 
+    /// Returns the full currently active `RefundPolicy` for a merchant (#583):
+    /// the merchant's own published policy if set, else the admin global default,
+    /// else the hardcoded fallback — the same resolution used to enforce refunds.
+    pub fn export_refund_policy(env: Env, merchant: Address) -> RefundPolicy {
+        Self::refund_policy_for(&env, &merchant)
+    }
+
     fn enforce_refund_policy(
         env: &Env,
         policy: &RefundPolicy,
@@ -5693,3 +5807,6 @@ mod test_abuse_score;
 
 #[cfg(test)]
 mod test_cross_contract_refund;
+
+#[cfg(test)]
+mod test_deadline_boundaries;

@@ -59,4 +59,4 @@ State archival on Stellar/Soroban does not delete contract logic or persistent s
 ## Related
 
 - [README — State Archival & TTL](../README.md#state-archival--ttl)
-- [Stellar State Archival documentation](https://developers.stellar.org/docs/learn/smart-contract-internals/state-archival)
+- [Stellar State Archival documentation](http://web.archive.org/web/20240612170450/https://developers.stellar.org/docs/learn/smart-contract-internals/state-archival)

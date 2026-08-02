@@ -87,6 +87,21 @@ pub struct PayoutRecord {
     pub amount: i128,
 }
 
+/// A defaulter's penalty that has been deferred via `request_penalty_grace`
+/// and is awaiting processing by `process_pending_penalties`/`apply_penalty` (#556).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingPenaltyInfo {
+    /// Round in which the penalty deferral was requested.
+    pub round: u32,
+    /// Penalty amount (in the group's contribution token) that will be
+    /// charged once the penalty is processed.
+    pub penalty_amount: i128,
+    /// Ledger timestamp after which the grace period has elapsed and the
+    /// penalty becomes eligible for processing.
+    pub grace_expires_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExitRequest {
@@ -240,9 +255,7 @@ pub enum DataKey2 {
     ReinvestPreference = 58,
     ExitRequests = 59,
     TokenWhitelistContract = 60,
-    CycleRecords = 61,
     CycleRecordRetentionWindow = 62,
-    ArchivedCycleRecords = 63,
     CycleStartTimestamps = 64,
     EmergencyPayoutConfig = 65,
     EmergencyPayoutRequests = 66,
@@ -285,6 +298,11 @@ pub enum DataKey4 {
     LastRoundDeadline = 97,
     CoSigners = 98,
     CoSignerWindowLedgers = 99,
+    /// Count of consecutive `close_round` calls since the last `finalize_round`.
+    /// Guards against an admin repeatedly calling `close_round` instead of
+    /// `finalize_round`, which would advance rounds without ever paying out
+    /// the pot or recording audit trail / receipts / cycle bonuses.
+    UnfinalizedRoundStreak = 100,
 }
 
 /// Waitlist ordering mode (#456).
@@ -379,6 +397,16 @@ pub enum DataKey5 {
     // #454: Collective goal reward pool
     GoalRewardPool,             // i128 — funded by admin, distributed once collective_goal is reached
     GoalRewardDistributed,
+    // #544: per-cycle CycleRecord storage, keyed by cycle_number, replacing
+    // the single CycleRecords blob so lookups/writes are O(1) instead of
+    // requiring the whole history to be deserialized on every call.
+    CycleRecordEntry(u32),
+    // #544: per-cycle archived CycleRecord storage (temporary), keyed by
+    // cycle_number, replacing the single ArchivedCycleRecords blob.
+    ArchivedCycleRecordEntry(u32),
+    // #544: smallest cycle_number not yet archived, so `archive_old_records`
+    // can find archival candidates without scanning every persisted cycle.
+    OldestPersistentCycle,
 }
 
 

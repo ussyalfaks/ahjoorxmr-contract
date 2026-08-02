@@ -204,4 +204,8 @@ pub enum ExtError2 {
     ReceiptNotFound = 116,
     /// Member has already registered co-payer splits; revoke first.
     CopayerSplitsAlreadySet = 117,
+    /// close_round has been called too many times in a row without an
+    /// intervening finalize_round — the pot must be paid out (and audit
+    /// trail/receipts recorded) before the round can advance again.
+    RoundPendingFinalization = 119,
 }

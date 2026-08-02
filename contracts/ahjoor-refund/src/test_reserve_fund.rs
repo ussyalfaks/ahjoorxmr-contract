@@ -2,6 +2,7 @@
 extern crate std;
 
 use soroban_sdk::{testutils::Address as _, Address, Env};
+use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 
 use crate::{AhjoorRefundContract, AhjoorRefundContractClient, RefundInitConfig};
@@ -93,4 +94,63 @@ fn test_compliance_check_passes_when_funded() {
     // No volume → required = 0 → always compliant
     let compliant = client.check_reserve_compliance(&admin, &merchant);
     assert!(compliant);
+}
+
+// --- #585: Reserve subsystem reconciliation ---
+
+#[test]
+fn test_migrate_merchant_reserve_moves_legacy_into_canonical() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup(&env);
+    let merchant = Address::generate(&env);
+    let (token_addr, token_admin) = make_token(&env, &admin);
+    let token_client = TokenClient::new(&env, &token_addr);
+
+    token_admin.mint(&merchant, &2000i128);
+
+    // Legacy (#274) balance via deposit_reserve.
+    client.deposit_reserve(&merchant, &token_addr, &300i128);
+    assert_eq!(client.get_merchant_reserve(&merchant), 300i128);
+
+    // Canonical (#334) balance via deposit_merchant_reserve. Reserve config is
+    // seeded directly rather than via `set_reserve_config`, which calls
+    // `admin.require_auth()` twice (once directly, once inside `require_admin`)
+    // and trips soroban-sdk's mock_all_auths duplicate-authorization check —
+    // a pre-existing issue in that setter, unrelated to #585.
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&crate::DataKey2::ReserveToken, &token_addr);
+    });
+    token_client.approve(
+        &merchant,
+        &client.address,
+        &200i128,
+        &(env.ledger().sequence() + 1000),
+    );
+    client.deposit_merchant_reserve(&merchant, &200i128);
+
+    let migrated = client.migrate_merchant_reserve(&admin, &merchant);
+
+    // Total preserved: 300 (legacy) + 200 (canonical) = 500, all now canonical.
+    assert_eq!(migrated, 300i128);
+    assert_eq!(client.get_merchant_reserve(&merchant), 0i128);
+
+    let key = crate::DataKey2::MerchantReserveBalance(merchant.clone());
+    let canonical_balance: i128 = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&key).unwrap_or(0)
+    });
+    assert_eq!(canonical_balance, 500i128);
+}
+
+#[test]
+fn test_migrate_merchant_reserve_no_legacy_balance_is_noop() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _) = setup(&env);
+    let merchant = Address::generate(&env);
+
+    let migrated = client.migrate_merchant_reserve(&admin, &merchant);
+    assert_eq!(migrated, 0i128);
 }

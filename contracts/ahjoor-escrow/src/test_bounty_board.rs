@@ -1,7 +1,23 @@
 #![cfg(test)]
 
+//! #319: Tests for the bounty board open competitive work assignment feature.
+//!
+//! Covers the acceptance criteria:
+//! - Buyer can create a bounty with description hash, claim deadline, and submission
+//!   deadline; status is `BountyUnclaimed` and solver is `None`.
+//! - Any solver can claim an unclaimed bounty first-come-first-served.
+//! - The assigned solver can submit work (submission hash) before the deadline.
+//! - Buyer can approve a submission, releasing funds to the solver.
+//! - Buyer can reject a submission, re-opening the bounty for another solver.
+//! - A configurable maximum rejection rounds (default 3) prevents infinite churn.
+//! - Buyer can cancel an unclaimed bounty and receive a refund.
+//! - Admin can configure the max bounty rejection rounds.
+//! - Milestone-gated bounty variant with per-milestone verifiers.
+//! - Cancellation after partial milestone payout refunds only remaining funds.
+
 use crate::{
-    AhjoorEscrowContract, AhjoorEscrowContractClient, BountyMilestoneInput, EscrowStatus,
+    AhjoorEscrowContract, AhjoorEscrowContractClient, BountyMilestoneInput, EscrowErrorExt3,
+    EscrowStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
@@ -72,7 +88,6 @@ fn test_create_bounty_success() {
 }
 
 #[test]
-#[should_panic(expected = "Bounty amount must be positive")]
 fn test_create_bounty_zero_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -90,8 +105,7 @@ fn test_create_bounty_zero_amount() {
 
     let description_hash = BytesN::from_array(&env, &[1u8; 32]);
     let current_time = env.ledger().timestamp();
-
-    client.create_bounty(
+    let __typed_err_result = client.try_create_bounty(
         &buyer,
         &token.address,
         &0,
@@ -99,10 +113,10 @@ fn test_create_bounty_zero_amount() {
         &(current_time + 86400),
         &(current_time + 172800),
     );
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::BountyAmountMustBePositive.into());
 }
 
 #[test]
-#[should_panic(expected = "Claim deadline must be in the future")]
 fn test_create_bounty_past_claim_deadline() {
     let env = Env::default();
     env.mock_all_auths();
@@ -122,8 +136,7 @@ fn test_create_bounty_past_claim_deadline() {
     let description_hash = BytesN::from_array(&env, &[1u8; 32]);
     advance_ledger(&env, 1000); // ensure timestamp > 100 so subtraction doesn't overflow
     let current_time = env.ledger().timestamp();
-
-    client.create_bounty(
+    let __typed_err_result = client.try_create_bounty(
         &buyer,
         &token.address,
         &500,
@@ -131,10 +144,10 @@ fn test_create_bounty_past_claim_deadline() {
         &(current_time - 100),
         &(current_time + 172800),
     );
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::ClaimDeadlineMustBeFuture.into());
 }
 
 #[test]
-#[should_panic(expected = "Submission deadline must be after claim deadline")]
 fn test_create_bounty_invalid_deadlines() {
     let env = Env::default();
     env.mock_all_auths();
@@ -153,8 +166,7 @@ fn test_create_bounty_invalid_deadlines() {
 
     let description_hash = BytesN::from_array(&env, &[1u8; 32]);
     let current_time = env.ledger().timestamp();
-
-    client.create_bounty(
+    let __typed_err_result = client.try_create_bounty(
         &buyer,
         &token.address,
         &500,
@@ -162,6 +174,7 @@ fn test_create_bounty_invalid_deadlines() {
         &(current_time + 172800),
         &(current_time + 86400),
     );
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::SubmissionDeadlineMustBeAfterClaimDeadline.into());
 }
 
 #[test]
@@ -205,7 +218,6 @@ fn test_claim_bounty_success() {
 }
 
 #[test]
-#[should_panic(expected = "Bounty is not available for claiming")]
 fn test_claim_bounty_duplicate() {
     let env = Env::default();
     env.mock_all_auths();
@@ -237,11 +249,11 @@ fn test_claim_bounty_duplicate() {
     );
 
     client.claim_bounty(&solver1, &escrow_id);
-    client.claim_bounty(&solver2, &escrow_id); // Should panic
+    let __typed_err_result = client.try_claim_bounty(&solver2, &escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::BountyIsNotAvailableClaiming.into());
 }
 
 #[test]
-#[should_panic(expected = "Claim deadline has passed")]
 fn test_claim_bounty_after_deadline() {
     let env = Env::default();
     env.mock_all_auths();
@@ -273,7 +285,8 @@ fn test_claim_bounty_after_deadline() {
 
     advance_ledger(&env, 86401); // Past claim deadline
 
-    client.claim_bounty(&solver, &escrow_id);
+    let __typed_err_result = client.try_claim_bounty(&solver, &escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::ClaimDeadlineHasPassed.into());
 }
 
 #[test]
@@ -316,7 +329,6 @@ fn test_submit_bounty_work_success() {
 }
 
 #[test]
-#[should_panic(expected = "Only the assigned solver can submit work")]
 fn test_submit_bounty_work_wrong_solver() {
     let env = Env::default();
     env.mock_all_auths();
@@ -350,11 +362,11 @@ fn test_submit_bounty_work_wrong_solver() {
     client.claim_bounty(&solver, &escrow_id);
 
     let submission_hash = BytesN::from_array(&env, &[2u8; 32]);
-    client.submit_bounty_work(&wrong_solver, &escrow_id, &submission_hash);
+    let __typed_err_result = client.try_submit_bounty_work(&wrong_solver, &escrow_id, &submission_hash);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::OnlyAssignedSolverCanSubmitWork.into());
 }
 
 #[test]
-#[should_panic(expected = "Submission deadline has passed")]
 fn test_submit_bounty_work_after_deadline() {
     let env = Env::default();
     env.mock_all_auths();
@@ -389,7 +401,8 @@ fn test_submit_bounty_work_after_deadline() {
     advance_ledger(&env, 172801); // Past submission deadline
 
     let submission_hash = BytesN::from_array(&env, &[2u8; 32]);
-    client.submit_bounty_work(&solver, &escrow_id, &submission_hash);
+    let __typed_err_result = client.try_submit_bounty_work(&solver, &escrow_id, &submission_hash);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::SubmissionDeadlineHasPassed.into());
 }
 
 #[test]
@@ -438,7 +451,6 @@ fn test_approve_bounty_submission_success() {
 }
 
 #[test]
-#[should_panic(expected = "No submission has been made")]
 fn test_approve_bounty_without_submission() {
     let env = Env::default();
     env.mock_all_auths();
@@ -469,7 +481,8 @@ fn test_approve_bounty_without_submission() {
     );
 
     client.claim_bounty(&solver, &escrow_id);
-    client.approve_bounty_submission(&buyer, &escrow_id);
+    let __typed_err_result = client.try_approve_bounty_submission(&buyer, &escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::NoSubmissionHasBeenMade.into());
 }
 
 #[test]
@@ -527,7 +540,6 @@ fn test_reject_bounty_submission_and_reclaim() {
 }
 
 #[test]
-#[should_panic(expected = "Maximum rejection rounds reached")]
 fn test_reject_bounty_max_rejections() {
     let env = Env::default();
     env.mock_all_auths();
@@ -569,7 +581,8 @@ fn test_reject_bounty_max_rejections() {
     client.claim_bounty(&solver, &escrow_id);
     let submission_hash = BytesN::from_array(&env, &[2u8; 32]);
     client.submit_bounty_work(&solver, &escrow_id, &submission_hash);
-    client.reject_bounty_submission(&buyer, &escrow_id);
+    let __typed_err_result = client.try_reject_bounty_submission(&buyer, &escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::MaximumRejectionRoundsReached.into());
 }
 
 #[test]
@@ -685,7 +698,6 @@ fn test_cancel_bounty_after_inspection_fee() {
 }
 
 #[test]
-#[should_panic(expected = "Cannot cancel bounty in current state")]
 fn test_cancel_bounty_claimed() {
     let env = Env::default();
     env.mock_all_auths();
@@ -716,7 +728,8 @@ fn test_cancel_bounty_claimed() {
     );
 
     client.claim_bounty(&solver, &escrow_id);
-    client.cancel_bounty(&buyer, &escrow_id); // Should panic
+    let __typed_err_result = client.try_cancel_bounty(&buyer, &escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt3::CannotCancelBountyCurrentState.into());
 }
 
 #[test]

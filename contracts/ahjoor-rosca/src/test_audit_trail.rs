@@ -33,21 +33,20 @@ fn create_test_contract(env: &Env) -> (AhjoorContractClient, Address, Vec<Addres
         fee_bps: 100u32, // 1%
         fee_recipient: Some(admin.clone()),
         max_defaults: 3u32,
-            grace_period_ledgers: 0,
-            grace_period_seconds: 0,
-            use_timestamp_schedule: false,
+        grace_period_ledgers: 0,
+        use_timestamp_schedule: false,
         round_duration_seconds: 0u64,
         max_members: Some(10u32),
         skip_fee: 10i128,
         max_skips_per_cycle: 1u32,
         voting_mode: VotingMode::Equal,
-    late_fee_bps: 0,
-    grace_period_seconds: 0,
-    auction_enabled: false,
-    auction_window_ledgers: 0,
-    randomize_payout_order: false,
-    reserve_enabled: false,
-    reserve_contribution_bps: 0,
+        late_fee_bps: 0,
+        grace_period_seconds: 0,
+        auction_enabled: false,
+        auction_window_ledgers: 0,
+        randomize_payout_order: false,
+        reserve_enabled: false,
+        reserve_contribution_bps: 0,
     };
 
     client.init(
@@ -57,6 +56,7 @@ fn create_test_contract(env: &Env) -> (AhjoorContractClient, Address, Vec<Addres
         &token,
         &round_duration,
         &config,
+        &None,
     );
 
     (client, admin, members)
@@ -185,9 +185,7 @@ fn test_cycle_record_tracks_skippers() {
     });
 
     // Finalize round to trigger payout and audit recording
-    client.close_round();
-
-
+    client.finalize_round();
 
     // Get cycle record
     let cycle_record = client.get_cycle_record(&0u32).unwrap();
@@ -220,7 +218,7 @@ fn test_member_contribution_history() {
 
     // Get contribution history for member1
     let member1 = members.get(0).unwrap();
-    let history = client.get_member_contribution_history(&member1);
+    let history = client.get_member_contribution_history(&member1, &0u32, &2u32);
 
     // Verify history contains 3 contributions
     assert_eq!(history.len(), 3);
@@ -229,6 +227,113 @@ fn test_member_contribution_history() {
         assert_eq!(contribution.member, member1);
         assert_eq!(contribution.amount, 1000i128);
     }
+}
+
+#[test]
+fn test_member_contribution_history_range_returns_only_requested_slice() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, members) = create_test_contract(&env);
+    let token = client.get_state().4;
+
+    let token_admin_client = token::StellarAssetClient::new(&env, &token);
+    for member in members.iter() {
+        token_admin_client.mint(&member, &100000i128);
+    }
+
+    // Complete 5 cycles (0..4).
+    for _round in 0..5 {
+        for member in members.iter() {
+            client.contribute(&member, &token, &1000i128);
+        }
+    }
+
+    let member1 = members.get(0).unwrap();
+
+    // Full history across all 5 cycles.
+    let full = client.get_member_contribution_history(&member1, &0u32, &4u32);
+    assert_eq!(full.len(), 5);
+
+    // A narrower slice (cycles 1..=2) returns only those two entries.
+    let slice = client.get_member_contribution_history(&member1, &1u32, &2u32);
+    assert_eq!(slice.len(), 2);
+
+    // A single-cycle window.
+    let single = client.get_member_contribution_history(&member1, &3u32, &3u32);
+    assert_eq!(single.len(), 1);
+    assert_eq!(single.get(0).unwrap().member, member1);
+}
+
+#[test]
+#[should_panic(expected = "cycle range exceeds maximum allowed")]
+fn test_member_contribution_history_rejects_oversized_range() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _members) = create_test_contract(&env);
+    let member = Address::generate(&env);
+
+    client.get_member_contribution_history(&member, &0u32, &crate::audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE);
+}
+
+#[test]
+#[should_panic(expected = "from_cycle must not exceed to_cycle")]
+fn test_member_contribution_history_rejects_inverted_range() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _members) = create_test_contract(&env);
+    let member = Address::generate(&env);
+
+    client.get_member_contribution_history(&member, &5u32, &1u32);
+}
+
+#[test]
+fn test_member_contribution_history_cost_bounded_by_range_not_total_history() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, members) = create_test_contract(&env);
+    let token = client.get_state().4;
+
+    // Retention window large enough that nothing archives during this test,
+    // so every cycle stays in persistent storage.
+    let token_admin_client = token::StellarAssetClient::new(&env, &token);
+    for member in members.iter() {
+        token_admin_client.mint(&member, &10_000_000i128);
+    }
+
+    // Build up a long history: 60 completed cycles.
+    for _round in 0..60 {
+        for member in members.iter() {
+            client.contribute(&member, &token, &1000i128);
+        }
+    }
+
+    let member1 = members.get(0).unwrap();
+
+    // Query a fixed-size 5-cycle window early in history...
+    env.cost_estimate().budget().reset_default();
+    let early = client.get_member_contribution_history(&member1, &0u32, &4u32);
+    let early_cost = env.cost_estimate().budget().cpu_instruction_cost();
+    assert_eq!(early.len(), 5);
+
+    // ...and the same size window at the far end of the 60-cycle history.
+    env.cost_estimate().budget().reset_default();
+    let late = client.get_member_contribution_history(&member1, &55u32, &59u32);
+    let late_cost = env.cost_estimate().budget().cpu_instruction_cost();
+    assert_eq!(late.len(), 5);
+
+    // Cost for the same-sized window should not meaningfully grow just
+    // because the group has more total history behind it — it's driven by
+    // the requested range, not by how many cycles exist overall.
+    assert!(
+        late_cost < early_cost * 3,
+        "contribution history query cost scaled with total history: early={}, late={}",
+        early_cost,
+        late_cost
+    );
 }
 
 #[test]
@@ -281,18 +386,18 @@ fn test_cycle_record_includes_insurance_drawn() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let (client, admin, members) = create_test_contract(&env);
+    let (client, _admin, members) = create_test_contract(&env);
     let token = client.get_state().4;
 
-    // Mint tokens for members and admin
+    // Mint tokens for members
     let sac = token::StellarAssetClient::new(&env, &token);
     for member in members.iter() {
         sac.mint(&member, &10000i128);
     }
-    sac.mint(&admin, &10000i128);
 
-    // Add to insurance pool
-    client.contribute_to_insurance(&admin, &token, &500i128);
+    // Add to insurance pool. Only members may contribute; member3 (who will
+    // default this round) funds it without making their own contribution.
+    client.contribute_to_insurance(&members.get(2).unwrap(), &token, &500i128);
 
     // Only 2 members contribute (shortfall expected)
     client.contribute(&members.get(0).unwrap(), &token, &1000i128);

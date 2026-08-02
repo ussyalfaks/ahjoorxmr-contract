@@ -174,6 +174,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
     let mut total_payout_history_amt = 0i128;
     let mut reinvested_amount = 0i128;
     let mut total_fee_collected = 0i128;
+    let mut insurance_drawn_this_round = 0i128;
 
     // Calculate expected pot based on member tiers and check for shortfall
     let base_amount: i128 = env
@@ -254,6 +255,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
             }
         };
         if draw_amount > 0 {
+            insurance_drawn_this_round = draw_amount;
             insurance_pool -= draw_amount;
             env.storage().instance().set(&DataKey2::InsurancePool, &insurance_pool);
             events::emit_insurance_paid_out(env, current_round, shortfall, insurance_pool);
@@ -419,18 +421,21 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         env.ledger().sequence() as u64
     };
 
-    let cycle_start_timestamp = audit_trail::get_cycle_start_timestamp(env, current_round);
+    // Cycle 0's start isn't captured by the "new cycle begins" hook below
+    // (that only fires once a preceding round has completed), so fall back
+    // to this round's own end-of-processing marker rather than reporting 0.
+    let recorded_cycle_start = audit_trail::get_cycle_start_timestamp(env, current_round);
+    let cycle_start_timestamp = if recorded_cycle_start > 0 {
+        recorded_cycle_start
+    } else {
+        cycle_end_timestamp
+    };
 
     // Get penalty and insurance amounts from storage
     let penalty_amount: i128 = env
         .storage()
         .instance()
         .get(&DataKey::PenaltyAmount)
-        .unwrap_or(0);
-    let insurance_pool: i128 = env
-        .storage()
-        .instance()
-        .get(&DataKey2::InsurancePool)
         .unwrap_or(0);
 
     // Calculate penalties collected and insurance drawn from events/defaults
@@ -441,9 +446,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         0
     };
 
-    // Insurance drawn is available from previous insurance balance - current balance
-    // For this round, we track what was drawn via events; default to 0 if not tracked separately
-    let insurance_drawn = 0i128;
+    let insurance_drawn = insurance_drawn_this_round;
 
     // Record the cycle audit trail
     audit_trail::record_cycle_audit(
@@ -747,5 +750,83 @@ pub(crate) fn execute_member_removal(env: &Env, member: &Address) {
         .set(&DataKey::PayoutOrder, &new_order);
 
     events::emit_mem_del(env, member.clone());
+}
+
+/// Removes `member` from `DataKey::PayoutOrder` and renumbers the following
+/// slots, fixing the dangling-entry / payout-gap defect described in #389.
+///
+/// compaction only runs when the exiting member's payout slot has NOT yet been
+/// paid out, i.e. `current_round <= slot_index`. When `current_round > slot_index`
+/// the slot has already been visited by an earlier round; renumbering later
+/// slots in that case would shift active pays into the wrong rounds, so we
+/// leave the layout untouched and rely on the exited-member check inside
+/// `complete_round_payout` to skip the vacated slot.
+///
+/// `current_round` is taken as a parameter so the caller does not have to
+/// re-read the storage key (avoids a duplicate `get(&DataKey::CurrentRound)`).
+///
+/// Returns `(compacted, slot_index, old_len, new_len, skip_reason)`:
+/// - `compacted`: `true` only when the vector was rewritten, `false` on every
+///   defensive branch.
+/// - `slot_index`: 0-based index of the member inside `PayoutOrder` before
+///   any compaction. `u32::MAX` when the member was not found (defensive);
+///   otherwise in `[0, old_len)`.
+/// - `old_len` / `new_len`: lengths before / after; equal when `compacted ==
+///   false`.
+/// - `skip_reason`: `0` when compaction ran, `1` when the past-slot guard
+///   tripped, `2` when the layout was left untouched for a defensive reason
+///   (empty `PayoutOrder` or member absent from it).
+pub(crate) fn compact_payout_order(
+    env: &Env,
+    member: &Address,
+    current_round: u32,
+) -> (bool, u32, u32, u32, u32) {
+    let payout_order: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::PayoutOrder)
+        .unwrap_or_else(|| Vec::new(env));
+    let old_len = payout_order.len();
+
+    // Defensive: nothing to compact against an empty payout order.
+    if old_len == 0 {
+        return (false, 0, 0, 0, 2);
+    }
+
+    // Locate the member's slot in PayoutOrder. Sentinel when not found so we
+    // can distinguish "not found" from "found at index 0".
+    let mut slot_index: u32 = u32::MAX;
+    for (idx, addr) in payout_order.iter().enumerate() {
+        if addr == *member {
+            slot_index = idx as u32;
+            break;
+        }
+    }
+
+    if slot_index == u32::MAX {
+        // Member absent from the order — no compaction to perform.
+        return (false, u32::MAX, old_len, old_len, 2);
+    }
+
+    // Skip compaction if the exiting member's slot was already paid out by
+    // an earlier round. Renumbering here would shift later slots into the
+    // wrong round and cause misdirected payouts.
+    if current_round > slot_index {
+        return (false, slot_index, old_len, old_len, 1);
+    }
+
+    // Rebuild the vector without the exited member — promotes every member
+    // after the exited one up by one slot (and one round).
+    let mut new_order: Vec<Address> = Vec::new(env);
+    for addr in payout_order.iter() {
+        if addr != *member {
+            new_order.push_back(addr.clone());
+        }
+    }
+    let new_len = new_order.len();
+
+    env.storage().instance().set(&DataKey::PayoutOrder, &new_order);
+
+    (true, slot_index, old_len, new_len, 0)
 }
 
