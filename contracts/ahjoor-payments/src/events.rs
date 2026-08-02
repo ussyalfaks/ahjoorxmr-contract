@@ -2039,6 +2039,14 @@ pub struct DaoVerdictExecuted {
     pub votes_for_customer: u32,
 }
 
+/// Event: DAO escalation was cancelled before voting began.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DaoEscalationCancelled {
+    pub payment_id: u32,
+    pub case_id: u32,
+}
+
 pub fn emit_dao_configured(e: &Env, member_count: u32, vote_window_seconds: u64, min_votes: u32) {
     DaoConfigured { member_count, vote_window_seconds, min_votes }.publish(e);
 }
@@ -2073,4 +2081,8 @@ pub fn emit_dao_verdict_executed(
     votes_for_customer: u32,
 ) {
     DaoVerdictExecuted { case_id, payment_id, merchant_wins, votes_for_merchant, votes_for_customer }.publish(e);
+}
+
+pub fn emit_dao_escalation_cancelled(e: &Env, payment_id: u32, case_id: u32) {
+    DaoEscalationCancelled { payment_id, case_id }.publish(e);
 }

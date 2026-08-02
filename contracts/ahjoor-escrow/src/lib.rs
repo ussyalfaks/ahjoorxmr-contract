@@ -13,11 +13,13 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 120_000;
 const DEADLINE_EXTENSION_PROPOSAL_WINDOW: u64 = 24 * 60 * 60;
 const MAX_EVIDENCE_ENTRIES_PER_PARTY: u32 = 5;
 const DEFAULT_DISPUTE_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
-const MAX_BATCH_ESCROWS: u32 = 10;
+const DEFAULT_MAX_BATCH_ESCROWS: u32 = 10;
 const DEFAULT_MAX_ORACLE_AGE_SECONDS: u64 = 300;
 const DEFAULT_INSURANCE_TRIGGER_DAYS: u64 = 7;
 const DEFAULT_MAX_TOPUP_MULTIPLIER: u32 = 3;
 const DEFAULT_PARTIAL_RELEASE_RESPONSE_DEADLINE: u64 = 86400; // 1 day
+/// #574: max number of status-transition entries retained per escrow; oldest are pruned.
+const MAX_STATUS_HISTORY_ENTRIES: u32 = 20;
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -340,6 +342,13 @@ pub enum DisputeDefaultWinner {
     Seller = 1,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum CollateralHealthStatus {
+    Healthy = 0,
+    UnderCollateralized = 1,
+}
+
 const ORACLE_COMPARISON_LESS_OR_EQUAL: u32 = 0;
 const ORACLE_COMPARISON_GREATER_OR_EQUAL: u32 = 1;
 
@@ -489,6 +498,15 @@ pub struct Dispute {
     pub resolved: bool,
     pub dispute_amount: i128,
     pub timeout_seconds: Option<u64>,
+}
+
+/// #571: Insurance claim details recorded for an escrow.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsuranceClaimRecord {
+    pub claimant: Address,
+    pub amount: i128,
+    pub claimed_at: u64,
 }
 
 // #215: time-locked escrow release data
@@ -719,6 +737,8 @@ pub enum DataKey2 {
     CollateralMinRatioBps(u32),
     /// #361: oracle address for collateral health checks per escrow
     CollateralOracle(u32),
+    /// #577: admin-configurable max batch size for batch escrow creation
+    MaxEscrowBatchSize,
     /// #350: ordered list of authorized approver addresses per escrow
     MultiPartyApprovers(u32),
     /// #350: required N-of-M approval threshold per escrow
@@ -745,6 +765,8 @@ pub enum DataKey2 {
     InspectorRulingAppealed(u32),
     /// #376: ordered milestone schedule for a milestone-gated bounty (escrow_id → Vec<BountyMilestone>)
     BountyMilestones(u32),
+    /// #573: paginated bounty submission listing per bounty
+    BountySubmissions(u32),
     /// #421: buyer list for a multi-buyer escrow (escrow_id → Vec<Address>)
     MultiBuyerList(u32),
     /// #421: buyer contribution shares (escrow_id → Map<Address, i128>)
@@ -755,6 +777,12 @@ pub enum DataKey2 {
     AllowlistActivated,
     /// #??: Accumulated protocol fees awaiting admin withdrawal, keyed by token address
     AccruedFees(Address),
+    /// #574: bounded status transition history per escrow (escrow_id → Vec<(EscrowStatus, u64)>)
+    EscrowStatusHistory(u32),
+    /// #571: insurance claim details per escrow (escrow_id → InsuranceClaimRecord)
+    InsuranceClaimRecord(u32),
+    /// #578: running counter of escrows currently in a disputed state (Disputed, PartiallyDisputed, AwaitingBuyerVetoDecision)
+    ActiveDisputeCount,
 }
 
 /// #357: On-chain reputation record for an inspector.
@@ -823,6 +851,14 @@ const DEFAULT_VETO_OVERRIDE_WINDOW_SECONDS: u64 = 48 * 60 * 60;
 // ── #319: Bounty Board for Open Competitive Work Assignment ──────────────────
 
 /// Bounty metadata for open competitive work assignment.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BountySubmission {
+    pub solver: Address,
+    pub submission_hash: BytesN<32>,
+    pub submitted_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BountyData {
@@ -993,6 +1029,7 @@ impl AhjoorEscrowContract {
         env.storage().instance().set(&DataKey::MaxTopupMultiplier, &DEFAULT_MAX_TOPUP_MULTIPLIER);
         env.storage().instance().set(&DataKey::PartialReleaseResponseDeadline, &DEFAULT_PARTIAL_RELEASE_RESPONSE_DEADLINE);
         env.storage().instance().set(&DataKey2::MaxBountyRejectionRounds, &DEFAULT_MAX_BOUNTY_REJECTION_ROUNDS);
+        env.storage().instance().set(&DataKey2::MaxEscrowBatchSize, &DEFAULT_MAX_BATCH_ESCROWS);
 
         env.storage()
             .instance()
@@ -1194,6 +1231,7 @@ impl AhjoorEscrowContract {
         let mut sellers: Vec<(Address, u32)> = Vec::new(&env);
         sellers.push_back((seller.clone(), 10_000));
 
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
         let escrow = Escrow {
             id: escrow_id,
             buyer: primary_buyer.clone(),
@@ -1319,7 +1357,8 @@ impl AhjoorEscrowContract {
         if escrow_configs.is_empty() {
             panic_with_error!(&env, EscrowError::BatchMustContainAtLeastOneEscrowConfig);
         }
-        if escrow_configs.len() > MAX_BATCH_ESCROWS {
+        let max_batch_size: u32 = env.storage().instance().get(&DataKey2::MaxEscrowBatchSize).unwrap_or(DEFAULT_MAX_BATCH_ESCROWS);
+        if escrow_configs.len() > max_batch_size {
             panic_with_error!(&env, EscrowError::BatchSizeExceedsMaximum10Escrows);
         }
 
@@ -1496,6 +1535,7 @@ impl AhjoorEscrowContract {
             updated.extensions.inspector = Some(new_inspector.clone());
             if updated.status == EscrowStatus::AwaitingInspection || updated.status == EscrowStatus::InspectionFailed {
                 updated.status = EscrowStatus::Active;
+                Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
             }
             env.storage().persistent().set(&DataKey::Escrow(escrow_id), &updated);
             env.storage().persistent().extend_ttl(
@@ -1791,6 +1831,7 @@ impl AhjoorEscrowContract {
 
         let now = env.ledger().timestamp();
 
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
         let escrow = Escrow {
             id: escrow_id,
             buyer: buyer.clone(),
@@ -2130,6 +2171,7 @@ impl AhjoorEscrowContract {
         }
 
         escrow.status = EscrowStatus::Released;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
 
         // Burn associated receipt atomically on release
         Self::burn_receipt_if_exists(&env, escrow_id);
@@ -2688,6 +2730,7 @@ impl AhjoorEscrowContract {
         }
         if all_terminal && any_approved && escrow.status == EscrowStatus::Active {
             escrow.status = EscrowStatus::Released;
+            Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
             // Burn receipt when milestones complete and escrow releases
             Self::burn_receipt_if_exists(&env, escrow_id);
             env.storage()
@@ -2764,11 +2807,18 @@ impl AhjoorEscrowContract {
         }
 
         escrow.amount = dispute_amount;
+        let old_status = escrow.status;
         escrow.status = if released_amount > 0 {
             EscrowStatus::PartiallyDisputed
         } else {
             EscrowStatus::Disputed
         };
+        
+        // #578: Update active dispute count
+        Self::update_dispute_count(&env, old_status, escrow.status);
+        
+        // Record status transition in history
+        Self::record_status_history(&env, escrow_id, escrow.status);
 
         env.storage()
             .persistent()
@@ -2869,7 +2919,13 @@ impl AhjoorEscrowContract {
                 PERSISTENT_BUMP_AMOUNT,
             );
 
+            let old_status = escrow.status;
             escrow.status = EscrowStatus::CoolingOff;
+            
+            // #578: Update active dispute count (CoolingOff is not a dispute state)
+            Self::update_dispute_count(&env, old_status, EscrowStatus::CoolingOff);
+            
+            Self::record_status_history(&env, escrow_id, EscrowStatus::CoolingOff);
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -2921,6 +2977,22 @@ impl AhjoorEscrowContract {
         // Only buyer or seller may flag
         if caller != escrow.buyer && caller != escrow.seller {
             panic_with_error!(&env, EscrowErrorExt::OnlyBuyerOrSellerCanFlagResolutionError);
+        }
+
+        // Only the losing party may flag a resolution error.
+        // - buyer_percent == 100  → buyer won outright; seller lost → only seller may flag
+        // - buyer_percent == 0    → seller won outright; buyer lost → only buyer may flag
+        // - 0 < buyer_percent < 100 → split verdict; both parties received something, so
+        //   either may flag (neither is an unambiguous "winner").
+        let buyer_won_outright = verdict.buyer_percent == 100;
+        let seller_won_outright = verdict.buyer_percent == 0;
+        if buyer_won_outright && caller == escrow.buyer {
+            // Buyer won — buyer is NOT the losing party
+            panic_with_error!(&env, EscrowErrorExt4::OnlyLosingPartyCanFlagResolutionError);
+        }
+        if seller_won_outright && caller == escrow.seller {
+            // Seller won — seller is NOT the losing party
+            panic_with_error!(&env, EscrowErrorExt4::OnlyLosingPartyCanFlagResolutionError);
         }
 
         // Enforce cooling-off window has not expired
@@ -3091,10 +3163,38 @@ impl AhjoorEscrowContract {
             panic_with_error!(&env, EscrowErrorExt::FeeConfigurationExceedsEscrowAmount);
         }
 
+        // --- Insurance double-payment prevention ---
+        // If a party already received an insurance payout while this escrow was
+        // disputed, that amount must be deducted from their verdict payout so
+        // total receipts (insurance + verdict) never exceed `escrow.amount`.
+        let insurance_paid: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InsuranceClaimed(escrow_id))
+            .unwrap_or(0);
+
         let seller_percent = 100 - buyer_percent;
 
-        let buyer_amount = (distributable * buyer_percent as i128) / 100;
-        let seller_amount = distributable - buyer_amount;
+        let raw_buyer_amount = (distributable * buyer_percent as i128) / 100;
+        let raw_seller_amount = distributable - raw_buyer_amount;
+
+        // Deduct insurance from the winning side's share (floor at 0).
+        // For a split verdict both sides "won" a portion, so we conservatively
+        // deduct from whichever side received the larger share. If split is
+        // exactly equal we deduct from buyer (to be safe).
+        let (buyer_amount, seller_amount) = if insurance_paid > 0 {
+            if buyer_percent >= seller_percent {
+                // Buyer's side received more (or equal) → deduct from buyer
+                let buyer_net = (raw_buyer_amount - insurance_paid).max(0);
+                (buyer_net, raw_seller_amount)
+            } else {
+                // Seller's side received more → deduct from seller
+                let seller_net = (raw_seller_amount - insurance_paid).max(0);
+                (raw_buyer_amount, seller_net)
+            }
+        } else {
+            (raw_buyer_amount, raw_seller_amount)
+        };
 
         if buyer_amount > 0 {
             Self::transfer_to_buyers(env, &escrow, buyer_amount, escrow_id);
@@ -3140,6 +3240,7 @@ impl AhjoorEscrowContract {
             env.storage().persistent().remove(&DataKey::SellerCollateral(escrow_id));
         }
 
+        let old_status = escrow.status;
         escrow.status = if buyer_percent == 100 {
             EscrowStatus::Refunded
         } else if buyer_percent == 0 {
@@ -3147,6 +3248,12 @@ impl AhjoorEscrowContract {
         } else {
             EscrowStatus::Resolved
         };
+        
+        // #578: Update active dispute count
+        Self::update_dispute_count(env, old_status, escrow.status);
+        
+        // Record status transition in history
+        Self::record_status_history(env, escrow_id, escrow.status);
 
         env.storage()
             .persistent()
@@ -3403,6 +3510,7 @@ impl AhjoorEscrowContract {
         let client = token::Client::new(&env, &escrow.token);
         let release_to_seller = matches!(default_winner_enum, DisputeDefaultWinner::Seller);
 
+        let old_status = escrow.status;
         if release_to_seller {
             client.transfer(
                 &env.current_contract_address(),
@@ -3410,9 +3518,19 @@ impl AhjoorEscrowContract {
                 &escrow.amount,
             );
             escrow.status = EscrowStatus::Released;
+            
+            // #578: Update active dispute count
+            Self::update_dispute_count(&env, old_status, EscrowStatus::Released);
+            
+            Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
         } else {
             Self::transfer_to_buyers(&env, &escrow, escrow.amount, escrow_id);
             escrow.status = EscrowStatus::Refunded;
+            
+            // #578: Update active dispute count
+            Self::update_dispute_count(&env, old_status, EscrowStatus::Refunded);
+            
+            Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
         }
 
         // Burn any receipt in either case
@@ -3622,8 +3740,9 @@ impl AhjoorEscrowContract {
         if env
             .storage()
             .persistent()
-            .get::<DataKey, bool>(&DataKey::InsuranceClaimed(escrow_id))
-            .unwrap_or(false)
+            .get::<DataKey, i128>(&DataKey::InsuranceClaimed(escrow_id))
+            .unwrap_or(0)
+            > 0
         {
             panic_with_error!(&env, EscrowErrorExt::InsuranceAlreadyClaimed);
         }
@@ -3681,9 +3800,22 @@ impl AhjoorEscrowContract {
             .set(&DataKey::InsurancePool, &(pool_balance - claim_amount));
         env.storage()
             .persistent()
-            .set(&DataKey::InsuranceClaimed(escrow_id), &true);
+            .set(&DataKey::InsuranceClaimed(escrow_id), &claim_amount);
         env.storage().persistent().extend_ttl(
             &DataKey::InsuranceClaimed(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let claim_record = InsuranceClaimRecord {
+            claimant: claimant.clone(),
+            amount: claim_amount,
+            claimed_at: env.ledger().timestamp(),
+        };
+        let claim_record_key = DataKey2::InsuranceClaimRecord(escrow_id);
+        env.storage().persistent().set(&claim_record_key, &claim_record);
+        env.storage().persistent().extend_ttl(
+            &claim_record_key,
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
@@ -3692,6 +3824,13 @@ impl AhjoorEscrowContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get the insurance claim status for an escrow, if a claim has been recorded.
+    pub fn get_insurance_claim_status(env: Env, escrow_id: u32) -> Option<InsuranceClaimRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::InsuranceClaimRecord(escrow_id))
     }
 
     /// Set protocol fee in basis points and fee recipient. Admin only.
@@ -3799,6 +3938,7 @@ impl AhjoorEscrowContract {
 
         Self::transfer_to_sellers(&env, &escrow, escrow.amount, escrow_id);
         escrow.status = EscrowStatus::Released;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
 
         env.storage()
             .persistent()
@@ -3847,6 +3987,7 @@ impl AhjoorEscrowContract {
         Self::transfer_to_buyers(&env, &escrow, escrow.amount, escrow_id);
 
         escrow.status = EscrowStatus::Refunded;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
         // Burn associated receipt on refund
         Self::burn_receipt_if_exists(&env, escrow_id);
 
@@ -4130,6 +4271,43 @@ impl AhjoorEscrowContract {
         }
     }
 
+    /// Cancel a pending amendment proposal before it is applied.
+    pub fn cancel_amendment_proposal(env: Env, caller: Address, escrow_id: u32, nonce: u32) {
+        Self::require_not_paused(&env);
+        caller.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or(escrow.buyer.clone());
+        if caller != escrow.buyer && caller != escrow.seller && caller != stored_admin {
+            panic_with_error!(&env, EscrowErrorExt::OnlyBuyerOrSellerCanProposeAmendment);
+        }
+
+        let key = DataKey2::AmendmentProposal(escrow_id);
+        let proposal: AmendmentProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("No amendment proposal found");
+        if proposal.nonce != nonce {
+            panic_with_error!(&env, EscrowErrorExt2::AmendmentNonceMismatch);
+        }
+        if Self::is_terminal_escrow_status(escrow.status) {
+            panic_with_error!(&env, EscrowErrorExt2::CannotAmendTerminalEscrow);
+        }
+
+        env.storage().persistent().remove(&key);
+        events::emit_amendment_cancelled(&env, escrow_id, nonce, caller);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     /// Apply a fully signed amendment to an escrow.
     pub fn apply_amendment(env: Env, escrow_id: u32, nonce: u32) {
         Self::require_not_paused(&env);
@@ -4220,6 +4398,23 @@ impl AhjoorEscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .expect("Escrow not found")
+    }
+
+    /// #574: Get the bounded status-transition history for an escrow, oldest first.
+    pub fn get_escrow_status_history(env: Env, escrow_id: u32) -> Vec<(EscrowStatus, u64)> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::EscrowStatusHistory(escrow_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// #578: Get the count of escrows currently in a disputed state (Disputed, PartiallyDisputed, AwaitingBuyerVetoDecision).
+    /// Returns the running counter maintained by the contract.
+    pub fn get_active_dispute_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::ActiveDisputeCount)
+            .unwrap_or(0)
     }
 
     /// Get list of sellers for an escrow (#317)
@@ -4595,7 +4790,13 @@ impl AhjoorEscrowContract {
 
         // Escalate to full dispute
         let mut escrow_mut = escrow;
+        let old_status = escrow_mut.status;
         escrow_mut.status = EscrowStatus::Disputed;
+        
+        // #578: Update active dispute count
+        Self::update_dispute_count(&env, old_status, EscrowStatus::Disputed);
+        
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Disputed);
 
         env.storage()
             .persistent()
@@ -4873,6 +5074,7 @@ impl AhjoorEscrowContract {
         client.transfer(&env.current_contract_address(), &beneficiary, &escrow.amount);
         let mut e = escrow.clone();
         e.status = EscrowStatus::Released;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
         env.storage().persistent().set(&DataKey::Escrow(escrow_id), &e);
         env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         lock_data.claimed = true;
@@ -4893,6 +5095,7 @@ impl AhjoorEscrowContract {
         if escrow.status != EscrowStatus::Active { panic_with_error!(&env, EscrowErrorExt2::EscrowNotActive); }
         Self::transfer_to_buyers(&env, &escrow, escrow.amount, escrow_id);
         escrow.status = EscrowStatus::Refunded;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
         env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
         env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         events::emit_timelocked_escrow_cancelled(&env, escrow_id, buyer);
@@ -4901,6 +5104,17 @@ impl AhjoorEscrowContract {
 
     pub fn get_timelock_data(env: Env, escrow_id: u32) -> Option<TimeLockData> {
         env.storage().persistent().get(&DataKey::TimeLockData(escrow_id))
+    }
+
+    /// #650: Returns the pending cancellation request for an escrow, if one exists.
+    /// 
+    /// Allows the counterparty to inspect the cancellation reason and response deadline
+    /// before accepting, rejecting, or letting it expire.
+    /// Returns None once the request is accepted, rejected, or expired.
+    pub fn get_cancellation_request(env: Env, escrow_id: u32) -> Option<CancellationRequest> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CancellationRequest(escrow_id))
     }
 
     // --- Token Whitelist Integration ---
@@ -5103,6 +5317,7 @@ impl AhjoorEscrowContract {
         let escrow_id = Self::next_escrow_id(&env);
         let mut single_seller = Vec::new(&env);
         single_seller.push_back((seller.clone(), 10_000u32));
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
         let escrow = Escrow {
             id: escrow_id,
             buyer: buyer.clone(),
@@ -5198,6 +5413,9 @@ impl AhjoorEscrowContract {
     /// Active escrows with this arbiter are flagged via ArbiterNeedsReplacement.
     pub fn remove_arbiter(env: Env, admin: Address, arbiter: Address, escrow_ids: Vec<u32>) {
         Self::require_admin(&env, &admin);
+        if escrow_ids.len() > 20 {
+            panic_with_error!(&env, EscrowErrorExt4::ArbiterIdsBatchTooLarge);
+        }
         let pool: Vec<Address> = env
             .storage()
             .instance()
@@ -5304,6 +5522,7 @@ impl AhjoorEscrowContract {
         let escrow_id = Self::next_escrow_id(&env);
         let mut single_seller = Vec::new(&env);
         single_seller.push_back((seller.clone(), 10_000u32));
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
         let escrow = Escrow {
             id: escrow_id,
             buyer: buyer.clone(),
@@ -5504,6 +5723,7 @@ impl AhjoorEscrowContract {
         );
 
         escrow.status = EscrowStatus::Released;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
 
         env.storage()
             .persistent()
@@ -5600,6 +5820,7 @@ impl AhjoorEscrowContract {
         );
 
         escrow.status = EscrowStatus::CancellationPending;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::CancellationPending);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -5644,6 +5865,7 @@ impl AhjoorEscrowContract {
         // Check if request has expired — auto-restore Active
         if now > request.expires_at {
             escrow.status = EscrowStatus::Active;
+            Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -5707,6 +5929,7 @@ impl AhjoorEscrowContract {
         }
 
         escrow.status = EscrowStatus::Refunded;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
         // Burn any associated receipt on cancellation accepted
         Self::burn_receipt_if_exists(&env, escrow_id);
         env.storage()
@@ -5757,6 +5980,7 @@ impl AhjoorEscrowContract {
         }
 
         escrow.status = EscrowStatus::Active;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -5800,6 +6024,7 @@ impl AhjoorEscrowContract {
         }
 
         escrow.status = EscrowStatus::Active;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -5874,6 +6099,7 @@ impl AhjoorEscrowContract {
             .instance()
             .set(&DataKey::EscrowCounter, &escrow_id);
 
+        Self::record_status_history(&env, escrow_id, EscrowStatus::BountyUnclaimed);
         let escrow = Escrow {
             id: escrow_id,
             buyer: buyer.clone(),
@@ -5923,6 +6149,10 @@ impl AhjoorEscrowContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+
+        let submissions_key = DataKey2::BountySubmissions(escrow_id);
+        env.storage().persistent().set(&submissions_key, &Vec::<BountySubmission>::new(&env));
+        env.storage().persistent().extend_ttl(&submissions_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
 
         // Store bounty metadata
         let bounty_data = BountyData {
@@ -5990,6 +6220,7 @@ impl AhjoorEscrowContract {
         // Update escrow with solver as seller
         escrow.seller = solver.clone();
         escrow.status = EscrowStatus::BountyClaimed;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::BountyClaimed);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -6054,9 +6285,21 @@ impl AhjoorEscrowContract {
 
         // Store submission hash
         bounty_data.submission_hash = Some(submission_hash.clone());
-        env.storage()
+        env.storage().persistent().set(&DataKey2::BountyData(escrow_id), &bounty_data);
+
+        let submissions_key = DataKey2::BountySubmissions(escrow_id);
+        let mut submissions: Vec<BountySubmission> = env
+            .storage()
             .persistent()
-            .set(&DataKey2::BountyData(escrow_id), &bounty_data);
+            .get(&submissions_key)
+            .unwrap_or(Vec::new(&env));
+        submissions.push_back(BountySubmission {
+            solver: solver.clone(),
+            submission_hash: submission_hash.clone(),
+            submitted_at: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&submissions_key, &submissions);
+        env.storage().persistent().extend_ttl(&submissions_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         env.storage().persistent().extend_ttl(
             &DataKey2::BountyData(escrow_id),
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -6108,6 +6351,7 @@ impl AhjoorEscrowContract {
 
         // Update escrow status
         escrow.status = EscrowStatus::Released;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -6164,6 +6408,7 @@ impl AhjoorEscrowContract {
         // Reset bounty to unclaimed state
         escrow.seller = env.current_contract_address();
         escrow.status = EscrowStatus::BountyUnclaimed;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::BountyUnclaimed);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -6238,6 +6483,7 @@ impl AhjoorEscrowContract {
 
         // Update escrow status
         escrow.status = EscrowStatus::Refunded;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -6252,6 +6498,27 @@ impl AhjoorEscrowContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin function to set max batch size for batch escrow creation.
+    pub fn set_max_batch_size(env: Env, admin: Address, max_batch_size: u32) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, EscrowErrorExt3::OnlyAdminCanSetMaxBountyRejectionRounds);
+        }
+        if max_batch_size == 0 {
+            panic_with_error!(&env, EscrowError::BatchMustContainAtLeastOneEscrowConfig);
+        }
+
+        env.storage().instance().set(&DataKey2::MaxEscrowBatchSize, &max_batch_size);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Admin function to set max bounty rejection rounds.
@@ -6281,6 +6548,22 @@ impl AhjoorEscrowContract {
         env.storage()
             .persistent()
             .get(&DataKey2::BountyData(escrow_id))
+    }
+
+    /// List bounty submissions in a paginated manner for a given bounty.
+    pub fn list_bounty_submissions(env: Env, escrow_id: u32, offset: u32, limit: u32) -> Vec<BountySubmission> {
+        let submissions: Vec<BountySubmission> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::BountySubmissions(escrow_id))
+            .unwrap_or(Vec::new(&env));
+        let mut result = Vec::new(&env);
+        let end = if limit == 0 { submissions.len() } else { offset.saturating_add(limit).min(submissions.len()) };
+        for i in offset..end {
+            let submission = submissions.get(i).unwrap();
+            result.push_back(submission);
+        }
+        result
     }
 
     // ── #376: Bounty Board Milestone Gating with Verifier Sign-Off Chain ──────
@@ -6352,6 +6635,7 @@ impl AhjoorEscrowContract {
 
         let first_hash = milestones.get(0).unwrap().description_hash.clone();
 
+        Self::record_status_history(&env, escrow_id, EscrowStatus::BountyUnclaimed);
         let escrow = Escrow {
             id: escrow_id,
             buyer: buyer.clone(),
@@ -6599,6 +6883,7 @@ impl AhjoorEscrowContract {
         }
         if all_paid {
             escrow.status = EscrowStatus::Released;
+            Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -6722,6 +7007,57 @@ impl AhjoorEscrowContract {
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Read-only collateral health status for a specific escrow.
+    pub fn get_collateral_health_status(env: Env, escrow_id: u32) -> CollateralHealthStatus {
+        Self::require_not_paused(&env);
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        let min_ratio_bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::CollateralMinRatioBps(escrow_id))
+            .expect("Collateral health not configured for this escrow");
+
+        let oracle_addr: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::CollateralOracle(escrow_id))
+            .expect("Collateral oracle not configured");
+
+        let collateral: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SellerCollateral(escrow_id))
+            .unwrap_or(0);
+
+        let oracle_client = oracle::OracleClient::new(&env, &oracle_addr);
+        let price_data = oracle_client
+            .lastprice(&escrow.token, &escrow.token)
+            .unwrap_or(PriceData { price: 10_000_000, timestamp: env.ledger().timestamp() });
+
+        let collateral_value = if price_data.price > 0 {
+            (collateral * price_data.price) / 10_000_000
+        } else {
+            collateral
+        };
+
+        let health_ratio = if escrow.amount > 0 {
+            ((collateral_value * 10_000) / escrow.amount) as u32
+        } else {
+            10_000u32
+        };
+
+        if health_ratio < min_ratio_bps {
+            CollateralHealthStatus::UnderCollateralized
+        } else {
+            CollateralHealthStatus::Healthy
+        }
+    }
+
     /// Check collateral health via oracle. Returns current ratio in bps.
     /// Flags escrow as UnderCollateralized if ratio drops below threshold.
     /// Callable by anyone.
@@ -6773,6 +7109,7 @@ impl AhjoorEscrowContract {
             // Flag as under-collateralized if currently active
             if Self::is_open_escrow_status(escrow.status) {
                 escrow.status = EscrowStatus::UnderCollateralized;
+                Self::record_status_history(&env, escrow_id, EscrowStatus::UnderCollateralized);
                 env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
                 env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
             }
@@ -6780,6 +7117,7 @@ impl AhjoorEscrowContract {
         } else if escrow.status == EscrowStatus::UnderCollateralized {
             // Restore to Active if health recovered
             escrow.status = EscrowStatus::Active;
+            Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
             env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
             env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         }
@@ -6835,6 +7173,7 @@ impl AhjoorEscrowContract {
             };
             if current_ratio_bps >= min_ratio_bps {
                 escrow.status = EscrowStatus::Active;
+                Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
             }
         }
 
@@ -7016,6 +7355,7 @@ impl AhjoorEscrowContract {
 
             let mut released = escrow;
             released.status = EscrowStatus::Released;
+            Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
             Self::burn_receipt_if_exists(&env, escrow_id);
 
             env.storage()
@@ -7236,6 +7576,7 @@ impl AhjoorEscrowContract {
         if released_index >= total_tranches {
             let mut updated_escrow = escrow.clone();
             updated_escrow.status = EscrowStatus::Released;
+            Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
             Self::burn_receipt_if_exists(&env, escrow_id);
             env.storage()
                 .persistent()
@@ -7248,6 +7589,7 @@ impl AhjoorEscrowContract {
         } else {
             let mut updated_escrow = escrow.clone();
             updated_escrow.status = EscrowStatus::PartiallyReleased;
+            Self::record_status_history(&env, escrow_id, EscrowStatus::PartiallyReleased);
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(escrow_id), &updated_escrow);
@@ -7409,6 +7751,84 @@ impl AhjoorEscrowContract {
             .expect("Admin not set");
         if stored_admin != *admin {
             panic_with_error!(&env, EscrowErrorExt4::OnlyAdminCanResumeContract);
+        }
+    }
+
+    /// #574: Append a status transition to an escrow's bounded on-chain history,
+    /// pruning the oldest entry once the cap is reached.
+    fn record_status_history(env: &Env, escrow_id: u32, status: EscrowStatus) {
+        let key = DataKey2::EscrowStatusHistory(escrow_id);
+        let mut history: Vec<(EscrowStatus, u64)> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+        if history.len() >= MAX_STATUS_HISTORY_ENTRIES {
+            history.remove(0);
+        }
+        history.push_back((status, env.ledger().timestamp()));
+        env.storage().persistent().set(&key, &history);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// #578: Check if a status is a dispute-related status that should be tracked in the active dispute count.
+    fn is_dispute_status(status: EscrowStatus) -> bool {
+        matches!(
+            status,
+            EscrowStatus::Disputed | EscrowStatus::PartiallyDisputed | EscrowStatus::AwaitingBuyerVetoDecision
+        )
+    }
+
+    /// #578: Increment the active dispute count when an escrow enters a disputed state.
+    fn increment_dispute_count(env: &Env) {
+        let key = DataKey2::ActiveDisputeCount;
+        let current: u32 = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&key, &(current + 1));
+        env.storage().instance().extend_ttl(
+            INSTANCE_LIFETIME_THRESHOLD,
+            INSTANCE_BUMP_AMOUNT,
+        );
+    }
+
+    /// #578: Decrement the active dispute count when an escrow exits a disputed state.
+    fn decrement_dispute_count(env: &Env) {
+        let key = DataKey2::ActiveDisputeCount;
+        let current: u32 = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or(0);
+        if current > 0 {
+            env.storage()
+                .instance()
+                .set(&key, &(current - 1));
+            env.storage().instance().extend_ttl(
+                INSTANCE_LIFETIME_THRESHOLD,
+                INSTANCE_BUMP_AMOUNT,
+            );
+        }
+    }
+
+    /// #578: Update the active dispute count when an escrow status changes.
+    /// Call this whenever escrow.status is updated.
+    fn update_dispute_count(env: &Env, old_status: EscrowStatus, new_status: EscrowStatus) {
+        let was_disputed = Self::is_dispute_status(old_status);
+        let is_disputed = Self::is_dispute_status(new_status);
+        
+        if !was_disputed && is_disputed {
+            Self::increment_dispute_count(env);
+        } else if was_disputed && !is_disputed {
+            Self::decrement_dispute_count(env);
         }
     }
 
@@ -7720,6 +8140,7 @@ impl AhjoorEscrowContract {
 
             let new_escrow_id = Self::next_escrow_id(env);
 
+            Self::record_status_history(env, new_escrow_id, EscrowStatus::Active);
             let renewed = Escrow {
                 id: new_escrow_id,
                 buyer: source.buyer.clone(),
@@ -7841,6 +8262,7 @@ impl AhjoorEscrowContract {
             source.extensions.renewals_remaining - 1
         };
 
+        Self::record_status_history(env, new_escrow_id, EscrowStatus::Active);
         let renewed = Escrow {
             id: new_escrow_id,
             buyer: source.buyer.clone(),
@@ -8032,6 +8454,7 @@ impl AhjoorEscrowContract {
             let collateral_amount = (amount as u128 * required_collateral_bps as u128 / 10_000) as i128;
             let deposit_deadline = env.ledger().timestamp() + collateral_deposit_window;
             escrow.status = EscrowStatus::AwaitingCollateral;
+            Self::record_status_history(&env, escrow_id, EscrowStatus::AwaitingCollateral);
             escrow.extensions.required_collateral_bps = required_collateral_bps;
             escrow.extensions.collateral_forfeit_bps = collateral_forfeit_bps;
             escrow.extensions.collateral_deposit_deadline = deposit_deadline;
@@ -8082,6 +8505,7 @@ impl AhjoorEscrowContract {
             PERSISTENT_BUMP_AMOUNT,
         );
         escrow.status = EscrowStatus::Active;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -8191,6 +8615,7 @@ impl AhjoorEscrowContract {
         let total = escrow.amount;
         Self::transfer_to_sellers(&env, &escrow, total, escrow_id);
         escrow.status = EscrowStatus::Released;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -8332,7 +8757,13 @@ impl AhjoorEscrowContract {
             .get(&DataKey2::SellerTransferProposal(escrow_id))
             .expect("Proposal not found");
         escrow.seller = proposal.new_seller.clone();
+        let old_status = escrow.status;
         escrow.status = EscrowStatus::Active;
+        
+        // #578: Update active dispute count
+        Self::update_dispute_count(&env, old_status, EscrowStatus::Active);
+        
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -8463,6 +8894,7 @@ impl AhjoorEscrowContract {
         let amount = escrow.amount;
         Self::transfer_to_buyers(&env, &escrow, amount, escrow_id);
         escrow.status = EscrowStatus::Refunded;
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -8496,7 +8928,13 @@ impl AhjoorEscrowContract {
             panic_with_error!(&env, EscrowErrorExt4::VetoWindowHasNotExpiredYet);
         }
         escrow.seller = proposal.new_seller.clone();
+        let old_status = escrow.status;
         escrow.status = EscrowStatus::Active;
+        
+        // #578: Update active dispute count
+        Self::update_dispute_count(&env, old_status, EscrowStatus::Active);
+        
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -8546,7 +8984,13 @@ impl AhjoorEscrowContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        let old_status = escrow.status;
         escrow.status = EscrowStatus::AwaitingBuyerVetoDecision;
+        
+        // #578: Update active dispute count
+        Self::update_dispute_count(&env, old_status, EscrowStatus::AwaitingBuyerVetoDecision);
+        
+        Self::record_status_history(&env, escrow_id, EscrowStatus::AwaitingBuyerVetoDecision);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -8578,7 +9022,13 @@ impl AhjoorEscrowContract {
         }
         let amount = escrow.amount;
         Self::transfer_to_buyers(&env, &escrow, amount, escrow_id);
+        let old_status = escrow.status;
         escrow.status = EscrowStatus::Refunded;
+        
+        // #578: Update active dispute count
+        Self::update_dispute_count(&env, old_status, EscrowStatus::Refunded);
+        
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -8871,6 +9321,7 @@ impl AhjoorEscrowContract {
         }
         if all_terminal {
             escrow.status = EscrowStatus::Released;
+            Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -8978,3 +9429,6 @@ mod test_bounty_board;
 mod test_bounty_milestone;
 #[cfg(test)]
 mod test_multi_buyer;
+
+#[cfg(test)]
+mod test_dispute_count;

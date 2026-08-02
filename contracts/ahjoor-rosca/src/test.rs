@@ -4771,6 +4771,49 @@ fn test_finalize_round_pays_out_partial_contributions() {
     assert_eq!(round, 1);
 }
 
+fn event_topic_present(env: &Env, topic: &str) -> bool {
+    let target = Symbol::new(env, topic);
+    for (_, topics, _) in env.events().all().iter() {
+        let topics_vec: soroban_sdk::Vec<soroban_sdk::Val> = topics.into_val(env);
+        if let Some(first) = topics_vec.first() {
+            let first_sym: Symbol = first.into_val(env);
+            if first_sym == target {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn test_close_round_emits_without_payout_event() {
+    let env = Env::default();
+    let (client, _admin, _u1, _u2, _u3, _tc, _ta) = setup_finalize_env(&env);
+
+    env.ledger().set_timestamp(3601);
+    client.close_round();
+
+    assert!(
+        event_topic_present(&env, "round_closed_without_payout"),
+        "close_round must emit RoundClosedWithoutPayout"
+    );
+}
+
+#[test]
+fn test_finalize_round_does_not_emit_without_payout_event() {
+    let env = Env::default();
+    let (client, _admin, u1, _u2, _u3, _tc, ta) = setup_finalize_env(&env);
+
+    client.contribute(&u1, &ta, &100);
+    env.ledger().set_timestamp(3601);
+    client.finalize_round();
+
+    assert!(
+        !event_topic_present(&env, "round_closed_without_payout"),
+        "finalize_round must not emit RoundClosedWithoutPayout"
+    );
+}
+
 #[test]
 fn test_finalize_round_tracks_defaulters_and_suspends_after_three_misses() {
     let env = Env::default();

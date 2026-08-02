@@ -886,6 +886,131 @@ fn test_admin_can_update_rate_limit_config() {
     assert_eq!(cfg_after.window_size_ledgers, 42);
 }
 
+/// #649: get_customer_rate_limit_status returns (0, 0) for a fresh customer with no activity.
+#[test]
+fn test_get_customer_rate_limit_status_fresh_customer() {
+    let s = setup();
+    s.init();
+
+    let customer = Address::generate(&s.env);
+    let (count, window_start) = s.client.get_customer_rate_limit_status(&customer);
+    
+    // Fresh customer should have no recorded activity
+    assert_eq!(count, 0, "Fresh customer should have count 0");
+    assert_eq!(window_start, 0, "Fresh customer should return window_start_ledger 0");
+}
+
+/// #649: get_customer_rate_limit_status returns current count and window for active customer.
+#[test]
+fn test_get_customer_rate_limit_status_mid_window() {
+    let s = setup();
+    s.init();
+    // Set a rate limit of 3 payments per 10 ledger window
+    s.client.update_rate_limit_config(&s.admin, &3, &10);
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    // Record initial ledger before creating payments
+    let initial_ledger = s.env.ledger().sequence();
+
+    // Create first payment
+    s.client.create_payment(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Check status: should show count=1, window_start at or near initial_ledger
+    let (count, window_start) = s.client.get_customer_rate_limit_status(&customer);
+    assert_eq!(count, 1, "Should have count=1 after first payment");
+    assert!(window_start >= initial_ledger, "window_start should be >= initial_ledger");
+
+    // Create second payment in same window
+    s.client.create_payment(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &None,
+        &None,
+        &None,
+    );
+
+    let (count2, window_start2) = s.client.get_customer_rate_limit_status(&customer);
+    assert_eq!(count2, 2, "Should have count=2 after second payment");
+    assert_eq!(window_start2, window_start, "window_start should not change within window");
+
+    // Create third payment (at max)
+    s.client.create_payment(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &None,
+        &None,
+        &None,
+    );
+
+    let (count3, window_start3) = s.client.get_customer_rate_limit_status(&customer);
+    assert_eq!(count3, 3, "Should have count=3 after third payment");
+    assert_eq!(window_start3, window_start, "window_start should remain consistent");
+}
+
+/// #649: get_customer_rate_limit_status shows window reset after window expires.
+#[test]
+fn test_get_customer_rate_limit_status_window_reset() {
+    let s = setup();
+    s.init();
+    // Set rate limit: 2 payments per 5 ledger window
+    s.client.update_rate_limit_config(&s.admin, &2, &5);
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    // Create payment in first window
+    s.client.create_payment(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &None,
+        &None,
+        &None,
+    );
+
+    let (count_before, window_start_before) =
+        s.client.get_customer_rate_limit_status(&customer);
+    assert_eq!(count_before, 1, "Should have 1 payment before window expires");
+
+    // Advance ledger by exactly the window size to expire the window
+    s.env
+        .ledger()
+        .set_sequence_number(s.env.ledger().sequence() + 5);
+
+    // Query status after window expires
+    let (count_after, window_start_after) = s.client.get_customer_rate_limit_status(&customer);
+    assert_eq!(
+        count_after, 0,
+        "Count should reset to 0 after window expires"
+    );
+    assert_ne!(
+        window_start_after, window_start_before,
+        "window_start should change after window expires"
+    );
+    assert_eq!(
+        window_start_after,
+        s.env.ledger().sequence(),
+        "window_start should be current ledger after reset"
+    );
+}
+
 #[test]
 fn test_is_disputed() {
     let s = setup();
@@ -5997,4 +6122,178 @@ fn test_withdrawal_default_limits_apply_to_new_merchant() {
     let (new_window, new_cap) = s.client.get_withdrawal_rate_limit(&merchant);
     assert_eq!(new_window, 3600);
     assert_eq!(new_cap, 1000);
+}
+
+
+// ===========================================================================
+//  Customer Blocking Tests (#646)
+// ===========================================================================
+
+/// #646: get_block_entry returns None for an unblocked customer
+#[test]
+fn test_get_block_entry_unblocked_customer() {
+    let s = setup();
+    s.init();
+
+    let merchant = Address::generate(&s.env);
+    let customer = Address::generate(&s.env);
+
+    // Customer is not blocked
+    let entry = s.client.get_block_entry(&merchant, &customer);
+    assert_eq!(entry, None, "Unblocked customer should have no block entry");
+}
+
+/// #646: get_block_entry returns the BlockEntry for a blocked customer
+#[test]
+fn test_get_block_entry_blocked_customer() {
+    let s = setup();
+    s.init();
+
+    let merchant = Address::generate(&s.env);
+    let customer = Address::generate(&s.env);
+    let reason = Symbol::new(&s.env, "fraud");
+    let evidence_hash = BytesN::<32>::from_array(&s.env, &[1u8; 32]);
+
+    // Block the customer
+    s.client.block_customer(&merchant, &customer, &reason, &evidence_hash);
+
+    // Retrieve the block entry
+    let entry = s.client.get_block_entry(&merchant, &customer);
+    assert!(entry.is_some(), "Blocked customer should have a block entry");
+
+    let block_entry = entry.unwrap();
+    assert_eq!(block_entry.customer, customer, "Block entry customer should match");
+    assert_eq!(block_entry.reason_code, reason, "Block entry reason should match");
+    assert_eq!(block_entry.evidence_hash, evidence_hash, "Block entry evidence hash should match");
+    assert_eq!(
+        block_entry.blocked_at_ledger,
+        s.env.ledger().sequence(),
+        "Block entry blocked_at_ledger should be current ledger"
+    );
+}
+
+/// #646: get_block_entry returns None after customer is unblocked
+#[test]
+fn test_get_block_entry_after_unblock() {
+    let s = setup();
+    s.init();
+
+    let merchant = Address::generate(&s.env);
+    let customer = Address::generate(&s.env);
+    let reason = Symbol::new(&s.env, "suspicious");
+    let evidence_hash = BytesN::<32>::from_array(&s.env, &[2u8; 32]);
+
+    // Block the customer
+    s.client.block_customer(&merchant, &customer, &reason, &evidence_hash);
+    assert!(
+        s.client.get_block_entry(&merchant, &customer).is_some(),
+        "Customer should be blocked"
+    );
+
+    // Unblock the customer
+    s.client.unblock_customer(&merchant, &customer);
+
+    // Entry should be gone
+    let entry = s.client.get_block_entry(&merchant, &customer);
+    assert_eq!(entry, None, "Entry should be None after unblock");
+}
+
+/// #646: is_customer_blocked returns false for unblocked customer
+#[test]
+fn test_is_customer_blocked_false_for_unblocked() {
+    let s = setup();
+    s.init();
+
+    let merchant = Address::generate(&s.env);
+    let customer = Address::generate(&s.env);
+
+    let blocked = s.client.is_customer_blocked(&merchant, &customer);
+    assert!(!blocked, "Unblocked customer should return false");
+}
+
+/// #646: is_customer_blocked returns true for blocked customer
+#[test]
+fn test_is_customer_blocked_true_for_blocked() {
+    let s = setup();
+    s.init();
+
+    let merchant = Address::generate(&s.env);
+    let customer = Address::generate(&s.env);
+    let reason = Symbol::new(&s.env, "chargeback");
+    let evidence_hash = BytesN::<32>::from_array(&s.env, &[3u8; 32]);
+
+    // Block the customer
+    s.client.block_customer(&merchant, &customer, &reason, &evidence_hash);
+
+    let blocked = s.client.is_customer_blocked(&merchant, &customer);
+    assert!(blocked, "Blocked customer should return true");
+}
+
+/// #646: is_customer_blocked reflects unblock status
+#[test]
+fn test_is_customer_blocked_after_unblock() {
+    let s = setup();
+    s.init();
+
+    let merchant = Address::generate(&s.env);
+    let customer = Address::generate(&s.env);
+    let reason = Symbol::new(&s.env, "test");
+    let evidence_hash = BytesN::<32>::from_array(&s.env, &[4u8; 32]);
+
+    // Block and verify
+    s.client.block_customer(&merchant, &customer, &reason, &evidence_hash);
+    assert!(
+        s.client.is_customer_blocked(&merchant, &customer),
+        "Customer should be blocked"
+    );
+
+    // Unblock and verify
+    s.client.unblock_customer(&merchant, &customer);
+    assert!(
+        !s.client.is_customer_blocked(&merchant, &customer),
+        "Customer should not be blocked after unblock"
+    );
+}
+
+/// #646: Blocking is per-merchant (different merchants can block independently)
+#[test]
+fn test_block_entry_per_merchant_isolation() {
+    let s = setup();
+    s.init();
+
+    let merchant_a = Address::generate(&s.env);
+    let merchant_b = Address::generate(&s.env);
+    let customer = Address::generate(&s.env);
+    let reason_a = Symbol::new(&s.env, "fraud_a");
+    let reason_b = Symbol::new(&s.env, "fraud_b");
+    let evidence_a = BytesN::<32>::from_array(&s.env, &[5u8; 32]);
+    let evidence_b = BytesN::<32>::from_array(&s.env, &[6u8; 32]);
+
+    // Block by merchant_a
+    s.client.block_customer(&merchant_a, &customer, &reason_a, &evidence_a);
+
+    // Merchant_a should see the customer blocked
+    assert!(
+        s.client.is_customer_blocked(&merchant_a, &customer),
+        "Merchant_a should see customer blocked"
+    );
+
+    // Merchant_b should not see the customer blocked
+    assert!(
+        !s.client.is_customer_blocked(&merchant_b, &customer),
+        "Merchant_b should not see customer blocked by merchant_a"
+    );
+
+    // Merchant_b can block the same customer with different reason
+    s.client.block_customer(&merchant_b, &customer, &reason_b, &evidence_b);
+    assert!(
+        s.client.is_customer_blocked(&merchant_b, &customer),
+        "Merchant_b should now see customer blocked"
+    );
+
+    // Both merchants should have block entries
+    let entry_a = s.client.get_block_entry(&merchant_a, &customer).unwrap();
+    let entry_b = s.client.get_block_entry(&merchant_b, &customer).unwrap();
+    assert_eq!(entry_a.reason_code, reason_a, "Merchant_a entry should have its reason");
+    assert_eq!(entry_b.reason_code, reason_b, "Merchant_b entry should have its reason");
 }

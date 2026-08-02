@@ -212,6 +212,16 @@ pub enum Error {
     PaymentNotDisputed = 59,
 }
 
+/// Overflow Error2 — split from Error because #[contracterror] is bounded to 50 variants.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Error2 {
+    /// No active DAO mediation case exists for the payment.
+    DaoCaseNotFoundForPayment = 60,
+    /// DAO escalation cannot be cancelled because voting has started.
+    DaoEscalationHasVotes = 61,
+}
+
 /// Extension errors that overflow the 50-variant contracterror limit.
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1017,6 +1027,10 @@ pub enum DataKey2 {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey3 {
+    /// Persistent: lifetime total commission earned by a referrer (#570)
+    TotalEarnedCommission(Address),
+    /// Persistent: lifetime total commission claimed by a referrer (#570)
+    TotalClaimedCommission(Address),
     /// #351: counter for recurring payment schedules
     RecurringCounter,
     /// #351: recurring payment schedule record
@@ -1039,6 +1053,8 @@ pub enum DataKey3 {
     DaoMediationCounter,
     /// Persistent: DAO mediation case record keyed by case ID
     DaoMediationCase(u32),
+    /// Persistent: payment_id -> DAO mediation case ID
+    DaoCaseByPayment(u32),
     /// Persistent: (case_id, voter) → bool vote cast by DAO member
     DaoMediationVote(u32, Address),
     /// Instance: list of DAO mediator addresses
@@ -1157,6 +1173,27 @@ pub struct AhjoorPaymentsContract;
 
 #[contractimpl]
 impl AhjoorPaymentsContract {
+    fn find_open_dao_case_id_by_payment(env: &Env, payment_id: u32) -> Option<u32> {
+        let case_counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::DaoMediationCounter)
+            .unwrap_or(0);
+
+        for case_id in 0..case_counter {
+            let maybe_case: Option<DaoMediationCase> = env
+                .storage()
+                .persistent()
+                .get(&DataKey3::DaoMediationCase(case_id));
+            if let Some(case) = maybe_case {
+                if case.payment_id == payment_id && !case.executed {
+                    return Some(case_id);
+                }
+            }
+        }
+        None
+    }
+
     /// One-time contract initialization.
     /// Admin, counters, and config go to instance storage.
     /// fee_recipient: Address that receives protocol fees
@@ -1572,12 +1609,40 @@ impl AhjoorPaymentsContract {
         env.storage().persistent().remove(&DataKey2::UnblockRequest(request_id));
     }
 
+    /// Returns a pending unblock request by `request_id` (issue #648).
+    /// Returns `None` once the request has been resolved or never existed.
+    pub fn get_unblock_request(env: Env, request_id: u32) -> Option<UnblockRequest> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::UnblockRequest(request_id))
+    }
+
     /// Merchant voluntarily unblocks a customer immediately.
     pub fn unblock_customer(env: Env, merchant: Address, customer: Address) {
         Self::require_not_paused(&env);
         merchant.require_auth();
         env.storage().persistent().remove(&DataKey2::CustomerBlockEntry(merchant.clone(), customer.clone()));
         events::emit_customer_unblocked(&env, merchant.clone(), customer, merchant);
+    }
+
+    /// #646: Returns the block entry for a customer, if one exists.
+    /// 
+    /// Allows customers and UIs to inspect why they are blocked before payment attempts.
+    /// Returns the full BlockEntry containing reason_code, evidence_hash, and blocked_at_ledger,
+    /// or None if the customer is not blocked.
+    pub fn get_block_entry(env: Env, merchant: Address, customer: Address) -> Option<BlockEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::CustomerBlockEntry(merchant, customer))
+    }
+
+    /// #646: Convenience wrapper returning whether a customer is blocked by a merchant.
+    /// 
+    /// Returns true if the customer has a block entry, false otherwise.
+    pub fn is_customer_blocked(env: Env, merchant: Address, customer: Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey2::CustomerBlockEntry(merchant, customer))
     }
 
     /// Create multiple payments atomically.
@@ -3490,6 +3555,14 @@ impl AhjoorPaymentsContract {
             .get(&DataKey::MultisigPolicy(merchant))
     }
 
+    /// Get the approval state for a payment.
+    /// Returns `None` for payments that were never routed through multisig approval.
+    pub fn get_approval_state(env: Env, payment_id: u32) -> Option<ApprovalState> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::ApprovalState(payment_id))
+    }
+
     /// A signer approves a PendingApproval payment.
     /// Once `m` approvals are recorded the payment transitions to Pending.
     pub fn approve_payment(env: Env, signer: Address, payment_id: u32) {
@@ -3573,6 +3646,15 @@ impl AhjoorPaymentsContract {
         state.approvals.push_back(signer.clone());
         events::emit_payment_approved(&env, payment_id, signer);
 
+        env.storage()
+            .persistent()
+            .set(&DataKey2::ApprovalState(payment_id), &state);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::ApprovalState(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
         if state.approvals.len() >= policy.m {
             // Quorum reached — transition to Pending
             let old_status = payment.status;
@@ -3590,15 +3672,6 @@ impl AhjoorPaymentsContract {
                 payment_id,
                 old_status,
                 PaymentStatus::Pending,
-            );
-        } else {
-            env.storage()
-                .persistent()
-                .set(&DataKey2::ApprovalState(payment_id), &state);
-            env.storage().persistent().extend_ttl(
-                &DataKey2::ApprovalState(payment_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
             );
         }
 
@@ -4130,6 +4203,45 @@ impl AhjoorPaymentsContract {
             .expect("No dispute found for this payment")
     }
 
+    /// Merchant/admin view of all disputes tied to a given merchant (#565).
+    /// Only disputes still present in temporary storage are returned (a
+    /// resolved dispute is not TTL-extended and will naturally expire and
+    /// drop out of this view). `limit` is capped at 50 per call.
+    pub fn list_disputes_by_merchant(
+        env: Env,
+        merchant: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Dispute> {
+        let effective_limit = limit.min(50);
+        let counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentCounter)
+            .unwrap_or(0);
+
+        let mut result = Vec::new(&env);
+        let mut matched: u32 = 0;
+        for payment_id in 0..counter {
+            let payment: Payment = match env.storage().persistent().get(&DataKey::Payment(payment_id)) {
+                Some(p) => p,
+                None => continue,
+            };
+            if payment.merchant != merchant {
+                continue;
+            }
+            let dispute: Dispute = match env.storage().temporary().get(&DataKey::Dispute(payment_id)) {
+                Some(d) => d,
+                None => continue,
+            };
+            if matched >= offset && result.len() < effective_limit {
+                result.push_back(dispute);
+            }
+            matched += 1;
+        }
+        result
+    }
+
     pub fn get_dispute_timeout(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -4139,6 +4251,37 @@ impl AhjoorPaymentsContract {
 
     pub fn get_rate_limit_config(env: Env) -> RateLimitConfig {
         Self::get_rate_limit_config_internal(&env)
+    }
+
+    /// #649: Returns the current rate limit status for a customer.
+    /// 
+    /// Returns (count, window_start_ledger) where:
+    /// - count: number of payments made in the current window
+    /// - window_start_ledger: ledger sequence when the current window started
+    /// 
+    /// Returns (0, 0) for a customer with no recorded activity in the current window.
+    pub fn get_customer_rate_limit_status(env: Env, customer: Address) -> (u32, u32) {
+        let key = DataKey::CustomerRateLimit(customer);
+        let cfg = Self::get_rate_limit_config_internal(&env);
+        let current_ledger = env.ledger().sequence();
+
+        let state: CustomerRateLimit = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(CustomerRateLimit {
+                count: 0,
+                window_start_ledger: current_ledger,
+            });
+
+        // Check if the window has expired
+        if current_ledger.saturating_sub(state.window_start_ledger) >= cfg.window_size_ledgers {
+            // Window expired; return reset state
+            (0, current_ledger)
+        } else {
+            // Window still active; return current state
+            (state.count, state.window_start_ledger)
+        }
     }
 
     pub fn is_settled(env: Env, payment_id: u32) -> bool {
@@ -5876,6 +6019,20 @@ impl AhjoorPaymentsContract {
     /// Get the merchant's current withdrawal queue.
     pub fn get_merchant_withdrawal_queue(env: Env, merchant: Address) -> Vec<(u32, i128)> {
         Self::get_withdrawal_queue(&env, &merchant)
+    }
+
+    /// Returns `payment_id`'s current 0-indexed position in the merchant's
+    /// withdrawal queue, reflecting any reordering from `prioritize_withdrawal`.
+    /// Returns `None` if the payment is not currently queued for this merchant.
+    pub fn get_withdrawal_queue_position(env: Env, merchant: Address, payment_id: u32) -> Option<u32> {
+        let queue = Self::get_withdrawal_queue(&env, &merchant);
+        for i in 0..queue.len() {
+            let (pid, _) = queue.get(i).unwrap();
+            if pid == payment_id {
+                return Some(i);
+            }
+        }
+        None
     }
 
     // --- Internal Helpers ---
@@ -8658,6 +8815,16 @@ impl AhjoorPaymentsContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        let claimed_key = DataKey3::TotalClaimedCommission(referrer.clone());
+        let total_claimed: i128 = env.storage().persistent().get(&claimed_key).unwrap_or(0);
+        let new_total_claimed = total_claimed.saturating_add(pending);
+        env.storage().persistent().set(&claimed_key, &new_total_claimed);
+        env.storage().persistent().extend_ttl(
+            &claimed_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&env.current_contract_address(), &referrer, &pending);
 
@@ -8680,6 +8847,22 @@ impl AhjoorPaymentsContract {
         env.storage()
             .persistent()
             .get(&DataKey2::ReferralRecord(referred_merchant))
+    }
+
+    /// Get a referrer's aggregate commission summary: (total_earned, total_claimed).
+    /// A referrer with no activity returns (0, 0).
+    pub fn get_referral_commission_summary(env: Env, referrer: Address) -> (i128, i128) {
+        let total_earned: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::TotalEarnedCommission(referrer.clone()))
+            .unwrap_or(0);
+        let total_claimed: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::TotalClaimedCommission(referrer))
+            .unwrap_or(0);
+        (total_earned, total_claimed)
     }
 
     /// Internal: accrue referral commission when a referred merchant's payment is finalized.
@@ -8733,6 +8916,16 @@ impl AhjoorPaymentsContract {
         env.storage().persistent().set(&pending_key, &new_total);
         env.storage().persistent().extend_ttl(
             &pending_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let earned_key = DataKey3::TotalEarnedCommission(record.referrer.clone());
+        let total_earned: i128 = env.storage().persistent().get(&earned_key).unwrap_or(0);
+        let new_total_earned = total_earned.saturating_add(commission);
+        env.storage().persistent().set(&earned_key, &new_total_earned);
+        env.storage().persistent().extend_ttl(
+            &earned_key,
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
@@ -9579,6 +9772,36 @@ impl AhjoorPaymentsContract {
         next_id
     }
 
+    /// Returns all currently-active consent records for `customer`.
+    /// Records are excluded when revoked, expired, or not yet signed.
+    pub fn list_active_consent_records(env: Env, customer: Address) -> Vec<ConsentRecord> {
+        let counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ConsentRecordCounter)
+            .unwrap_or(0);
+        let now = env.ledger().sequence() as u64;
+        let mut result = Vec::new(&env);
+        for consent_id in 0..counter {
+            let consent: ConsentRecord = match env
+                .storage()
+                .persistent()
+                .get(&DataKey2::ConsentRecord(consent_id))
+            {
+                Some(c) => c,
+                None => continue,
+            };
+            if consent.customer != customer {
+                continue;
+            }
+            if consent.is_revoked || !consent.is_signed || consent.expires_at <= now {
+                continue;
+            }
+            result.push_back(consent);
+        }
+        result
+    }
+
     /// Retry a failed debit. Enforces the exponential back-off schedule.
     /// Returns `RetryNotDue` if the back-off interval has not elapsed.
     /// On max attempts the record is moved to `AbandonedDebit` status.
@@ -10066,7 +10289,9 @@ impl AhjoorPaymentsContract {
             panic!("Only the payment customer or admin may escalate");
         }
 
-        if payment.status != PaymentStatus::Disputed {
+        if payment.status != PaymentStatus::Disputed
+            && payment.status != PaymentStatus::EscalatedDispute
+        {
             panic_with_error!(&env, Error::PaymentNotDisputed);
         }
 
@@ -10086,7 +10311,11 @@ impl AhjoorPaymentsContract {
             .get(&DataKey3::DaoVoteWindowSeconds)
             .unwrap_or(DEFAULT_DAO_VOTE_WINDOW_SECONDS);
 
-        // Ensure not already escalated (check for existing case with this payment_id).
+        // Ensure not already escalated (check for existing open case with this payment_id).
+        if Self::find_open_dao_case_id_by_payment(&env, payment_id).is_some() {
+            panic_with_error!(&env, Error::DaoAlreadyEscalated);
+        }
+
         let case_counter: u32 = env
             .storage()
             .instance()
@@ -10117,12 +10346,50 @@ impl AhjoorPaymentsContract {
             PERSISTENT_BUMP_AMOUNT,
         );
         env.storage()
+            .persistent()
+            .set(&DataKey3::DaoCaseByPayment(payment_id), &case_id);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::DaoCaseByPayment(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
             .instance()
             .set(&DataKey3::DaoMediationCounter, &(case_counter + 1));
 
         events::emit_dispute_escalated_to_dao(&env, payment_id, case_id, initiator, vote_window_closes_at);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         case_id
+    }
+
+    /// Cancel an active DAO escalation for a payment before any votes are cast.
+    ///
+    /// Admin-gated: only the contract admin may call this function.
+    /// Panics with `DaoCaseNotFoundForPayment` if there is no active case for the payment.
+    /// Panics with `DaoEscalationHasVotes` if voting activity has already started.
+    pub fn cancel_dao_escalation(env: Env, payment_id: u32) {
+        Self::require_not_paused(&env);
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Not initialized");
+        admin.require_auth();
+
+        let case_id = Self::find_open_dao_case_id_by_payment(&env, payment_id)
+            .unwrap_or_else(|| panic_with_error!(&env, Error2::DaoCaseNotFoundForPayment));
+        let case: DaoMediationCase = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::DaoMediationCase(case_id))
+            .expect("Mediation case not found");
+
+        if case.votes_for_merchant > 0 || case.votes_for_customer > 0 {
+            panic_with_error!(&env, Error2::DaoEscalationHasVotes);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::DaoMediationCase(case_id));
+        events::emit_dao_escalation_cancelled(&env, payment_id, case_id);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Cast a vote on a DAO mediation case.
@@ -10238,6 +10505,14 @@ impl AhjoorPaymentsContract {
             .get(&DataKey::Payment(case.payment_id))
             .expect("Payment not found");
 
+        // Guard: the payment must still be in an unresolved dispute state.
+        // If a prior verdict (or admin action) already settled it, reject.
+        if payment.status != PaymentStatus::Disputed
+            && payment.status != PaymentStatus::EscalatedDispute
+        {
+            panic_with_error!(&env, Error::DaoCaseAlreadyExecuted);
+        }
+
         let old_status = payment.status;
         let token_client = token::Client::new(&env, &payment.token);
 
@@ -10303,6 +10578,28 @@ impl AhjoorPaymentsContract {
             .expect("Mediation case not found")
     }
 
+    /// Return the DAO mediation case for `payment_id`, if one exists.
+    pub fn get_dao_case_by_payment(env: Env, payment_id: u32) -> Option<DaoMediationCase> {
+        let case_id: u32 = env.storage().persistent().get(&DataKey3::DaoCaseByPayment(payment_id))?;
+        env.storage().persistent().extend_ttl(
+            &DataKey3::DaoCaseByPayment(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let case_opt: Option<DaoMediationCase> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::DaoMediationCase(case_id));
+        if case_opt.is_some() {
+            env.storage().persistent().extend_ttl(
+                &DataKey3::DaoMediationCase(case_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+        case_opt
+    }
+
     /// Return the list of registered DAO mediator addresses.
     pub fn get_dao_members(env: Env) -> Vec<Address> {
         env.storage()
@@ -10311,6 +10608,9 @@ impl AhjoorPaymentsContract {
             .unwrap_or(Vec::new(&env))
     }
 }
+
+#[cfg(test)]
+mod test_disputes_by_merchant;
 
 #[cfg(test)]
 mod test_tip;

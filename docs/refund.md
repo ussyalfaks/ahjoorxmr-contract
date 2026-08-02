@@ -95,6 +95,56 @@ The refund contract tracks an **Abuse Score** per customer to prevent spam and d
 - **Decay over time:** The abuse score decays automatically as ledgers advance. By default, the score halves (`5000 bps` factor) every `10,000` ledgers. Both the decay period and the decay factor are configurable by the admin (`set_abuse_score_decay_params`).
 - **Manual Reset:** An admin can manually reset a customer's abuse score to zero using `reset_customer_abuse_score`.
 
+## Counter-Offer Negotiation
+
+When a customer requests a refund (`Requested` status), the merchant may respond with a counter-offer — a partial refund amount — instead of approving or rejecting the full request. This negotiation flow is implemented via the counter-offer system.
+
+### How a buyer requests a refund and a merchant counters
+
+1. **Customer requests refund:** The customer calls `request_refund()` with the full refund amount. The refund enters `Requested` status.
+2. **Merchant counter-offers:** The merchant calls `counter_offer_refund(refund_id, amount)` to propose a lower amount. The refund moves to `CounterOffered` status and a `CounterOffer` record is stored with an expiry timestamp.
+   - Only the refund's merchant can counter-offer.
+   - The counter-offer amount must be positive and cannot exceed the original refund amount.
+   - Only one counter-offer is permitted per refund (a second attempt panics with `Refund is not in Requested state`).
+
+### How many rounds of negotiation are allowed
+
+The negotiation is **single-round**: the merchant submits exactly one counter-offer. If the customer rejects or the offer expires, the refund escalates to admin review (`UnderAppeal`). There is no multi-round back-and-forth.
+
+### How the flow resolves
+
+The counter-offer resolves in one of four ways:
+
+#### 1. Customer acceptance
+The customer calls `accept_counter_offer(refund_id)`. The counter-offer amount is transferred immediately and the refund is marked `Processed`. If the offer has already expired when acceptance is attempted, it auto-escalates to admin instead.
+
+#### 2. Customer rejection
+The customer calls `reject_counter_offer(refund_id)`. The counter-offer record is removed and the refund is escalated to `UnderAppeal` for admin review.
+
+#### 3. Expiry escalation
+Anyone can call `check_counter_offer_expiry(refund_id)` after the offer's expiry timestamp passes. If expired, the refund escalates to `UnderAppeal` for admin review. The admin also has the option to call `settle_expired_counter_offer(refund_id)` which applies the contract's default resolution on expiry:
+- **Accept original** (default): the original refund amount is paid out and the refund is `Processed`.
+- **Reject**: the escrowed funds are returned to the customer and the refund is `Rejected`.
+
+The admin can toggle the default resolution by setting the `CounterOfferDefaultResolution` configuration flag.
+
+#### 4. Admin override via settle
+The admin can configure the expiry window with `set_counter_offer_expiry_seconds(admin, seconds)` (default: 48 hours). The admin also controls the `CounterOfferDefaultResolution` flag (default: `true` = accept original on expiry).
+
+### Key configuration constants
+
+| Constant | Default | Description |
+|---|---|---|
+| `counter_offer_refund` expiry | 48 hours | Window for customer to respond to a counter-offer |
+| `CounterOfferDefaultResolution` | `true` (accept original) | What happens on expiry — pay original amount or reject |
+
+### Events
+
+- `RefundCounterOffered` — emitted when a merchant submits a counter-offer.
+- `RefundCounterAccepted` — emitted when the customer accepts the counter-offer.
+- `RefundCounterRejected` — emitted when the customer rejects the counter-offer.
+- `CounterOfferExpired` — emitted when a counter-offer expires and is settled.
+
 ## Notes for integrators
 
 - Originating contracts should set refund `owner` and `amount` precisely to avoid disputes.

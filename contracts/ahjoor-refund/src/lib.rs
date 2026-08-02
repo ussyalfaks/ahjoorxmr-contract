@@ -281,6 +281,9 @@ pub enum DataKey2 {
     BlockDurationLedgers,
     /// Ledger window for detecting rapid submissions
     RapidSubmissionWindowLedgers,
+    /// Vec<Address> of every customer who has ever had an abuse record
+    /// touched, used to drive `list_abuse_flagged_customers` (#580).
+    AbuseTrackedCustomers,
 
     // --- Feature: Cross-Contract Refund Registration ---
     /// Vec<Address> of whitelisted origin contracts
@@ -329,6 +332,8 @@ pub enum DataKey2 {
     // --- Feature: Evidence Hash Anchoring (#365) ---
     /// On-chain SHA-256 content hash anchor per (refund_id, submitter) (#365)
     EvidenceHash(u32, Address),
+    /// Ordered history of counter-offer rounds for a refund (Vec<CounterOffer>)
+    CounterOfferHistory(u32),
 }
 
 mod events;
@@ -428,6 +433,19 @@ const DEFAULT_MAX_VOUCHER_BONUS_BPS: u32 = 1_000;
 pub struct BatchRefundResult {
     pub processed: Vec<u32>,
     pub skipped: Vec<u32>,
+}
+
+/// Combined reserve balance view across both parallel reserve subsystems (#579).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReserveSummary {
+    pub merchant: Address,
+    /// Legacy (#274) reserve balance held under `DataKey::MerchantReserve`.
+    pub legacy_reserve_balance: i128,
+    /// Canonical (#334) reserve balance held under `DataKey2::MerchantReserveBalance`.
+    pub merchant_reserve_balance: i128,
+    /// Sum of both subsystems' balances.
+    pub total_reserve_balance: i128,
 }
 
 /// Optional extended configuration for `initialize`.
@@ -3513,7 +3531,10 @@ impl AhjoorRefundContract {
     }
 
     /// Merchant submits a counter-offer (partial amount) for a refund request.
-    /// Only one counter-offer is permitted per refund.
+    ///
+    /// The first offer requires `Requested` status. Subsequent offers while the
+    /// refund is still `CounterOffered` replace the live offer and append to
+    /// the negotiation history so multi-round bargaining is queryable.
     pub fn counter_offer_refund(env: Env, merchant: Address, refund_id: u32, amount: i128) {
         Self::require_not_paused(&env);
         merchant.require_auth();
@@ -3528,8 +3549,10 @@ impl AhjoorRefundContract {
             .get(&DataKey::Refund(refund_id))
             .expect("Refund not found");
 
-        if refund.status != RefundStatus::Requested {
-            panic!("Refund is not in Requested state");
+        if refund.status != RefundStatus::Requested
+            && refund.status != RefundStatus::CounterOffered
+        {
+            panic!("Refund is not open for counter-offer");
         }
 
         if merchant != refund.merchant {
@@ -3538,15 +3561,6 @@ impl AhjoorRefundContract {
 
         if amount > refund.amount {
             panic!("Counter-offer cannot exceed original refund amount");
-        }
-
-        // Prevent duplicate counter-offers
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::CounterOffer(refund_id))
-        {
-            panic!("Counter-offer already submitted for this refund");
         }
 
         let expiry_seconds: u64 = env
@@ -3567,6 +3581,21 @@ impl AhjoorRefundContract {
             .set(&DataKey::CounterOffer(refund_id), &offer);
         env.storage().persistent().extend_ttl(
             &DataKey::CounterOffer(refund_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Append to negotiation history (preserved after accept/reject).
+        let history_key = DataKey2::CounterOfferHistory(refund_id);
+        let mut history: Vec<CounterOffer> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or(Vec::new(&env));
+        history.push_back(offer.clone());
+        env.storage().persistent().set(&history_key, &history);
+        env.storage().persistent().extend_ttl(
+            &history_key,
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
@@ -3725,6 +3754,15 @@ impl AhjoorRefundContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+    }
+
+    /// Returns every counter-offer round for `refund_id` in submission order.
+    /// Refunds with no negotiation return an empty vec.
+    pub fn get_counter_offer_history(env: Env, refund_id: u32) -> Vec<CounterOffer> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::CounterOfferHistory(refund_id))
+            .unwrap_or(Vec::new(&env))
     }
 
     // --- Issue #238: Refund Priority Labelling ---
@@ -4112,6 +4150,24 @@ impl AhjoorRefundContract {
         env.storage()
             .persistent()
             .get(&DataKey::MerchantReserve(merchant))
+            .unwrap_or(0)
+    }
+
+    /// Whether a merchant is flagged for reserve non-compliance.
+    /// Returns `false` if the merchant has never been flagged.
+    pub fn is_merchant_flagged(env: Env, merchant: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantFlagged(merchant))
+            .unwrap_or(false)
+    }
+
+    /// Get the recorded payment volume for a merchant.
+    /// Returns `0` if the merchant has no recorded volume.
+    pub fn get_merchant_volume(env: Env, merchant: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantVolume(merchant))
             .unwrap_or(0)
     }
 
@@ -4769,6 +4825,45 @@ impl AhjoorRefundContract {
         Self::load_abuse_record_with_decay(&env, &customer)
     }
 
+    /// #580: Admin view of customers currently above the abuse block
+    /// threshold (with lazy decay applied), correctly paginated.
+    /// A customer reset via `reset_customer_abuse_score` drops out of this
+    /// view since their decayed score falls back below the threshold.
+    /// Returns an empty vec if no threshold is configured. `limit` is
+    /// capped at 50 per call.
+    pub fn list_abuse_flagged_customers(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<(Address, RefundAbuseRecord)> {
+        let effective_limit = limit.min(50);
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::AbuseBlockThreshold)
+            .unwrap_or(u32::MAX);
+
+        let tracked: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::AbuseTrackedCustomers)
+            .unwrap_or(Vec::new(&env));
+
+        let mut result = Vec::new(&env);
+        let mut matched: u32 = 0;
+        for customer in tracked.iter() {
+            let record = Self::load_abuse_record_with_decay(&env, &customer);
+            if record.abuse_score < threshold {
+                continue;
+            }
+            if matched >= offset && result.len() < effective_limit {
+                result.push_back((customer, record));
+            }
+            matched += 1;
+        }
+        result
+    }
+
     // ─── #355: Configurable Abuse Score Decay ────────────────────────────────
 
     /// Admin configures the exponential decay parameters for the abuse score system.
@@ -4821,6 +4916,14 @@ impl AhjoorRefundContract {
             .instance()
             .get(&DataKey2::AbuseScoreDecayFactorBps)
             .unwrap_or(5_000u32)
+    }
+
+    /// Get the configured rapid-submission window in ledgers (default: 720).
+    pub fn get_rapid_submission_window(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::RapidSubmissionWindowLedgers)
+            .unwrap_or(DEFAULT_RAPID_SUBMISSION_WINDOW_LEDGERS)
     }
 
     // --- Internal abuse-score helpers ---
@@ -4964,7 +5067,30 @@ impl AhjoorRefundContract {
         }
     }
 
+    /// Adds `customer` to the registry of customers ever tracked by the
+    /// abuse-score system, used by `list_abuse_flagged_customers` (#580).
+    /// No-op if already tracked.
+    fn track_abuse_customer(env: &Env, customer: &Address) {
+        let mut tracked: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::AbuseTrackedCustomers)
+            .unwrap_or(Vec::new(env));
+        if !tracked.contains(customer) {
+            tracked.push_back(customer.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey2::AbuseTrackedCustomers, &tracked);
+            env.storage().persistent().extend_ttl(
+                &DataKey2::AbuseTrackedCustomers,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+    }
+
     fn update_abuse_on_request(env: &Env, customer: &Address, current_seq: u32, rapid_window: u32) {
+        Self::track_abuse_customer(env, customer);
         let old_record = Self::load_abuse_record_with_decay(env, customer);
         let mut record = old_record.clone();
         record.total_requests += 1;
@@ -4987,6 +5113,7 @@ impl AhjoorRefundContract {
     }
 
     fn increment_abuse_score(env: &Env, customer: &Address, delta: u32, is_elevated: bool) {
+        Self::track_abuse_customer(env, customer);
         // Load with in-memory decay applied (does NOT write to storage)
         let old_record = Self::load_abuse_record_with_decay(env, customer);
         let mut record = old_record.clone();
@@ -5427,6 +5554,21 @@ impl AhjoorRefundContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Get the active reserve-waiver expiry ledger for a merchant.
+    /// Returns `None` when the merchant has no waiver, or the waiver has expired.
+    pub fn get_reserve_waiver_expiry(env: Env, merchant: Address) -> Option<u32> {
+        let expiry: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ReserveWaiverExpiryLedger(merchant))
+            .unwrap_or(0);
+        if expiry > env.ledger().sequence() {
+            Some(expiry)
+        } else {
+            None
+        }
+    }
+
     pub fn set_reserve_config(
         env: Env,
         admin: Address,
@@ -5487,6 +5629,34 @@ impl AhjoorRefundContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         legacy_balance
+    }
+
+    /// #579: Combined reserve balance view across both parallel reserve
+    /// subsystems — the legacy (#274) `*_reserve` balances and the
+    /// canonical (#334) `*_merchant_reserve` balances. Reports both side by
+    /// side so a merchant/admin has one place to check reserve status
+    /// without querying each subsystem separately. See
+    /// `migrate_merchant_reserve` (#585) to consolidate the two into one.
+    /// A merchant with no activity in either subsystem gets zeroed values.
+    pub fn get_reserve_balance_summary(env: Env, merchant: Address) -> ReserveSummary {
+        let legacy_reserve_balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantReserve(merchant.clone()))
+            .unwrap_or(0);
+        let merchant_reserve_balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::MerchantReserveBalance(merchant.clone()))
+            .unwrap_or(0);
+        let total_reserve_balance = legacy_reserve_balance + merchant_reserve_balance;
+
+        ReserveSummary {
+            merchant,
+            legacy_reserve_balance,
+            merchant_reserve_balance,
+            total_reserve_balance,
+        }
     }
 
     pub fn set_merchant_response_deadline(

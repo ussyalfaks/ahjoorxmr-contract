@@ -160,3 +160,28 @@ fn test_get_snapshot_by_id() {
     assert_eq!(s0.snapshot_id, 0);
     assert_eq!(s1.snapshot_id, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Test: get_group_snapshot_at returns snapshot for the requested round
+// ---------------------------------------------------------------------------
+#[test]
+fn test_get_group_snapshot_at_round_found() {
+    let (_env, client, admin, _m1, _m2) = setup_snapshot();
+    client.take_snapshot(&admin);
+
+    let snap_opt = client.get_group_snapshot_at(&0u32, &0u32);
+    assert!(snap_opt.is_some());
+    let snap = snap_opt.unwrap();
+    assert_eq!(snap.round_number, 0);
+    assert_eq!(snap.snapshot_id, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Test: get_group_snapshot_at returns None when no snapshot exists
+// ---------------------------------------------------------------------------
+#[test]
+fn test_get_group_snapshot_at_round_not_found() {
+    let (_env, client, _admin, _m1, _m2) = setup_snapshot();
+    let snap_opt = client.get_group_snapshot_at(&0u32, &99u32);
+    assert!(snap_opt.is_none());
+}

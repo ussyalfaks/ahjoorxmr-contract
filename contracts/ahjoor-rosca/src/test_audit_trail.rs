@@ -218,7 +218,7 @@ fn test_member_contribution_history() {
 
     // Get contribution history for member1
     let member1 = members.get(0).unwrap();
-    let history = client.get_member_contribution_history(&member1, &0u32, &2u32);
+    let history = client.get_member_contribution_history(&member1, &Some(0u32), &Some(2u32));
 
     // Verify history contains 3 contributions
     assert_eq!(history.len(), 3);
@@ -252,17 +252,45 @@ fn test_member_contribution_history_range_returns_only_requested_slice() {
     let member1 = members.get(0).unwrap();
 
     // Full history across all 5 cycles.
-    let full = client.get_member_contribution_history(&member1, &0u32, &4u32);
+    let full = client.get_member_contribution_history(&member1, &Some(0u32), &Some(4u32));
     assert_eq!(full.len(), 5);
 
     // A narrower slice (cycles 1..=2) returns only those two entries.
-    let slice = client.get_member_contribution_history(&member1, &1u32, &2u32);
+    let slice = client.get_member_contribution_history(&member1, &Some(1u32), &Some(2u32));
     assert_eq!(slice.len(), 2);
 
     // A single-cycle window.
-    let single = client.get_member_contribution_history(&member1, &3u32, &3u32);
+    let single = client.get_member_contribution_history(&member1, &Some(3u32), &Some(3u32));
     assert_eq!(single.len(), 1);
     assert_eq!(single.get(0).unwrap().member, member1);
+}
+
+#[test]
+fn test_member_contribution_history_defaults_to_recent_bounded_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, members) = create_test_contract(&env);
+    let token = client.get_state().4;
+
+    let token_admin_client = token::StellarAssetClient::new(&env, &token);
+    for member in members.iter() {
+        token_admin_client.mint(&member, &100000i128);
+    }
+
+    // Build 30 completed cycles so the default window (25) excludes early history.
+    for _round in 0..30 {
+        for member in members.iter() {
+            client.contribute(&member, &token, &1000i128);
+        }
+    }
+
+    let member1 = members.get(0).unwrap();
+    let recent_default = client.get_member_contribution_history(&member1, &None, &None);
+    assert_eq!(
+        recent_default.len(),
+        crate::audit_trail::DEFAULT_CONTRIBUTION_HISTORY_WINDOW
+    );
 }
 
 #[test]
@@ -274,7 +302,11 @@ fn test_member_contribution_history_rejects_oversized_range() {
     let (client, _admin, _members) = create_test_contract(&env);
     let member = Address::generate(&env);
 
-    client.get_member_contribution_history(&member, &0u32, &crate::audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE);
+    client.get_member_contribution_history(
+        &member,
+        &Some(0u32),
+        &Some(crate::audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE),
+    );
 }
 
 #[test]
@@ -286,7 +318,7 @@ fn test_member_contribution_history_rejects_inverted_range() {
     let (client, _admin, _members) = create_test_contract(&env);
     let member = Address::generate(&env);
 
-    client.get_member_contribution_history(&member, &5u32, &1u32);
+    client.get_member_contribution_history(&member, &Some(5u32), &Some(1u32));
 }
 
 #[test]
@@ -315,13 +347,13 @@ fn test_member_contribution_history_cost_bounded_by_range_not_total_history() {
 
     // Query a fixed-size 5-cycle window early in history...
     env.cost_estimate().budget().reset_default();
-    let early = client.get_member_contribution_history(&member1, &0u32, &4u32);
+    let early = client.get_member_contribution_history(&member1, &Some(0u32), &Some(4u32));
     let early_cost = env.cost_estimate().budget().cpu_instruction_cost();
     assert_eq!(early.len(), 5);
 
     // ...and the same size window at the far end of the 60-cycle history.
     env.cost_estimate().budget().reset_default();
-    let late = client.get_member_contribution_history(&member1, &55u32, &59u32);
+    let late = client.get_member_contribution_history(&member1, &Some(55u32), &Some(59u32));
     let late_cost = env.cost_estimate().budget().cpu_instruction_cost();
     assert_eq!(late.len(), 5);
 

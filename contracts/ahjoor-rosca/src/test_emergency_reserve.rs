@@ -1,9 +1,9 @@
 #![cfg(test)]
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::{Client as TokenClient, StellarAssetClient as TokenAdminClient},
-    Address, Env,
+    Address, Env, IntoVal, Symbol,
 };
 
 fn setup_insurance<'a>(
@@ -87,6 +87,17 @@ fn setup_insurance<'a>(
     (env, client, admin, token_addr, token_client, token_admin_client, members)
 }
 
+fn count_topic_events(env: &Env, topic: &str) -> u32 {
+    let expected_topics = (Symbol::new(env, topic),).into_val(env);
+    let mut count = 0u32;
+    for event in env.events().all().iter() {
+        if event.1 == expected_topics {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// #395: Drawing from an underfunded Full-mode insurance pool must transfer
 /// exactly pool_balance (not the full shortfall), leave the pool at 0, and
 /// never allow the stored pool balance to go negative.
@@ -142,4 +153,47 @@ fn test_insurance_pool_partial_cover_when_underfunded() {
     // Pool had 50 < shortfall of 100; all 50 should be drawn, leaving 0.
     assert!(pool_after >= 0, "InsurancePool must never go negative, got {}", pool_after);
     assert_eq!(pool_after, 0, "Pool should be 0 after exhausting 50 towards 100 shortfall");
+}
+
+#[test]
+fn test_insurance_pool_low_emits_once_then_exhausts() {
+    let (env, client, admin, token_addr, _token_client, _token_admin_client, members) =
+        setup_insurance(250);
+
+    client.set_insurance_pool_low_threshold(&admin, &200);
+    assert_eq!(client.get_insurance_pool_low_threshold(), 200);
+    assert_eq!(client.get_insurance_pool_balance(&0), 250);
+
+    let member0 = members.get(0).unwrap();
+    let member1 = members.get(1).unwrap();
+
+    // Round 0: draw 100 from 250 -> 150 (crosses below 200; low event should fire once).
+    env.ledger().with_mut(|l| l.timestamp = 100);
+    client.contribute(&member0, &token_addr, &100);
+    client.contribute(&member1, &token_addr, &100);
+    env.ledger().with_mut(|l| l.timestamp = 3800);
+    client.finalize_round();
+    assert_eq!(client.get_insurance_pool(), 150);
+    assert_eq!(count_topic_events(&env, "insurance_pool_low"), 1);
+    assert_eq!(count_topic_events(&env, "InsExhausted"), 0);
+
+    // Round 1: draw 100 from 150 -> 50 (already below threshold; no new low event).
+    env.ledger().with_mut(|l| l.timestamp = 3900);
+    client.contribute(&member0, &token_addr, &100);
+    client.contribute(&member1, &token_addr, &100);
+    env.ledger().with_mut(|l| l.timestamp = 7600);
+    client.finalize_round();
+    assert_eq!(client.get_insurance_pool(), 50);
+    assert_eq!(count_topic_events(&env, "insurance_pool_low"), 1);
+    assert_eq!(count_topic_events(&env, "InsExhausted"), 0);
+
+    // Round 2: draw remaining 50 from 50 -> 0; pool exhausted event should fire.
+    env.ledger().with_mut(|l| l.timestamp = 7700);
+    client.contribute(&member0, &token_addr, &100);
+    client.contribute(&member1, &token_addr, &100);
+    env.ledger().with_mut(|l| l.timestamp = 11400);
+    client.finalize_round();
+    assert_eq!(client.get_insurance_pool(), 0);
+    assert_eq!(count_topic_events(&env, "insurance_pool_low"), 1);
+    assert_eq!(count_topic_events(&env, "InsExhausted"), 1);
 }

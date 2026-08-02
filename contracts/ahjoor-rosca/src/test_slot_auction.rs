@@ -469,3 +469,134 @@ fn test_resolve_before_window_closes_rejected() {
     let result = client.try_resolve_slot_auction();
     assert!(result.is_err(), "Resolving while window is open should fail");
 }
+
+/// #644: get_slot_bids returns an empty Vec when no bids have been placed.
+#[test]
+fn test_get_slot_bids_empty_round() {
+    let (env, client, admin, token_addr, _token_client, _token_admin_client, members) =
+        setup_with_members(3, 10_000);
+
+    init_with_auction(&env, &client, &admin, &members, &token_addr, 500);
+
+    // Complete 3 rounds to reach cycle start (auction opens)
+    env.ledger().set_timestamp(100);
+    for _ in 0..3 {
+        for i in 0..3 {
+            client.contribute(&members.get(i).unwrap(), &token_addr, &100);
+        }
+        env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+    }
+
+    // No bids placed — get_slot_bids should return empty Vec
+    let bids = client.get_slot_bids();
+    assert_eq!(bids.len(), 0, "Empty round should return empty bids");
+}
+
+/// #644: get_slot_bids returns all bids placed during the auction window.
+#[test]
+fn test_get_slot_bids_multiple_bids() {
+    let (env, client, admin, token_addr, _token_client, token_admin_client, members) =
+        setup_with_members(4, 10_000);
+
+    for i in 0..4 {
+        token_admin_client.mint(&members.get(i).unwrap(), &5_000);
+    }
+
+    init_with_auction(&env, &client, &admin, &members, &token_addr, 1000);
+
+    // Complete 4 rounds to reach cycle start
+    env.ledger().set_timestamp(100);
+    for _ in 0..4 {
+        for i in 0..4 {
+            client.contribute(&members.get(i).unwrap(), &token_addr, &100);
+        }
+        env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+    }
+
+    // Auction is now open. Place multiple bids.
+    let member0 = members.get(0).unwrap();
+    let member1 = members.get(1).unwrap();
+    let member2 = members.get(2).unwrap();
+
+    env.ledger().set_timestamp(510);
+    client.place_slot_bid(&member0, &0, &200);
+
+    env.ledger().set_timestamp(520);
+    client.place_slot_bid(&member1, &1, &350);
+
+    env.ledger().set_timestamp(530);
+    client.place_slot_bid(&member2, &2, &150);
+
+    // get_slot_bids should return all 3 bids
+    let bids = client.get_slot_bids();
+    assert_eq!(bids.len(), 3, "Should have 3 bids");
+
+    // Verify bid details
+    let bid0 = bids.get(0).unwrap();
+    assert_eq!(bid0.bidder, member0, "First bid should be from member0");
+    assert_eq!(bid0.desired_slot, 0u32, "First bid desired_slot should be 0");
+    assert_eq!(bid0.amount, 200i128, "First bid amount should be 200");
+
+    let bid1 = bids.get(1).unwrap();
+    assert_eq!(bid1.bidder, member1, "Second bid should be from member1");
+    assert_eq!(bid1.desired_slot, 1u32, "Second bid desired_slot should be 1");
+    assert_eq!(bid1.amount, 350i128, "Second bid amount should be 350");
+
+    let bid2 = bids.get(2).unwrap();
+    assert_eq!(bid2.bidder, member2, "Third bid should be from member2");
+    assert_eq!(bid2.desired_slot, 2u32, "Third bid desired_slot should be 2");
+    assert_eq!(bid2.amount, 150i128, "Third bid amount should be 150");
+}
+
+/// #644: get_slot_bids reflects updated bids correctly.
+#[test]
+fn test_get_slot_bids_after_update() {
+    let (env, client, admin, token_addr, _token_client, token_admin_client, members) =
+        setup_with_members(3, 10_000);
+
+    for i in 0..3 {
+        token_admin_client.mint(&members.get(i).unwrap(), &5_000);
+    }
+
+    init_with_auction(&env, &client, &admin, &members, &token_addr, 1000);
+
+    // Complete 3 rounds to reach cycle start
+    env.ledger().set_timestamp(100);
+    for _ in 0..3 {
+        for i in 0..3 {
+            client.contribute(&members.get(i).unwrap(), &token_addr, &100);
+        }
+        env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+    }
+
+    let member0 = members.get(0).unwrap();
+    let member1 = members.get(1).unwrap();
+
+    // Place two initial bids
+    env.ledger().set_timestamp(410);
+    client.place_slot_bid(&member0, &1, &200);
+    client.place_slot_bid(&member1, &2, &300);
+
+    // get_slot_bids should show 2 bids
+    let bids_before = client.get_slot_bids();
+    assert_eq!(bids_before.len(), 2, "Should have 2 bids before update");
+
+    // member0 updates bid to 500
+    env.ledger().set_timestamp(420);
+    client.update_slot_bid(&member0, &1, &500);
+
+    // get_slot_bids should still show 2 bids, but member0's amount should be updated to 500
+    let bids_after = client.get_slot_bids();
+    assert_eq!(bids_after.len(), 2, "Should still have 2 bids after update");
+
+    // Find member0's updated bid
+    let mut found_updated_bid = false;
+    for bid in bids_after.iter() {
+        if bid.bidder == member0 {
+            assert_eq!(bid.amount, 500i128, "member0's bid should be updated to 500");
+            found_updated_bid = true;
+            break;
+        }
+    }
+    assert!(found_updated_bid, "member0's updated bid should be in get_slot_bids");
+}

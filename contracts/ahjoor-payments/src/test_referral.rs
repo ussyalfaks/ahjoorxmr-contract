@@ -158,3 +158,64 @@ fn test_zero_commission_config() {
 
     assert_eq!(client.get_pending_commission(&referrer), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Test: commission summary reflects multiple referrals with partial claims
+// ---------------------------------------------------------------------------
+#[test]
+fn test_referral_commission_summary() {
+    let (env, client, admin, _fee_recipient, token_addr, _tc, tac) = setup_referral();
+
+    let referrer = Address::generate(&env);
+    let referred_a = Address::generate(&env);
+    let referred_b = Address::generate(&env);
+    let customer = Address::generate(&env);
+
+    // Referrer with no activity returns (0, 0)
+    assert_eq!(
+        client.get_referral_commission_summary(&referrer),
+        (0i128, 0i128)
+    );
+
+    client.approve_merchant(&referrer);
+    client.set_referral_config(&admin, &1000u32, &10_000u32);
+    client.register_referral(&referrer, &referred_a);
+    client.approve_merchant(&referred_a);
+    client.register_referral(&referrer, &referred_b);
+    client.approve_merchant(&referred_b);
+
+    tac.mint(&customer, &100_000);
+
+    // Payment through first referred merchant
+    let pid_a = client.create_payment(&customer, &referred_a, &1000, &token_addr, &None, &None, &None);
+    client.complete_payment(&pid_a);
+
+    // Payment through second referred merchant
+    let pid_b = client.create_payment(&customer, &referred_b, &1000, &token_addr, &None, &None, &None);
+    client.complete_payment(&pid_b);
+
+    let (total_earned, total_claimed) = client.get_referral_commission_summary(&referrer);
+    assert!(total_earned > 0);
+    assert_eq!(total_claimed, 0);
+    assert_eq!(total_earned, client.get_pending_commission(&referrer));
+
+    // Partial claim: fund the contract and claim once
+    let pending = client.get_pending_commission(&referrer);
+    tac.mint(&client.address, &pending);
+    client.claim_referral_commission(&referrer, &token_addr);
+
+    let (total_earned_after_claim, total_claimed_after_claim) =
+        client.get_referral_commission_summary(&referrer);
+    assert_eq!(total_earned_after_claim, total_earned);
+    assert_eq!(total_claimed_after_claim, pending);
+    assert_eq!(client.get_pending_commission(&referrer), 0);
+
+    // Accrue more commission after the claim
+    let pid_c = client.create_payment(&customer, &referred_a, &1000, &token_addr, &None, &None, &None);
+    client.complete_payment(&pid_c);
+
+    let (total_earned_final, total_claimed_final) =
+        client.get_referral_commission_summary(&referrer);
+    assert!(total_earned_final > total_earned_after_claim);
+    assert_eq!(total_claimed_final, total_claimed_after_claim);
+}

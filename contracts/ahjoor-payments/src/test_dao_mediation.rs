@@ -86,6 +86,40 @@ fn test_escalate_to_dao() {
 }
 
 #[test]
+fn test_cancel_dao_escalation_before_votes() {
+    let (env, client, _admin, customer, _merchant, _token, payment_id) =
+        setup_with_payment();
+
+    let mediator = Address::generate(&env);
+    client.configure_dao(&vec![&env, mediator.clone()], &86_400u64, &1u32);
+
+    let case_id_0 = client.escalate_to_dao(&customer, &payment_id);
+    assert_eq!(case_id_0, 0);
+
+    client.cancel_dao_escalation(&payment_id);
+
+    // Cancellation removes the active case, allowing a fresh escalation.
+    let case_id_1 = client.escalate_to_dao(&customer, &payment_id);
+    assert_eq!(case_id_1, 1);
+}
+
+#[test]
+#[should_panic]
+fn test_cancel_dao_escalation_after_vote_panics() {
+    let (env, client, _admin, customer, _merchant, _token, payment_id) =
+        setup_with_payment();
+
+    let mediator = Address::generate(&env);
+    client.configure_dao(&vec![&env, mediator.clone()], &86_400u64, &1u32);
+
+    let case_id = client.escalate_to_dao(&customer, &payment_id);
+    client.dao_vote(&mediator, &case_id, &false);
+
+    // Any vote activity blocks cancellation.
+    client.cancel_dao_escalation(&payment_id);
+}
+
+#[test]
 fn test_dao_vote_and_execute_customer_wins() {
     let (env, client, admin, customer, _merchant, token_client, payment_id) =
         setup_with_payment();
@@ -213,4 +247,102 @@ fn test_escalate_non_disputed_payment_panics() {
     let mediator = Address::generate(&env);
     client.configure_dao(&vec![&env, mediator.clone()], &86_400u64, &1u32);
     client.escalate_to_dao(&customer, &payment_id);
+}
+
+// ── Issue (b): duplicate escalation guard ────────────────────────────────────
+
+/// A second call to `escalate_to_dao` for the same still-disputed payment must
+/// revert with `DaoAlreadyEscalated`. The first call must still succeed and
+/// produce exactly one case.
+#[test]
+#[should_panic]
+fn test_double_escalation_rejected() {
+    let (env, client, _admin, customer, _merchant, _token, payment_id) =
+        setup_with_payment();
+
+    let mediator = Address::generate(&env);
+    client.configure_dao(&vec![&env, mediator.clone()], &86_400u64, &1u32);
+
+    // First escalation: must succeed.
+    let case_id = client.escalate_to_dao(&customer, &payment_id);
+    assert_eq!(case_id, 0);
+
+    // Verify exactly one case exists.
+    let case = client.get_dao_mediation_case(&case_id);
+    assert_eq!(case.payment_id, payment_id);
+    assert!(!case.executed);
+
+    // Second escalation on the same still-disputed payment: must panic with
+    // DaoAlreadyEscalated.
+    client.escalate_to_dao(&customer, &payment_id);
+}
+
+// ── Issue (a): execute_dao_verdict payment-status guard ───────────────────────
+
+/// Executing a second verdict for an already-resolved payment must revert.
+///
+/// Scenario: admin resolves the dispute out-of-band (via `resolve_dispute`)
+/// while a DAO case is still open.  When `execute_dao_verdict` is then called
+/// the payment is already `Refunded`, so the contract must reject the call
+/// instead of transferring funds a second time.
+#[test]
+#[should_panic]
+fn test_double_verdict_execution_via_already_resolved_payment_rejected() {
+    let (env, client, admin, customer, _merchant, token_client, payment_id) =
+        setup_with_payment();
+
+    let mediator = Address::generate(&env);
+    client.configure_dao(
+        &vec![&env, mediator.clone()],
+        &1u64, // 1-second window so we can advance past it
+        &1u32,
+    );
+
+    // Escalate to DAO.
+    let case_id = client.escalate_to_dao(&customer, &payment_id);
+
+    // Cast a customer-winning vote.
+    client.dao_vote(&mediator, &case_id, &false);
+
+    // Admin resolves the dispute independently — payment is now Refunded.
+    client.resolve_dispute(&payment_id, &false);
+
+    // Advance time past the vote window.
+    env.ledger().with_mut(|li| li.timestamp += 10);
+
+    // Attempt to execute the DAO verdict against an already-Refunded payment.
+    // Must panic because the payment status guard rejects the call.
+    client.execute_dao_verdict(&case_id);
+}
+
+/// Directly re-executing an already-executed case must revert with
+/// `DaoCaseAlreadyExecuted` (the `case.executed` flag check, unchanged from
+/// before, should still hold).  Additionally, the payment status guard
+/// independently blocks a second payout even if the `executed` flag were
+/// somehow bypassed (covered by the scenario above).
+#[test]
+#[should_panic]
+fn test_execute_already_executed_case_rejected() {
+    let (env, client, _admin, customer, _merchant, _token, payment_id) =
+        setup_with_payment();
+
+    let mediator = Address::generate(&env);
+    client.configure_dao(
+        &vec![&env, mediator.clone()],
+        &1u64,
+        &1u32,
+    );
+
+    let case_id = client.escalate_to_dao(&customer, &payment_id);
+    client.dao_vote(&mediator, &case_id, &false); // customer wins
+
+    env.ledger().with_mut(|li| li.timestamp += 10);
+
+    // First execution: succeeds.
+    client.execute_dao_verdict(&case_id);
+    let case = client.get_dao_mediation_case(&case_id);
+    assert!(case.executed);
+
+    // Second execution on the same case_id: must panic with DaoCaseAlreadyExecuted.
+    client.execute_dao_verdict(&case_id);
 }

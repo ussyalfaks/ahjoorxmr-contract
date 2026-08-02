@@ -1,10 +1,8 @@
-use crate::{events, ContributionEntry, CycleRecord, DataKey2, DataKey5};
+use crate::{events, ContributionEntry, CycleRecord, DataKey, DataKey2, DataKey5};
 use soroban_sdk::{Address, Env, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_000;
-const TEMP_LIFETIME_THRESHOLD: u32 = 10_000;
-const TEMP_BUMP_AMOUNT: u32 = 15_000;
 
 /// Default retention window: keep 100 cycles in persistent storage
 const DEFAULT_RETENTION_WINDOW: u32 = 100;
@@ -12,6 +10,8 @@ const DEFAULT_RETENTION_WINDOW: u32 = 100;
 /// #544: maximum number of cycles `get_member_contribution_history` will scan
 /// in a single call, so cost stays bounded regardless of total group history.
 pub(crate) const MAX_CONTRIBUTION_HISTORY_RANGE: u32 = 100;
+/// Default cycles scanned when history bounds are omitted.
+pub(crate) const DEFAULT_CONTRIBUTION_HISTORY_WINDOW: u32 = 25;
 
 /// Records a complete cycle audit trail atomically at round closure.
 /// This captures all significant events: contributions, payouts, defaults, skips, and penalties.
@@ -98,11 +98,17 @@ fn archive_old_records(env: &Env, current_cycle: u32) {
     for cycle_num in oldest..archive_threshold {
         let entry_key = DataKey5::CycleRecordEntry(cycle_num);
         if let Some(record) = env.storage().persistent().get::<_, CycleRecord>(&entry_key) {
+            // #543: archived records live in persistent storage (not temporary) so
+            // their TTL is governed by the same long-lived bump strategy as the
+            // rest of the audit trail, and does not silently expire and get
+            // deleted just because no new cycle was archived for a while.
             let archived_key = DataKey5::ArchivedCycleRecordEntry(cycle_num);
-            env.storage().temporary().set(&archived_key, &record);
-            env.storage()
-                .temporary()
-                .extend_ttl(&archived_key, TEMP_LIFETIME_THRESHOLD, TEMP_BUMP_AMOUNT);
+            env.storage().persistent().set(&archived_key, &record);
+            env.storage().persistent().extend_ttl(
+                &archived_key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
             env.storage().persistent().remove(&entry_key);
             events::emit_cycle_record_archived(env, cycle_num);
         }
@@ -124,7 +130,7 @@ pub(crate) fn get_cycle_record(env: &Env, cycle_number: u32) -> Option<CycleReco
     }
 
     env.storage()
-        .temporary()
+        .persistent()
         .get(&DataKey5::ArchivedCycleRecordEntry(cycle_number))
 }
 
@@ -138,9 +144,24 @@ pub(crate) fn get_cycle_record(env: &Env, cycle_number: u32) -> Option<CycleReco
 pub(crate) fn get_member_contribution_history(
     env: &Env,
     member: Address,
-    from_cycle: u32,
-    to_cycle: u32,
+    from_cycle: Option<u32>,
+    to_cycle: Option<u32>,
 ) -> Vec<ContributionEntry> {
+    let current_round: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::CurrentRound)
+        .unwrap_or(0);
+    let latest_cycle = current_round.saturating_sub(1);
+    let default_span = DEFAULT_CONTRIBUTION_HISTORY_WINDOW.saturating_sub(1);
+
+    let (from_cycle, to_cycle) = match (from_cycle, to_cycle) {
+        (Some(from), Some(to)) => (from, to),
+        (Some(from), None) => (from, from.saturating_add(default_span)),
+        (None, Some(to)) => (to.saturating_sub(default_span), to),
+        (None, None) => (latest_cycle.saturating_sub(default_span), latest_cycle),
+    };
+
     if from_cycle > to_cycle {
         panic!("from_cycle must not exceed to_cycle");
     }

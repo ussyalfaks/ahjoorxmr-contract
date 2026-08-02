@@ -303,6 +303,8 @@ pub enum DataKey4 {
     /// `finalize_round`, which would advance rounds without ever paying out
     /// the pot or recording audit trail / receipts / cycle bonuses.
     UnfinalizedRoundStreak = 100,
+    /// Insurance pool low-balance alert threshold.
+    InsurancePoolLowThreshold = 101,
 }
 
 /// Waitlist ordering mode (#456).
@@ -461,6 +463,7 @@ pub enum PersistentKey {
     ReputationScores,          // Map<Address, i128> — cumulative member reliability score
     FreezeLog,                 // Vec<FreezeRecord> — append-only freeze audit log
     SnapshotLog,               // Vec<GroupSnapshot> — append-only snapshot log (#243)
+    SnapshotByRound(u32),      // round_number → latest GroupSnapshot for that round
     LastSnapshotLedger,        // u32 — last snapshot ledger for spam guard (#243)
     MinSnapshotIntervalLedgers, // u32 — min interval between snapshots (#243)
     MemberCreditScores,        // Map<Address, MemberScore> — per-member credit score (#269)

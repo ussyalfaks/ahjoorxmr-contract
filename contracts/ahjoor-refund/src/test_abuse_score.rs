@@ -238,3 +238,110 @@ fn test_block_expiry_allows_new_requests() {
     // Should not panic
     refund_client.request_refund(&customer, &pid, &100, &String::from_str(&env, "ok"), &0);
 }
+
+// --- #580: list_abuse_flagged_customers ---
+
+#[test]
+fn test_list_abuse_flagged_customers_only_above_threshold() {
+    let (env, refund_client, payment_client, admin, token_addr, _tc, token_admin) = setup_abuse();
+    let flagged_customer = Address::generate(&env);
+    let unflagged_customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    // 3 rejections push flagged_customer's score to 30 (>= threshold of 30).
+    for _ in 0..3 {
+        let pid = make_payment(&env, &payment_client, &token_admin, &flagged_customer, &merchant, &token_addr, 1000);
+        token_admin.mint(&flagged_customer, &100);
+        let rid = refund_client.request_refund(
+            &flagged_customer, &pid, &100, &String::from_str(&env, "bad"), &0,
+        );
+        refund_client.reject_refund(&admin, &rid, &String::from_str(&env, "no"));
+    }
+
+    // A single rejection leaves unflagged_customer's score at 10 (< threshold).
+    let pid = make_payment(&env, &payment_client, &token_admin, &unflagged_customer, &merchant, &token_addr, 1000);
+    token_admin.mint(&unflagged_customer, &100);
+    let rid = refund_client.request_refund(
+        &unflagged_customer, &pid, &100, &String::from_str(&env, "bad"), &0,
+    );
+    refund_client.reject_refund(&admin, &rid, &String::from_str(&env, "no"));
+
+    let flagged = refund_client.list_abuse_flagged_customers(&0, &10);
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged.get(0).unwrap().0, flagged_customer);
+}
+
+#[test]
+fn test_reset_customer_no_longer_appears_in_flagged_list() {
+    let (env, refund_client, payment_client, admin, token_addr, _tc, token_admin) = setup_abuse();
+    let customer = Address::generate(&env);
+    let merchant = Address::generate(&env);
+
+    for _ in 0..3 {
+        let pid = make_payment(&env, &payment_client, &token_admin, &customer, &merchant, &token_addr, 1000);
+        token_admin.mint(&customer, &100);
+        let rid = refund_client.request_refund(
+            &customer, &pid, &100, &String::from_str(&env, "bad"), &0,
+        );
+        refund_client.reject_refund(&admin, &rid, &String::from_str(&env, "no"));
+    }
+
+    assert_eq!(refund_client.list_abuse_flagged_customers(&0, &10).len(), 1);
+
+    refund_client.reset_customer_abuse_score(&admin, &customer);
+
+    assert_eq!(refund_client.list_abuse_flagged_customers(&0, &10).len(), 0);
+}
+
+#[test]
+fn test_list_abuse_flagged_customers_pagination() {
+    let (env, refund_client, payment_client, admin, token_addr, _tc, token_admin) = setup_abuse();
+    let merchant = Address::generate(&env);
+
+    let mut customers = soroban_sdk::Vec::new(&env);
+    for _ in 0..4 {
+        let customer = Address::generate(&env);
+        for _ in 0..3 {
+            let pid = make_payment(&env, &payment_client, &token_admin, &customer, &merchant, &token_addr, 1000);
+            token_admin.mint(&customer, &100);
+            let rid = refund_client.request_refund(
+                &customer, &pid, &100, &String::from_str(&env, "bad"), &0,
+            );
+            refund_client.reject_refund(&admin, &rid, &String::from_str(&env, "no"));
+        }
+        customers.push_back(customer);
+    }
+
+    let page1 = refund_client.list_abuse_flagged_customers(&0, &2);
+    let page2 = refund_client.list_abuse_flagged_customers(&2, &2);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page2.len(), 2);
+
+    let mut collected = soroban_sdk::Vec::new(&env);
+    for (customer, _record) in page1.iter() {
+        collected.push_back(customer);
+    }
+    for (customer, _record) in page2.iter() {
+        collected.push_back(customer);
+    }
+    assert_eq!(collected, customers);
+}
+
+#[test]
+fn test_get_rapid_submission_window() {
+    let (env, refund_client, _payment_client, admin, _token, _token_client, _token_admin) =
+        setup_abuse();
+
+    // Default value when not explicitly set
+    let default_client = {
+        let env = Env::default();
+        env.mock_all_auths();
+        let refund_id = env.register(AhjoorRefundContract, ());
+        AhjoorRefundContractClient::new(&env, &refund_id)
+    };
+    assert_eq!(default_client.get_rapid_submission_window(), 720);
+
+    // Explicitly set value
+    refund_client.set_rapid_submission_window(&admin, &500u32);
+    assert_eq!(refund_client.get_rapid_submission_window(), 500);
+}

@@ -42,6 +42,16 @@ pub struct RoundClosed {
     pub defaulters: Vec<Address>,
 }
 
+/// Event: Round closed via `close_round` without a preceding `finalize_round`.
+///
+/// Distinguishes an admin-only state advance (no pot payout / audit trail)
+/// from the normal finalize-then-reset flow.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RoundClosedWithoutPayout {
+    pub round: u32,
+}
+
 /// Event: Payout order finalized via randomization (#315)
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -461,6 +471,10 @@ pub fn emit_milestone(e: &Env, milestone: u32, total_collected: i128) {
 
 pub fn emit_closed(e: &Env, round: u32, defaulters: Vec<Address>) {
     RoundClosed { round, defaulters }.publish(e);
+}
+
+pub fn emit_round_closed_without_payout(e: &Env, round: u32) {
+    RoundClosedWithoutPayout { round }.publish(e);
 }
 
 pub fn emit_payout_order_finalized(e: &Env, round: u32, payout_order: Vec<Address>) {
@@ -898,12 +912,30 @@ pub struct InsurancePaidOut {
     pub remaining_pool: i128,
 }
 
+/// Event: Insurance pool dropped below configured low threshold
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InsurancePoolLow {
+    pub round: u32,
+    pub threshold: i128,
+    pub remaining_pool: i128,
+}
+
 pub fn emit_insurance_top_up(e: &Env, contributor: Address, amount: i128) {
     InsurancePoolTopUp { contributor, amount }.publish(e);
 }
 
 pub fn emit_insurance_paid_out(e: &Env, round: u32, shortfall: i128, remaining_pool: i128) {
     InsurancePaidOut { round, shortfall, remaining_pool }.publish(e);
+}
+
+pub fn emit_insurance_pool_low(e: &Env, round: u32, threshold: i128, remaining_pool: i128) {
+    InsurancePoolLow {
+        round,
+        threshold,
+        remaining_pool,
+    }
+    .publish(e);
 }
 
 pub fn emit_round_skip_requested(e: &Env, member: Address, round: u32, fee_paid: i128) {

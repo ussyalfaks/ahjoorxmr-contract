@@ -46,13 +46,15 @@ This transitions the escrow from `Active` → `AwaitingInspection`. The buyer **
 The assigned inspector submits their verdict via:
 
 ```
-submit_inspection_result(inspector, escrow_id, approved: bool, report_hash: BytesN<32>)
+submit_inspection_report(inspector, escrow_id, approved: bool, report_hash: BytesN<32>)
 ```
+
+`submit_inspection_result` is an alias for `submit_inspection_report` and may be used interchangeably.
 
 - Only the **assigned inspector** may call this. Any other address is rejected with `OnlyAssignedInspectorCanSubmitReport`.
 - `approved = true` → status moves to `InspectionPassed`. The buyer may then call `release_escrow` to complete the payment.
 - `approved = false` → status moves to `InspectionFailed`. The buyer cannot release. The seller may address the issues and call `seller_mark_complete` again to resubmit for a second inspection.
-- `report_hash` is a 32-byte hash of the off-chain inspection report, stored on-chain for auditability.
+- `report_hash` is a 32-byte hash of the off-chain inspection report. The full `InspectorReport` record (inspector address, approved flag, hash, and submission timestamp) is stored on-chain under `DataKey2::InspectorReport(escrow_id)` and is readable via `get_inspector_report`.
 - Once a result is submitted, it is final for that inspection round. Submitting a second result to the same escrow in the same `AwaitingInspection` cycle is rejected.
 
 ### 3.3 Escrow Status Flow with Inspector
@@ -73,10 +75,29 @@ Both parties (buyer **and** seller) may agree to replace the current inspector v
 replace_inspector(caller, escrow_id, new_inspector)
 ```
 
+`update_inspector` is an alias for `replace_inspector` and may be used interchangeably.
+
 - The caller must be either the buyer or the seller.
 - Replacement requires **both** parties to call this function with the same `new_inspector`. A single-party call is recorded but does not take effect.
 - Once both parties have signed, the old inspector is replaced, the `InspectorReplacement` record is cleared, and if the escrow was stuck in `AwaitingInspection` or `InspectionFailed`, it is reset to `Active` so the new inspector can start fresh.
 - Being replaced **penalizes the old inspector's score** (see section 4.3).
+
+### 3.5 Reading the Inspection Report
+
+After an inspector submits their verdict, the on-chain record can be retrieved:
+
+```
+get_inspector_report(escrow_id) → Option<InspectorReport>
+```
+
+Returns `None` if no report has been submitted yet. When present, `InspectorReport` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `inspector` | `Address` | Address of the inspector who submitted the report |
+| `approved` | `bool` | Whether the inspector approved (`true`) or rejected (`false`) |
+| `report_hash` | `BytesN<32>` | 32-byte hash of the off-chain report document |
+| `submitted_at` | `u64` | Ledger timestamp when the report was submitted |
 
 ---
 

@@ -40,6 +40,8 @@ pub enum Error {
     QuotaExceeded = 6,
     TokenAlreadyHasQuota = 7,
     TokenHasNoQuota = 8,
+    SuspensionExtensionOverflow = 9,
+    RiskTierNotDefined = 10,
 }
 
 #[contracttype]
@@ -297,6 +299,9 @@ impl TokenWhitelistContract {
     pub fn assign_token_tier(env: Env, admin: Address, token: Address, tier_id: u32) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        if env.storage().instance().get::<_, TierLimits>(&DataKey::RiskTier(tier_id)).is_none() {
+            panic!("RiskTierNotDefined");
+        }
         env.storage().persistent().set(&DataKey::TokenTier(token.clone()), &tier_id);
         env.storage().persistent().extend_ttl(&DataKey::TokenTier(token.clone()), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         events::emit_token_tier_assigned(&env, token, tier_id);
@@ -324,6 +329,12 @@ impl TokenWhitelistContract {
             return limits;
         }
         TierLimits { name: soroban_sdk::String::from_str(&env, "tier-default"), max_single_tx_amount: 0, max_daily_volume: 0 }
+    }
+
+    /// Get the raw risk-tier definition for `tier_id`.
+    /// Returns `None` if the tier was never defined.
+    pub fn get_risk_tier(env: Env, tier_id: u32) -> Option<TierLimits> {
+        env.storage().instance().get(&DataKey::RiskTier(tier_id))
     }
 
     pub fn set_token_metadata(env: Env, admin: Address, token: Address, decimals: u32, symbol: soroban_sdk::String, logo_hash: BytesN<32>, canonical_oracle: Option<Address>) {
@@ -509,7 +520,7 @@ impl TokenWhitelistContract {
         events::emit_token_suspension_lifted(&env, token, admin, current_ledger);
     }
 
-    pub fn extend_token_suspension(env: Env, admin: Address, token: Address, additional_ledgers: u32) {
+    pub fn extend_token_suspension(env: Env, admin: Address, token: Address, additional_ledgers: u32) -> Result<(), Error> {
         admin.require_auth();
         Self::require_admin(&env, &admin);
         let maybe_record: Option<SuspensionRecord> = env
@@ -523,10 +534,14 @@ impl TokenWhitelistContract {
         if current_ledger >= record.expiry_ledger {
             panic!("No active suspension");
         }
+        let new_expiry_ledger = record
+            .expiry_ledger
+            .checked_add(additional_ledgers)
+            .ok_or(Error::SuspensionExtensionOverflow)?;
         env.storage().persistent().set(
             &DataKey::SuspensionRecord(token.clone()),
             &SuspensionRecord {
-                expiry_ledger: record.expiry_ledger + additional_ledgers,
+                expiry_ledger: new_expiry_ledger,
                 reason_hash: record.reason_hash,
             },
         );
@@ -536,6 +551,7 @@ impl TokenWhitelistContract {
             PERSISTENT_BUMP_AMOUNT,
         );
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
     }
 
     pub fn get_token_suspension(env: Env, token: Address) -> Option<SuspensionRecord> {
@@ -843,6 +859,45 @@ impl TokenWhitelistContract {
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Returns the current governance configuration as
+    /// `(governance_token, min_stake, voting_window_ledgers, enactment_delay_ledgers, quorum_bps)`.
+    ///
+    /// Unset scalar values fall back to the same defaults used by proposal/voting
+    /// flows. `governance_token` is `None` until `set_governance_token` is called.
+    pub fn get_governance_config(env: Env) -> (Option<Address>, i128, u32, u32, u32) {
+        let governance_token: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernanceToken);
+        let min_stake: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinProposalStake)
+            .unwrap_or(1);
+        let voting_window_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VotingWindowLedgers)
+            .unwrap_or(DEFAULT_VOTING_WINDOW_LEDGERS);
+        let enactment_delay_ledgers: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EnactmentDelayLedgers)
+            .unwrap_or(DEFAULT_ENACTMENT_DELAY_LEDGERS);
+        let quorum_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuorumBps)
+            .unwrap_or(DEFAULT_QUORUM_BPS);
+        (
+            governance_token,
+            min_stake,
+            voting_window_ledgers,
+            enactment_delay_ledgers,
+            quorum_bps,
+        )
+    }
+
     pub fn propose_token_listing(env: Env, proposer: Address, token: Address, rationale_hash: BytesN<32>) -> u32 {
         proposer.require_auth();
         let governance_token: Address = env
@@ -1015,5 +1070,11 @@ impl TokenWhitelistContract {
 
     pub fn get_proposal_counter(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::ProposalCounter).unwrap_or(0)
+    }
+
+    /// Returns `Some(true)` if the voter approved, `Some(false)` if they
+    /// rejected, or `None` if they have not voted on this proposal.
+    pub fn get_vote_record(env: Env, proposal_id: u32, voter: Address) -> Option<bool> {
+        env.storage().persistent().get::<DataKey, (bool, i128)>(&DataKey::VoteRecord(proposal_id, voter)).map(|(approve, _)| approve)
     }
 }

@@ -720,6 +720,12 @@ impl AhjoorContract {
             .unwrap_or(0)
     }
 
+    /// Read-only balance view for integrators expecting a group-scoped API.
+    /// `group_id` is currently unused because this contract manages one group.
+    pub fn get_insurance_pool_balance(env: Env, _group_id: u32) -> i128 {
+        Self::get_insurance_pool(env)
+    }
+
     /// Get the proposed admin address, if any.
     pub fn get_proposed_admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey2::ProposedAdmin)
@@ -1377,6 +1383,9 @@ impl AhjoorContract {
             .get(&DataKey::CurrentRound)
             .unwrap();
         events::emit_closed(&env, current_round, defaulters);
+        // Signal that this round was advanced without finalize_round (no pot
+        // payout / audit trail). The normal finalize_round path does not emit this.
+        events::emit_round_closed_without_payout(&env, current_round);
         env.storage()
             .instance()
             .set(&DataKey4::LastRoundDeadline, &deadline);
@@ -1414,16 +1423,18 @@ impl AhjoorContract {
         audit_trail::get_retention_window(&env)
     }
 
-    /// Returns `member`'s contribution entries within cycles
-    /// `from_cycle..=to_cycle` (inclusive). The range is capped at
-    /// `audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE` (100) cycles per call —
-    /// callers with longer histories page through it with successive calls
-    /// instead of loading the whole history at once (#544).
+    /// Returns `member`'s contribution entries within an optional cycle window.
+    ///
+    /// When both bounds are omitted, this returns the most recent
+    /// `audit_trail::DEFAULT_CONTRIBUTION_HISTORY_WINDOW` cycles.
+    /// When one bound is omitted, the other side is expanded by that same
+    /// default window. Any resolved range is still capped by
+    /// `audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE` (100) cycles per call.
     pub fn get_member_contribution_history(
         env: Env,
         member: Address,
-        from_cycle: u32,
-        to_cycle: u32,
+        from_cycle: Option<u32>,
+        to_cycle: Option<u32>,
     ) -> Vec<ContributionEntry> {
         audit_trail::get_member_contribution_history(&env, member, from_cycle, to_cycle)
     }
@@ -2750,6 +2761,17 @@ impl AhjoorContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// #644: Returns the current contents of DataKey3::AuctionBids for the active round.
+    /// 
+    /// This getter allows inspection of all current (non-sealed) auction bids before
+    /// resolution. Each SlotBid includes the bidder, desired slot, amount, and timestamp.
+    pub fn get_slot_bids(env: Env) -> Vec<SlotBid> {
+        env.storage()
+            .instance()
+            .get(&DataKey3::AuctionBids)
+            .unwrap_or(Vec::new(&env))
+    }
+
     // ─── Cross-Group Member Migration ────────────────────────────────────────
 
     /// Returns the base token address of this group (used by cross-contract migration checks).
@@ -3299,6 +3321,64 @@ impl AhjoorContract {
                     .set(&DataKey3::IncomingMigrations, &incoming);
             }
         }
+    }
+
+    /// Admin override to force-cancel a stalled migration request.
+    ///
+    /// Unlike `cancel_migration`, this does not require timeout expiry and can
+    /// remove migration state at any intermediate approval stage.
+    ///
+    /// Removes, when present, both:
+    /// - `MigrationRequests[member]`   (source-side request record)
+    /// - `IncomingMigrations[member]`  (destination-side approval record)
+    ///
+    /// Panics with `MigrationNotFound` if no migration state exists for `member`
+    /// on this contract.
+    pub fn admin_cancel_migration(env: Env, member: Address) {
+        internals::check_not_paused(&env);
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        let mut changed = false;
+
+        let mut requests: Map<Address, MigrationRequest> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::MigrationRequests)
+            .unwrap_or(Map::new(&env));
+        if requests.contains_key(member.clone()) {
+            requests.remove(member.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey3::MigrationRequests, &requests);
+            changed = true;
+        }
+
+        let mut incoming: Map<Address, IncomingMigration> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::IncomingMigrations)
+            .unwrap_or(Map::new(&env));
+        if incoming.contains_key(member.clone()) {
+            incoming.remove(member.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey3::IncomingMigrations, &incoming);
+            changed = true;
+        }
+
+        if !changed {
+            panic_with_error!(&env, ExtError2::MigrationNotFound);
+        }
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Returns the pending outbound migration request for `member`, if any.
@@ -7446,6 +7526,32 @@ impl AhjoorContract {
         events::emit_insurance_coverage_mode_set(&env, mode as u32);
     }
 
+    pub fn set_insurance_pool_low_threshold(env: Env, admin: Address, threshold: i128) {
+        admin.require_auth();
+        internals::check_not_paused(&env);
+        let a: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("No admin");
+        if admin != a {
+            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
+        }
+        if threshold < 0 {
+            panic_with_error!(&env, ExtError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey4::InsurancePoolLowThreshold, &threshold);
+    }
+
+    pub fn get_insurance_pool_low_threshold(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey4::InsurancePoolLowThreshold)
+            .unwrap_or(0)
+    }
+
     pub fn get_insurance_claims(env: Env, round: u32) -> Vec<InsuranceClaim> {
         let claims: Map<u32, Vec<InsuranceClaim>> = env
             .storage()
@@ -8892,6 +8998,17 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Returns the proxy authorization record for `member` in `group_id` (issue #643).
+    /// Returns `None` if no proxy has been authorized or if it was revoked.
+    pub fn get_proxy_authorization(env: Env, group_id: u32, member: Address, _proxy: Address) -> Option<ProxyAuthorization> {
+        let proxy_auths: Map<(u32, Address), ProxyAuthorization> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::ProxyAuthorizations)
+            .unwrap_or(Map::new(&env));
+        proxy_auths.get((group_id, member))
+    }
+
     /// Co-signer pays on behalf of a defaulting member during the grace window.
     /// The contribution is recorded as the member's own.
     pub fn co_signer_contribute(
@@ -9003,6 +9120,18 @@ impl AhjoorContract {
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
+
+    /// Returns the co-signer record for `member` (issue #642).
+    /// Returns `None` if no co-signer has ever been set for that member.
+    pub fn get_co_signer_record(env: Env, _group_id: u32, member: Address) -> Option<CoSignerRecord> {
+        let co_signers: Map<Address, CoSignerRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey4::CoSigners)
+            .unwrap_or(Map::new(&env));
+        co_signers.get(member)
+    }
+
     /// Returns the freeze log (read-only, available even when frozen).
     pub fn get_freeze_log(env: Env) -> Vec<FreezeRecord> {
         env.storage()
@@ -9136,12 +9265,20 @@ impl AhjoorContract {
             state_hash: state_hash.clone(),
         };
 
-        log.push_back(snapshot);
+        log.push_back(snapshot.clone());
         env.storage()
             .persistent()
             .set(&PersistentKey::SnapshotLog, &log);
         env.storage().persistent().extend_ttl(
             &PersistentKey::SnapshotLog,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&PersistentKey::SnapshotByRound(current_round), &snapshot);
+        env.storage().persistent().extend_ttl(
+            &PersistentKey::SnapshotByRound(current_round),
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
@@ -9182,6 +9319,55 @@ impl AhjoorContract {
             .get(&PersistentKey::SnapshotLog)
             .unwrap_or(Vec::new(&env));
         log.len() as u32
+    }
+
+    /// Returns the latest snapshot captured for `round`, if one exists.
+    /// `group_id` is accepted for interface consistency but ignored (each contract is one group).
+    pub fn get_group_snapshot_at(env: Env, _group_id: u32, round: u32) -> Option<GroupSnapshot> {
+        if let Some(snapshot) = env
+            .storage()
+            .persistent()
+            .get::<PersistentKey, GroupSnapshot>(&PersistentKey::SnapshotByRound(round))
+        {
+            env.storage().persistent().extend_ttl(
+                &PersistentKey::SnapshotByRound(round),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+            return Some(snapshot);
+        }
+
+        // Backward-compat fallback for snapshots created before round indexing existed.
+        let log: Vec<GroupSnapshot> = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::SnapshotLog)
+            .unwrap_or(Vec::new(&env));
+        for i in (0..log.len()).rev() {
+            let candidate = log.get(i).expect("snapshot index in bounds");
+            if candidate.round_number == round {
+                env.storage()
+                    .persistent()
+                    .set(&PersistentKey::SnapshotByRound(round), &candidate);
+                env.storage().persistent().extend_ttl(
+                    &PersistentKey::SnapshotByRound(round),
+                    PERSISTENT_LIFETIME_THRESHOLD,
+                    PERSISTENT_BUMP_AMOUNT,
+                );
+                env.storage()
+                    .instance()
+                    .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+                return Some(candidate);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        None
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -9510,6 +9696,23 @@ impl AhjoorContract {
             groups_completed: 0,
             score: 0,
         })
+    }
+
+    /// Batch-read member credit score records for UI/leaderboard rendering.
+    /// Returns entries in the same order as the `members` input.
+    /// `group_id` is currently unused because this contract manages one group.
+    pub fn get_member_scores(env: Env, _group_id: u32, members: Vec<Address>) -> Vec<Option<MemberScore>> {
+        let scores: Map<Address, MemberScore> = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::MemberCreditScores)
+            .unwrap_or(Map::new(&env));
+
+        let mut result: Vec<Option<MemberScore>> = Vec::new(&env);
+        for member in members.iter() {
+            result.push_back(scores.get(member));
+        }
+        result
     }
 
     /// #457: Cross-contract credit score oracle.
@@ -10673,6 +10876,15 @@ impl AhjoorContract {
             .persistent()
             .get(&DataKey3::EmergencyLoan(loan_id))
             .expect("Loan not found")
+    }
+
+    /// Returns the total number of emergency loans ever issued (issue #645).
+    /// Returns `0` when no loan has ever been requested.
+    pub fn get_emergency_loan_counter(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::EmergencyLoanCounter)
+            .unwrap_or(0)
     }
 
     /// Get member's active loan ID (0 if none)

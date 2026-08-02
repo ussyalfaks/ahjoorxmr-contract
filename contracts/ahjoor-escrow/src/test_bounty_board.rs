@@ -42,6 +42,48 @@ fn advance_ledger(e: &Env, delta_secs: u64) {
 }
 
 #[test]
+fn test_list_bounty_submissions_is_paginated() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let solver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token = create_token_contract(&env, &token_admin);
+    token.mint(&buyer, &1000);
+
+    let contract_id = env.register_contract(None, AhjoorEscrowContract);
+    let client = AhjoorEscrowContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    let description_hash = BytesN::from_array(&env, &[1u8; 32]);
+    let current_time = env.ledger().timestamp();
+    let escrow_id = client.create_bounty(
+        &buyer,
+        &token.address,
+        &500,
+        &description_hash,
+        &(current_time + 86400),
+        &(current_time + 172800),
+    );
+
+    client.claim_bounty(&solver, &escrow_id);
+    client.submit_bounty_work(&solver, &escrow_id, &BytesN::from_array(&env, &[2u8; 32]));
+    client.submit_bounty_work(&solver, &escrow_id, &BytesN::from_array(&env, &[3u8; 32]));
+
+    let page1 = client.list_bounty_submissions(&escrow_id, &0, &1);
+    assert_eq!(page1.len(), 1);
+    assert_eq!(page1.get(0).unwrap().solver, solver);
+
+    let page2 = client.list_bounty_submissions(&escrow_id, &1, &1);
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2.get(0).unwrap().submission_hash, BytesN::from_array(&env, &[3u8; 32]));
+}
+
+#[test]
 fn test_create_bounty_success() {
     let env = Env::default();
     env.mock_all_auths();

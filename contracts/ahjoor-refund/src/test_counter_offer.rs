@@ -111,17 +111,92 @@ fn test_counter_offer_expiry_escalates() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: duplicate counter-offer rejected
+// Test: subsequent counter-offers while CounterOffered update the live offer
 // ---------------------------------------------------------------------------
 #[test]
-#[should_panic(expected = "Refund is not in Requested state")]
-fn test_duplicate_counter_offer_rejected() {
-    let (_env, refund_client, _, _admin, _customer, merchant, _token_addr, _token_client, _) = setup_counter_offer();
+fn test_subsequent_counter_offer_updates_live_offer() {
+    let (_env, refund_client, _, _admin, _customer, merchant, _token_addr, _token_client, _) =
+        setup_counter_offer();
     let refund_id = 0u32;
 
     refund_client.counter_offer_refund(&merchant, &refund_id, &600);
-    // Second counter-offer should panic
     refund_client.counter_offer_refund(&merchant, &refund_id, &400);
+
+    let history = refund_client.get_counter_offer_history(&refund_id);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history.get(0).unwrap().amount, 600);
+    assert_eq!(history.get(1).unwrap().amount, 400);
+}
+
+// ---------------------------------------------------------------------------
+// Test: get_counter_offer_history empty when no negotiation
+// ---------------------------------------------------------------------------
+#[test]
+fn test_get_counter_offer_history_empty_without_negotiation() {
+    let (_env, refund_client, _, _admin, _customer, _merchant, _token_addr, _token_client, _) =
+        setup_counter_offer();
+    let refund_id = 0u32;
+
+    let history = refund_client.get_counter_offer_history(&refund_id);
+    assert_eq!(history.len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Test: multi-round negotiation ending in acceptance
+// ---------------------------------------------------------------------------
+#[test]
+fn test_counter_offer_history_multi_round_accept() {
+    let (_env, refund_client, _, _admin, customer, merchant, _token_addr, token_client, _) =
+        setup_counter_offer();
+    let refund_id = 0u32;
+
+    refund_client.counter_offer_refund(&merchant, &refund_id, &800);
+    refund_client.counter_offer_refund(&merchant, &refund_id, &600);
+    refund_client.counter_offer_refund(&merchant, &refund_id, &500);
+
+    let history = refund_client.get_counter_offer_history(&refund_id);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.get(0).unwrap().amount, 800);
+    assert_eq!(history.get(1).unwrap().amount, 600);
+    assert_eq!(history.get(2).unwrap().amount, 500);
+
+    let bal_before = token_client.balance(&customer);
+    refund_client.accept_counter_offer(&customer, &refund_id);
+
+    let refund = refund_client.get_refund(&refund_id);
+    assert_eq!(refund.status, RefundStatus::Processed);
+    assert_eq!(token_client.balance(&customer), bal_before + 500);
+
+    // History is preserved after acceptance
+    let history_after = refund_client.get_counter_offer_history(&refund_id);
+    assert_eq!(history_after.len(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// Test: multi-round negotiation ending in rejection
+// ---------------------------------------------------------------------------
+#[test]
+fn test_counter_offer_history_multi_round_reject() {
+    let (_env, refund_client, _, _admin, customer, merchant, _token_addr, _token_client, _) =
+        setup_counter_offer();
+    let refund_id = 0u32;
+
+    refund_client.counter_offer_refund(&merchant, &refund_id, &700);
+    refund_client.counter_offer_refund(&merchant, &refund_id, &450);
+
+    let history = refund_client.get_counter_offer_history(&refund_id);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history.get(0).unwrap().amount, 700);
+    assert_eq!(history.get(1).unwrap().amount, 450);
+
+    refund_client.reject_counter_offer(&customer, &refund_id);
+
+    let refund = refund_client.get_refund(&refund_id);
+    assert_eq!(refund.status, RefundStatus::UnderAppeal);
+
+    // History is preserved after rejection
+    let history_after = refund_client.get_counter_offer_history(&refund_id);
+    assert_eq!(history_after.len(), 2);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,12 @@
+<parameter name="content" string="true"># TODO: #578 - Add get_active_dispute_count admin dashboard view
+
+## Steps
+
+- [ ] 1. Add `ActiveDisputeCount` variant to `DataKey2` enum
+- [ ] 2. Initialize counter to 0 in `initialize()`
+- [ ] 3. Add helper functions `increment_active_dispute_count()`, `decrement_active_dispute_count()`
+- [ ] 4. Add public `get_active_dispute_count()` function
+- [ ] 5. Increment calls at dispute entry points (dispute_escrow, transfer_seller_role, escalate_partial_release_dispute)
+- [ ] 6. Decrement calls at dispute exit points (execute_verdict, resolve_dispute cooling-off, enforce_dispute_timeout, approve_seller_transfer, veto_seller_transfer, expire_seller_transfer_veto)
+- [ ] 7. Add tests covering multiple escrows entering/leaving disputed states
+</parameter>

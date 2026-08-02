@@ -256,6 +256,94 @@ fn test_approval_window_expired_auto_cancels() {
     assert_eq!(s.token_client.balance(&customer), 5000);
 }
 
+#[test]
+fn test_get_approval_state_zero_approvals() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &5000);
+
+    let signer1 = Address::generate(&s.env);
+    let signer2 = Address::generate(&s.env);
+    let signers = vec![&s.env, signer1.clone(), signer2.clone()];
+    s.client.set_multisig_policy(&s.merchant, &1000, &signers, &2, &3600);
+
+    let pid = s.client.create_payment_with_voucher(
+        &customer, &s.merchant, &2000, &s.token_addr,
+        &None, &None, &None, &None, &None,
+    );
+
+    let state = s.client.get_approval_state(&pid).unwrap();
+    assert_eq!(state.payment_id, pid);
+    assert_eq!(state.approvals.len(), 0);
+}
+
+#[test]
+fn test_get_approval_state_partial_approvals() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &5000);
+
+    let signer1 = Address::generate(&s.env);
+    let signer2 = Address::generate(&s.env);
+    let signer3 = Address::generate(&s.env);
+    let signers = vec![&s.env, signer1.clone(), signer2.clone(), signer3.clone()];
+    s.client.set_multisig_policy(&s.merchant, &1000, &signers, &3, &3600);
+
+    let pid = s.client.create_payment_with_voucher(
+        &customer, &s.merchant, &2000, &s.token_addr,
+        &None, &None, &None, &None, &None,
+    );
+
+    s.client.approve_payment(&signer1, &pid);
+    s.client.approve_payment(&signer2, &pid);
+
+    let state = s.client.get_approval_state(&pid).unwrap();
+    assert_eq!(state.payment_id, pid);
+    assert_eq!(state.approvals.len(), 2);
+}
+
+#[test]
+fn test_get_approval_state_fully_approved() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &5000);
+
+    let signer1 = Address::generate(&s.env);
+    let signer2 = Address::generate(&s.env);
+    let signers = vec![&s.env, signer1.clone(), signer2.clone()];
+    s.client.set_multisig_policy(&s.merchant, &1000, &signers, &2, &3600);
+
+    let pid = s.client.create_payment_with_voucher(
+        &customer, &s.merchant, &2000, &s.token_addr,
+        &None, &None, &None, &None, &None,
+    );
+
+    s.client.approve_payment(&signer1, &pid);
+    s.client.approve_payment(&signer2, &pid);
+
+    // Payment should now be Pending, but approval state should still be readable
+    assert_eq!(s.client.get_payment(&pid).status, PaymentStatus::Pending);
+    let state = s.client.get_approval_state(&pid).unwrap();
+    assert_eq!(state.approvals.len(), 2);
+}
+
+#[test]
+fn test_get_approval_state_returns_none_for_regular_payment() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    // No multisig policy set — payment goes through normally
+    let pid = s.client.create_payment(
+        &customer, &s.merchant, &500, &s.token_addr, &None, &None, &None,
+    );
+
+    let state = s.client.get_approval_state(&pid);
+    assert!(state.is_none());
+}
+
+// ===========================================================================
+// Task 3: Voucher / Coupon Code Redemption
 // ===========================================================================
 // Task 3: Voucher Tests
 // ===========================================================================

@@ -255,10 +255,28 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
             }
         };
         if draw_amount > 0 {
+            let insurance_pool_before_draw = insurance_pool;
             insurance_drawn_this_round = draw_amount;
             insurance_pool -= draw_amount;
             env.storage().instance().set(&DataKey2::InsurancePool, &insurance_pool);
             events::emit_insurance_paid_out(env, current_round, shortfall, insurance_pool);
+
+            let low_threshold: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey4::InsurancePoolLowThreshold)
+                .unwrap_or(0);
+            if low_threshold > 0
+                && insurance_pool_before_draw >= low_threshold
+                && insurance_pool < low_threshold
+            {
+                events::emit_insurance_pool_low(env, current_round, low_threshold, insurance_pool);
+            }
+
+            let shortfall_remaining = shortfall - draw_amount;
+            if insurance_pool == 0 {
+                events::emit_insurance_pool_exhausted(env, current_round, shortfall_remaining);
+            }
             events::emit_insurance_claim_executed(env, current_round, payout_recipient.clone(), draw_amount);
             let mut claims: Map<u32, Vec<InsuranceClaim>> = env
                 .storage()
@@ -690,29 +708,34 @@ pub(crate) fn execute_rule_change(env: &Env, new_quorum: Option<i128>) {
 }
 
 /// Updates the maximum member limit if the value is within [1, 100] and >= current count.
+///
+/// Validates the i128 range (including negativity) *before* casting to u32 so a
+/// negative input cannot wrap to a large u32 and rely on a later bounds check.
 pub(crate) fn execute_max_members_update(env: &Env, new_max_val: Option<i128>) {
     if let Some(new_max_i128) = new_max_val {
+        if new_max_i128 < 1 || new_max_i128 > 100 {
+            panic_with_error!(env, Error::InvalidMaxMembers);
+        }
         let new_max = new_max_i128 as u32;
-        if new_max >= 1 && new_max <= 100 {
-            let current_members: Vec<Address> = env
+
+        let current_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .unwrap_or(Vec::new(env));
+
+        if new_max >= current_members.len() as u32 {
+            let old_max: u32 = env
                 .storage()
                 .instance()
-                .get(&DataKey::Members)
-                .unwrap_or(Vec::new(env));
+                .get(&DataKey::MaxMembers)
+                .unwrap_or(50);
 
-            if new_max >= current_members.len() as u32 {
-                let old_max: u32 = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::MaxMembers)
-                    .unwrap_or(50);
+            env.storage()
+                .instance()
+                .set(&DataKey::MaxMembers, &new_max);
 
-                env.storage()
-                    .instance()
-                    .set(&DataKey::MaxMembers, &new_max);
-
-                events::emit_max_members_upd(env, old_max, new_max);
-            }
+            events::emit_max_members_upd(env, old_max, new_max);
         }
     }
 }

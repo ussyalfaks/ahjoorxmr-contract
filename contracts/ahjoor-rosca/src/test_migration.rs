@@ -164,3 +164,58 @@ fn test_migration_timeout_cancellation() {
     // Slot 1 should be available again — dest member count was only 1 so slot 1 is a new slot
     // Key assertion: second cancel doesn't panic, i.e. idempotent on dest
 }
+
+/// Test that source admin can force-cancel an outbound migration regardless of timeout/state.
+#[test]
+fn test_admin_cancel_migration_clears_source_request() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token = sac.address();
+
+    let src_admin = Address::generate(&env);
+    let member = Address::generate(&env);
+    let src_client = setup_group(&env, &src_admin, &member, &token);
+
+    let dest_admin = Address::generate(&env);
+    let dest_member = Address::generate(&env);
+    let dest_client = setup_group(&env, &dest_admin, &dest_member, &token);
+
+    src_client.request_group_migration(&member, &dest_client.address, &0u32);
+    src_client.approve_migration_exit(&member);
+    assert!(src_client.get_migration_request(&member).is_some());
+
+    src_client.admin_cancel_migration(&member);
+    assert!(src_client.get_migration_request(&member).is_none());
+}
+
+/// Test that destination admin can force-cancel incoming migration approvals.
+#[test]
+fn test_admin_cancel_migration_clears_destination_incoming() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token = sac.address();
+
+    let src_admin = Address::generate(&env);
+    let member = Address::generate(&env);
+    let src_client = setup_group(&env, &src_admin, &member, &token);
+
+    let dest_admin = Address::generate(&env);
+    let dest_member = Address::generate(&env);
+    let dest_client = setup_group(&env, &dest_admin, &dest_member, &token);
+
+    src_client.request_group_migration(&member, &dest_client.address, &0u32);
+    dest_client.approve_migration_entry(&member, &src_client.address, &0u32);
+
+    // Force-cancel on destination before source reaches BothApproved.
+    dest_client.admin_cancel_migration(&member);
+
+    // Incoming state should be gone; execute now fails because migration is no longer present.
+    let exec_res = dest_client.try_execute_migration(&member, &src_client.address);
+    assert!(exec_res.is_err(), "execute should fail after admin force-cancel");
+}

@@ -731,6 +731,74 @@ fn test_max_members_proposal() {
 }
 
 #[test]
+fn test_max_members_proposal_rejects_negative() {
+    let (env, client, admin, token_admin, _, _, members) =
+        setup_with_members(2, 1000);
+
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            grace_period_ledgers: 0,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: Some(5),
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
+            late_fee_bps: 0,
+            grace_period_seconds: 0,
+            auction_enabled: false,
+            auction_window_ledgers: 0,
+            randomize_payout_order: false,
+            reserve_enabled: false,
+            reserve_contribution_bps: 0,
+        },
+        &None,
+    );
+
+    let user1 = members.get(0).unwrap();
+    let user2 = members.get(1).unwrap();
+
+    // Proposal with a negative new_max must be rejected before any u32 cast.
+    client.create_proposal(
+        &user1,
+        &ProposalType::MaxMembersUpdate,
+        &soroban_sdk::String::from_str(&env, "Negative max members"),
+        &user1,
+        &86400,
+        &Some(-1),
+    );
+
+    let proposal_id = 0;
+    client.vote_on_proposal(&user1, &proposal_id, &true);
+    client.vote_on_proposal(&user2, &proposal_id, &true);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 86400 * 8);
+
+    let result = client.try_execute_proposal(&proposal_id);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        Error::InvalidMaxMembers.into()
+    );
+    // Max members must remain unchanged
+    assert_eq!(client.get_max_members(), 5);
+}
+
+#[test]
 fn test_configurable_max_defaults() {
     let (env, client, admin, token_admin, _, _, members) = 
         setup_with_members(2, 1000);

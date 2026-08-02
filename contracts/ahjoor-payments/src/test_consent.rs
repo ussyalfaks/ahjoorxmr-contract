@@ -375,3 +375,74 @@ fn test_multiple_consent_records() {
         true
     );
 }
+
+#[test]
+fn test_list_active_consent_records() {
+    let s = setup();
+    s.init();
+
+    let merchant = Address::generate(&s.env);
+    let customer = Address::generate(&s.env);
+    let other_customer = Address::generate(&s.env);
+    let terms_hash_v1 = make_bytes32(&s.env, 1);
+    let terms_hash_v2 = make_bytes32(&s.env, 2);
+    let terms_hash_v3 = make_bytes32(&s.env, 3);
+    let terms_version_v1 = make_string(&s.env, "v1.0");
+    let terms_version_v2 = make_string(&s.env, "v2.0");
+    let terms_version_v3 = make_string(&s.env, "v3.0");
+    let expiry_ledger: u64 = u64::from(s.env.ledger().sequence()) + 1000;
+
+    // Create 3 consent records for customer: one active, one revoked, one unsigned
+    let consent_active = s.client.create_consent_record(
+        &merchant,
+        &customer,
+        &terms_hash_v1,
+        &terms_version_v1,
+        &expiry_ledger,
+    );
+    let consent_revoked = s.client.create_consent_record(
+        &merchant,
+        &customer,
+        &terms_hash_v2,
+        &terms_version_v2,
+        &expiry_ledger,
+    );
+    let consent_unsigned = s.client.create_consent_record(
+        &merchant,
+        &customer,
+        &terms_hash_v3,
+        &terms_version_v3,
+        &expiry_ledger,
+    );
+
+    // Also create a record for a different customer
+    let consent_other = s.client.create_consent_record(
+        &merchant,
+        &other_customer,
+        &terms_hash_v1,
+        &terms_version_v1,
+        &expiry_ledger,
+    );
+
+    // Sign the active and revoked record; leave unsigned unsigned
+    s.client.sign_consent(&customer, &consent_active);
+    s.client.sign_consent(&customer, &consent_revoked);
+
+    // Revoke the second record
+    s.client.revoke_consent(&merchant, &consent_revoked);
+
+    // List active records for customer
+    let active = s.client.list_active_consent_records(&customer);
+    assert_eq!(active.len(), 1);
+    assert_eq!(active.get(0).unwrap().id, consent_active);
+
+    // The other customer's record should not appear
+    for record in active.iter() {
+        assert_eq!(record.customer, customer);
+    }
+
+    // List active records for the other customer
+    let active_other = s.client.list_active_consent_records(&other_customer);
+    assert_eq!(active_other.len(), 1);
+    assert_eq!(active_other.get(0).unwrap().id, consent_other);
+}
