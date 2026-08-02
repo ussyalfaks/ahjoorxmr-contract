@@ -298,6 +298,7 @@ pub enum EscrowErrorExt4 {
     MilestoneMustBeSubmittedBeforeApproval = 46,
     OnlyEscrowBuyerMayRejectMilestones = 47,
     OnlySubmittedMilestoneCanBeRejected = 48,
+    InspectorCannotBePartyToEscrow = 49,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1385,6 +1386,10 @@ impl AhjoorEscrowContract {
         buyer.require_auth();
         // #357: Enforce inspector score threshold for high-value escrows
         if let Some(ref insp) = inspector {
+            // Inspector must not be a party to the escrow (conflict of interest)
+            if insp == &buyer || insp == &request.seller {
+                panic_with_error!(&env, EscrowErrorExt4::InspectorCannotBePartyToEscrow);
+            }
             Self::require_inspector_score_ok(&env, insp, request.amount);
         }
         let escrow_id = Self::create_escrow_core(&env, &buyer, request);
@@ -1402,19 +1407,27 @@ impl AhjoorEscrowContract {
     }
 
     /// Seller marks work complete. If inspector is set, moves to AwaitingInspection.
+    /// If no inspector is set the escrow stays Active so the buyer can release directly.
+    /// Also allows re-marking after InspectionFailed so the seller can resubmit.
     pub fn seller_mark_complete(env: Env, seller: Address, escrow_id: u32) {
         Self::require_not_paused(&env);
         seller.require_auth();
         let mut escrow: Escrow = env
             .storage().persistent().get(&DataKey::Escrow(escrow_id)).expect("Escrow not found");
         if escrow.seller != seller { panic_with_error!(&env, EscrowError::OnlySellerCanMarkComplete); }
-        if !Self::is_open_escrow_status(escrow.status) { panic_with_error!(&env, EscrowError::EscrowIsNotActive); }
-        if escrow.extensions.inspector.is_none() { panic_with_error!(&env, EscrowError::NoInspectorSetUseReleaseEscrowDirectly); }
-        escrow.status = EscrowStatus::AwaitingInspection;
-        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
-        );
+        // Accept both normally-open statuses and InspectionFailed (resubmit path)
+        let is_allowed_status = Self::is_open_escrow_status(escrow.status)
+            || escrow.status == EscrowStatus::InspectionFailed;
+        if !is_allowed_status { panic_with_error!(&env, EscrowError::EscrowIsNotActive); }
+        // Only transition to AwaitingInspection when an inspector is assigned;
+        // otherwise the escrow stays Active so the buyer can call release_escrow directly.
+        if escrow.extensions.inspector.is_some() {
+            escrow.status = EscrowStatus::AwaitingInspection;
+            env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
+            );
+        }
         events::emit_seller_marked_complete(&env, escrow_id, seller);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
