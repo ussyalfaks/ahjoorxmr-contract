@@ -38,6 +38,13 @@ Alternate shorter flow (automatic approval): some flows can be configured so tha
 ## Time limits and expirations
 
 - Approval-to-claim window: the contract may enforce a time window (e.g., 30 days) within which the claimant must call `claim_refund` after approval. After the window expires the refund may be moved to `Expired` and require admin re-approval.
+
+## Counter-offer negotiation
+
+- `counter_offer_refund(refund_id, merchant, amount)` — merchant submits a counter-offer with an alternative refund amount on a `Pending` refund, starting the configurable expiry window (default 48 hours, see `set_counter_offer_expiry_seconds`).
+- The customer may accept or reject the counter-offer before it expires.
+- `settle_expired_counter_offer(refund_id)` — settles a lapsed counter-offer using the `CounterOfferDefaultResolution` flag (default: accept the original requested amount).
+- See `contracts/ahjoor-refund/src/test_counter_offer.rs` for tested scenarios.
 - Claim timelock: some refunds may include an optional timelock preventing claims until a given epoch (useful for dispute cooling-off).
 
 Check the contract configuration constants for the exact timeouts used in the deployed instance.
