@@ -1,5 +1,7 @@
 # Bounty Board (ahjoor-escrow)
 
+> Part of the [documentation index](README.md) — see the Escrow Contract section. Related: [Reserve Fund](reserve-fund.md) (Refund Contract).
+
 This document describes the bounty-board flows in `contracts/ahjoor-escrow`, with emphasis on milestone-based payout behavior.
 
 ## Milestone Payouts
