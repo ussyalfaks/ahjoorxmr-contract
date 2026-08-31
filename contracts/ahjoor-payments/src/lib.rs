@@ -6730,13 +6730,13 @@ impl AhjoorPaymentsContract {
 
     fn execute_token_swap(
         env: &Env,
-        _payment_id: u32,
-        _customer: &Address,
-        _input_token: &Address,
-        _output_token: &Address,
+        payment_id: u32,
+        customer: &Address,
+        input_token: &Address,
+        output_token: &Address,
         input_amount: i128,
     ) -> Result<i128, Symbol> {
-        let _router: Address = env
+        let router: Address = env
             .storage()
             .instance()
             .get(&DataKey::SwapRouter)
@@ -6744,19 +6744,90 @@ impl AhjoorPaymentsContract {
 
         // Get slippage config
         let slippage_cfg = Self::get_slippage_config_internal(env);
-        let _max_slippage_bps = slippage_cfg.max_bps;
+        let max_slippage_bps = slippage_cfg.max_bps;
 
-        // For now, we simulate a swap by checking if the router is set
-        // In a real implementation, this would call the DEX router contract
-        // to execute the swap and return the output amount
+        // Calculate minimum output amount based on slippage tolerance
+        // min_output = input_amount * (10000 - max_slippage_bps) / 10000
+        let min_output_amount = input_amount
+            .saturating_mul((10_000i128 - max_slippage_bps as i128))
+            / 10_000;
 
-        // Placeholder: In production, this would invoke the router contract
-        // For now, we return the input amount as if swap happened 1:1
-        // This is where you'd integrate with actual DEX contracts like Soroban AMM
+        // Execute the swap via the configured router contract
+        // The router is expected to implement a swap function with signature:
+        // swap(input_token: Address, output_token: Address, input_amount: i128, min_output: i128, recipient: Address) -> i128
+        let router_client = token::Client::new(env, &router);
 
-        // Simulate swap success with 1:1 rate (placeholder)
-        // Real implementation would call router.swap() and handle slippage
-        Ok(input_amount)
+        // Transfer input tokens to router for swap
+        let input_token_client = token::Client::new(env, input_token);
+        input_token_client.transfer(
+            &env.current_contract_address(),
+            &router,
+            &input_amount,
+        );
+
+        // Call router's swap function - this is a placeholder for the actual router call
+        // In a real implementation, you would invoke the router contract's swap method
+        // For now, we simulate the swap by calling back to get a rate (placeholder pattern)
+        // The actual implementation would look like:
+        //
+        // let swap_result = router_client.swap(
+        //     input_token,
+        //     output_token,
+        //     input_amount,
+        //     min_output_amount,
+        //     &env.current_contract_address(),
+        // );
+        //
+        // For this implementation, we use a mock rate from the router contract
+        // by calling a simulated price oracle function
+
+        // Get simulated output from router (placeholder for actual DEX call)
+        // This would be replaced with actual router.swap() in production
+        let output_amount = Self::simulate_router_swap(
+            env,
+            &router,
+            input_token,
+            output_token,
+            input_amount,
+        );
+
+        // Validate slippage: output must meet minimum threshold
+        if output_amount < min_output_amount {
+            events::emit_payment_swap_failed(
+                env,
+                payment_id,
+                customer.clone(),
+                input_token.clone(),
+                input_amount,
+                Symbol::new(env, "SlippageExceeded"),
+            );
+            return Err(Symbol::new(env, "SlippageExceeded"));
+        }
+
+        // Transfer output tokens back to this contract
+        let output_token_client = token::Client::new(env, output_token);
+        output_token_client.transfer(
+            &router,
+            &env.current_contract_address(),
+            &output_amount,
+        );
+
+        Ok(output_amount)
+    }
+
+    /// Simulates a router swap call for testing/placeholder purposes.
+    /// In production, this would be replaced with actual router contract invocation.
+    fn simulate_router_swap(
+        env: &Env,
+        _router: &Address,
+        _input_token: &Address,
+        _output_token: &Address,
+        input_amount: i128,
+    ) -> i128 {
+        // Placeholder: returns input amount as 1:1 rate
+        // In production with a real router, this would be replaced with:
+        // router.swap(input_token, output_token, input_amount, min_output, recipient)
+        input_amount
     }
 
     /// Shared settlement logic: checks conditions, deducts fees, distributes funds,

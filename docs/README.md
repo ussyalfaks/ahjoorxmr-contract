@@ -28,6 +28,7 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 - [**ROSCA Group Snapshots**](rosca-snapshot.md) — Snapshot creation, captured group state, immutable audit records, and the recovery process.
 - [**ROSCA Slot Auctions**](rosca-slot-auctions.md) — Comprehensive guide to plain open-bid and commit-reveal sealed-bid slot auctions in Ahjoor ROSCA groups.
 - [**ROSCA Round-Skip Mechanism**](rosca-skip-round.md) — Member eligibility, request flow, per-cycle skip limits, skip fee handling, and downstream settlement effects.
+- [**ROSCA Emergency Loan**](rosca-emergency-loan.md) — How members can draw emergency loans from the group reserve, repayment terms, default handling, and reserve management.
 
 ---
 
@@ -38,6 +39,7 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 - [**Inspector Role and Scoring System**](inspector-role.md) — How an inspector is assigned to an escrow, their responsibilities and powers over the inspection gate, and how their accuracy score is calculated, updated on rulings and appeals, and enforced as a threshold for high-value escrows.
 - [**Escrow Bounty Board**](bounty-board.md) — Escrow bounty milestone payouts and related milestone-based release behavior.
 - [**Seller Veto Mechanism**](escrow-seller-veto.md) — How the seller raises a veto to block release, the cooldown window that limits re-vetoes, and how the admin overrides a veto.
+- [**Escrow Auto-Renewal**](escrow-auto-renewal.md) — How buyers can pre-approve renewal cycles for recurring service agreements, how auto-renewals are triggered on release, and how buyers can cancel future renewals.
 
 ---
 

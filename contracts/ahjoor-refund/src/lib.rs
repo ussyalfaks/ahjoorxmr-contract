@@ -2613,6 +2613,7 @@ impl AhjoorRefundContract {
         env: Env,
         escrow_id: u32,
         buyer: Address,
+        seller: Address,
         amount: i128,
         token: Address,
     ) -> u32 {
@@ -2639,8 +2640,8 @@ impl AhjoorRefundContract {
         let refund_id = Self::next_refund_id(&env);
         let now = env.ledger().timestamp();
 
-        // Use buyer as merchant placeholder for escrow refunds
-        let merchant = buyer.clone();
+        // Use the provided seller as the merchant for escrow refunds
+        let merchant = seller;
 
         let refund = Refund {
             id: refund_id,
