@@ -27,6 +27,7 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 - [**ROSCA Reinvestment Flow**](rosca-reinvestment.md) — How a member rolls a round payout forward into the next round as their contribution, the deadline constraint, and how over/under-payment is handled.
 - [**ROSCA Group Snapshots**](rosca-snapshot.md) — Snapshot creation, captured group state, immutable audit records, and the recovery process.
 - [**ROSCA Slot Auctions**](rosca-slot-auctions.md) — Comprehensive guide to plain open-bid and commit-reveal sealed-bid slot auctions in Ahjoor ROSCA groups.
+- [**ROSCA Audit Trail**](rosca-audit-trail.md) — On-chain cycle records, storage layout, archival behavior, query helpers, and emitted events for ROSCA round history.
 - [**ROSCA Round-Skip Mechanism**](rosca-skip-round.md) — Member eligibility, request flow, per-cycle skip limits, skip fee handling, and downstream settlement effects.
 - [**ROSCA Emergency Loan**](rosca-emergency-loan.md) — How members can draw emergency loans from the group reserve, repayment terms, default handling, and reserve management.
 
