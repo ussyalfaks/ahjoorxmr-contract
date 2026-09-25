@@ -6096,6 +6096,12 @@ mod test_deadline_boundaries;
 
 #[cfg(test)]
 mod test_getters;
+
+#[cfg(test)]
+mod test_delegates;
+
+#[cfg(test)]
+mod test_appeal;
 /// Event: Customer appealed a rejected refund (#159)
 #[contractevent]
 #[derive(Clone, Debug)]
