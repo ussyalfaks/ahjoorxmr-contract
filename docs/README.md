@@ -6,6 +6,9 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 
 ## `ahjoor-payments`
 
+- [**Failed Auto-Debit Retry Queue in ahjoor-payments**](payments-retry-queue.md) — Configurable exponential back-off retry queue for failed recurring debits, early customer retry trigger, max attempt handling, and recurring invoice cycle integration.
+- [**Merchant Collateral in ahjoor-payments**](payments-collateral.md) — Overview of required collateral deposits, minimum balances, withdrawals, and dispute slashing.
+
 ## 2. ROSCA Contract (`ahjoor-rosca`)
 
 - [**Contribution Receipts in ROSCA**](rosca-contribution-receipts.md) — NFT-style contribution receipt data format, automatic minting on round finalization, event emissions, and member retrieval/verification functions.
