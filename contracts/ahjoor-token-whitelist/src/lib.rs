@@ -121,6 +121,8 @@ pub enum DataKey {
     WhitelistMembership(Address),
     SuspensionRecord(Address),
     ContractTokenAllowlist(Address, Address),
+    /// Most recently configured token for a contract via `set_contract_token`.
+    ContractTokenLatest(Address),
     SuspensionHistory(Address),
     TokenQuota(Address),
     TokenVolumeBucket(Address, u32),
@@ -169,6 +171,8 @@ pub struct ListingProposal {
 const DEFAULT_VOTING_WINDOW_LEDGERS: u32 = 120_960;
 const DEFAULT_ENACTMENT_DELAY_LEDGERS: u32 = 34_560;
 const DEFAULT_QUORUM_BPS: u32 = 5_000;
+/// Minimum governance-token balance required to propose when `set_min_proposal_stake` was never called.
+const DEFAULT_MIN_PROPOSAL_STAKE: i128 = 1;
 
 mod events;
 mod client;
@@ -663,6 +667,9 @@ impl TokenWhitelistContract {
         let key = DataKey::ContractTokenAllowlist(contract_id.clone(), token.clone());
         env.storage().persistent().set(&key, &expiry_ledger);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        let latest_key = DataKey::ContractTokenLatest(contract_id.clone());
+        env.storage().persistent().set(&latest_key, &token);
+        env.storage().persistent().extend_ttl(&latest_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_contract_token_allowlist_updated(&env, contract_id, token, true, expiry_ledger);
     }
@@ -694,6 +701,28 @@ impl TokenWhitelistContract {
             }
         }
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the token most recently configured for `contract_id` via
+    /// `set_contract_token`, together with its `expiry_ledger`
+    /// (`None` = permanent approval).
+    ///
+    /// Defaults to `None` if `set_contract_token` was never called for this
+    /// contract, or if that entry has since been removed (via
+    /// `remove_contract_token` or expiry cleanup). Expired-but-not-cleaned
+    /// entries are still returned; use `is_token_allowed_for_contract` for an
+    /// effective allow check. For a specific (contract, token) pair use
+    /// `get_contract_token_entry`.
+    pub fn get_contract_token(env: Env, contract_id: Address) -> Option<(Address, Option<u32>)> {
+        let token: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ContractTokenLatest(contract_id.clone()))?;
+        let expiry: Option<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ContractTokenAllowlist(contract_id, token.clone()))?;
+        Some((token, expiry))
     }
 
     pub fn get_contract_token_entry(env: Env, contract_id: Address, token: Address) -> ContractTokenEntry {
@@ -922,6 +951,25 @@ impl TokenWhitelistContract {
         if ledgers == 0 { panic!("ledgers must be positive"); }
         env.storage().instance().set(&DataKey::EnactmentDelayLedgers, &ledgers);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the minimum governance-token balance required to propose a listing.
+    /// Defaults to `DEFAULT_MIN_PROPOSAL_STAKE` (1) if `set_min_proposal_stake` was never called.
+    pub fn get_min_proposal_stake(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinProposalStake)
+            .unwrap_or(DEFAULT_MIN_PROPOSAL_STAKE)
+    }
+
+    /// Returns the delay (in ledgers) between a proposal passing and its enactment deadline.
+    /// Defaults to `DEFAULT_ENACTMENT_DELAY_LEDGERS` (34_560) if `set_enactment_delay_ledgers`
+    /// was never called.
+    pub fn get_enactment_delay_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::EnactmentDelayLedgers)
+            .unwrap_or(DEFAULT_ENACTMENT_DELAY_LEDGERS)
     }
 
     pub fn set_quorum_bps(env: Env, admin: Address, quorum_bps: u32) {

@@ -577,3 +577,45 @@ fn test_cleanup_mix_of_expired_and_active_entries() {
         ContractTokenEntry::Absent
     );
 }
+
+// ─── #910: get_contract_token query ──────────────────────────────────────────
+
+/// Returns None before any token is configured for the contract.
+#[test]
+fn test_get_contract_token_none_before_configuration() {
+    let (env, _admin, client) = setup();
+    let contract_id = Address::generate(&env);
+
+    assert_eq!(client.get_contract_token(&contract_id), None);
+}
+
+/// Returns the configured token and expiry, tracking the latest set call.
+#[test]
+fn test_get_contract_token_returns_configured_value() {
+    let (env, admin, client) = setup();
+    let contract_id = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+
+    client.set_contract_token(&admin, &contract_id, &token_a, &None);
+    assert_eq!(client.get_contract_token(&contract_id), Some((token_a.clone(), None)));
+
+    let expiry = env.ledger().sequence() + 500;
+    client.set_contract_token(&admin, &contract_id, &token_b, &Some(expiry));
+    assert_eq!(client.get_contract_token(&contract_id), Some((token_b, Some(expiry))));
+
+    // Other contracts are unaffected.
+    assert_eq!(client.get_contract_token(&Address::generate(&env)), None);
+}
+
+/// Returns None once the configured entry is removed.
+#[test]
+fn test_get_contract_token_none_after_removal() {
+    let (env, admin, client) = setup();
+    let contract_id = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.set_contract_token(&admin, &contract_id, &token, &Some(1_000));
+    client.remove_contract_token(&admin, &contract_id, &token);
+    assert_eq!(client.get_contract_token(&contract_id), None);
+}

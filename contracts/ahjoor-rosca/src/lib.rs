@@ -4175,6 +4175,25 @@ impl AhjoorContract {
         events::emit_rew_cfg(&env, dist_type);
     }
 
+    /// Returns the reward distribution configuration as `(dist_type, weights)`.
+    ///
+    /// Defaults to `(DistributionType::Equal, None)` if `set_reward_dist_params`
+    /// has never been called. `weights` is `None` when no weights map is stored
+    /// or the stored map is empty (as seeded by `init`).
+    pub fn get_reward_dist_params(env: Env) -> (DistributionType, Option<Map<Address, u32>>) {
+        let dist_type: DistributionType = env
+            .storage()
+            .instance()
+            .get(&DataKey::RewardDistType)
+            .unwrap_or(DistributionType::Equal);
+        let weights: Option<Map<Address, u32>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RewardWeights)
+            .filter(|w: &Map<Address, u32>| !w.is_empty());
+        (dist_type, weights)
+    }
+
     pub fn claim_rewards(env: Env, member: Address) {
         internals::check_not_paused(&env);
         member.require_auth();

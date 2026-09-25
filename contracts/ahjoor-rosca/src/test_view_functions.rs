@@ -294,3 +294,30 @@ fn test_get_auto_close_enabled_default_and_after_set() {
     client.set_auto_close_enabled(&false);
     assert_eq!(client.get_auto_close_enabled(), false);
 }
+
+// ─── #904: get_reward_dist_params ──────────────────────────────────────────
+
+#[test]
+fn test_get_reward_dist_params_default_and_set() {
+    let (env, client, _admin, _token, members) = setup_with_members(3, false, 0);
+
+    // Default before configuration.
+    assert_eq!(client.get_reward_dist_params(), (DistributionType::Equal, None));
+
+    // Type only, no weights.
+    client.set_reward_dist_params(&DistributionType::Proportional, &None);
+    assert_eq!(
+        client.get_reward_dist_params(),
+        (DistributionType::Proportional, None)
+    );
+
+    // Type with weights.
+    let mut weights = Map::new(&env);
+    weights.set(members.get(0).unwrap(), 3u32);
+    weights.set(members.get(1).unwrap(), 1u32);
+    client.set_reward_dist_params(&DistributionType::Weighted, &Some(weights.clone()));
+    assert_eq!(
+        client.get_reward_dist_params(),
+        (DistributionType::Weighted, Some(weights))
+    );
+}
