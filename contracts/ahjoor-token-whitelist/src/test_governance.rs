@@ -435,3 +435,35 @@ fn test_get_vote_weight_snapshot_stays_fixed_after_balance_changes() {
 
     assert_eq!(client.get_vote_weight_snapshot(&proposal_id, &nonvoter), None);
 }
+
+// ─── #906 / #907: governance config view functions ──────────────────────────
+
+#[test]
+fn test_get_min_proposal_stake_default_and_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let client = TokenWhitelistContractClient::new(&env, &env.register(TokenWhitelistContract, ()));
+    client.initialize(&admin);
+
+    // Default before configuration.
+    assert_eq!(client.get_min_proposal_stake(), 1i128);
+
+    client.set_min_proposal_stake(&admin, &250i128);
+    assert_eq!(client.get_min_proposal_stake(), 250i128);
+}
+
+#[test]
+fn test_get_enactment_delay_ledgers_default_and_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let client = TokenWhitelistContractClient::new(&env, &env.register(TokenWhitelistContract, ()));
+    client.initialize(&admin);
+
+    // Default before configuration.
+    assert_eq!(client.get_enactment_delay_ledgers(), 34_560u32);
+
+    client.set_enactment_delay_ledgers(&admin, &75u32);
+    assert_eq!(client.get_enactment_delay_ledgers(), 75u32);
+}
