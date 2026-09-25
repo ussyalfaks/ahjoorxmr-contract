@@ -2800,6 +2800,15 @@ impl AhjoorEscrowContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Returns the configured renewal allowance for an escrow.
+    /// Default: 0 if never set (no pre-approved renewals).
+    pub fn get_renewal_allowance(env: Env, escrow_id: u32) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RenewalAllowance(escrow_id))
+            .unwrap_or(0)
+    }
+
     /// Returns whether the buyer has cancelled future auto-renewals for this escrow.
     pub fn get_auto_renewal_cancelled(env: Env, escrow_id: u32) -> bool {
         env.storage()
@@ -8759,6 +8768,15 @@ impl AhjoorEscrowContract {
         }
         env.storage().instance().set(&DataKey::MaxTopUpBps, &max_top_up_bps);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the configured maximum top-up as basis points of the original amount.
+    /// Default: 5000 bps (50%) if never set.
+    pub fn get_max_top_up_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxTopUpBps)
+            .unwrap_or(5_000)
     }
 
 

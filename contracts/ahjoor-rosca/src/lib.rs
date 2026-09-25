@@ -12585,6 +12585,9 @@ mod test_proxy;
 mod test_quorum;
 #[cfg(test)]
 mod test_savings_milestone_rewards;
+#[cfg(test)]
+mod test_savings_goal_tracking;
+
 mod test_skip;
 mod test_snapshot;
 mod test_view_functions;

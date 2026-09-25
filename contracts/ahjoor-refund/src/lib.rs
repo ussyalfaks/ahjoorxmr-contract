@@ -6095,6 +6095,9 @@ mod test_cross_contract_refund;
 mod test_deadline_boundaries;
 
 #[cfg(test)]
+mod test_store_credit;
+
+#[cfg(test)]
 mod test_getters;
 /// Event: Customer appealed a rejected refund (#159)
 #[contractevent]
