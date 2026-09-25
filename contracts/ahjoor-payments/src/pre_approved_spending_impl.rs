@@ -465,13 +465,21 @@ impl PreApprovedSpendingImpl {
             .unwrap_or_else(|| Vec::new(env))
     }
 
-    /// Get all allowances for a customer
-    pub fn get_customer_allowances(env: &Env, customer: Address) -> Vec<SpendingAllowance> {
+    /// Get a page of a customer's allowances: at most `limit` entries starting
+    /// at `offset` in creation order. A page past the end returns an empty Vec.
+    pub fn get_customer_allowances(
+        env: &Env,
+        customer: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<SpendingAllowance> {
         let mut allowances = Vec::new(env);
         let ckey = customer_allowances_key(env, &customer);
 
         if let Some(allowance_ids) = env.storage().persistent().get::<_, Vec<u32>>(&ckey) {
-            for id in allowance_ids.iter() {
+            let end = offset.saturating_add(limit).min(allowance_ids.len());
+            for i in offset..end {
+                let id = allowance_ids.get_unchecked(i);
                 if let Some(allowance) = env.storage().persistent().get::<_, SpendingAllowance>(&allowance_key(env, id)) {
                     allowances.push_back(allowance);
                 }
@@ -733,6 +741,83 @@ mod tests {
             let allowance = PreApprovedSpendingImpl::get_allowance(&env, allowance_id).unwrap();
             assert_eq!(allowance.per_transaction_limit, 1000);
             assert_eq!(allowance.daily_limit, 1000);
+        });
+    }
+
+    /// Creates `n` allowances for `customer`, each in its own contract frame
+    /// (a frame may only consume the customer's auth once).
+    fn create_n_allowances(env: &Env, contract_id: &Address, customer: &Address, n: u32) -> Vec<u32> {
+        let merchant = Address::generate(env);
+        let token = Address::generate(env);
+        let mut ids = Vec::new(env);
+        for i in 0..n {
+            let id = env.as_contract(contract_id, || {
+                PreApprovedSpendingImpl::create_allowance(
+                    env,
+                    customer.clone(),
+                    merchant.clone(),
+                    token.clone(),
+                    1000,
+                    200,
+                    500,
+                    1_000_000,
+                    make_bytes32(env, i as u8),
+                    Map::new(env),
+                )
+            });
+            ids.push_back(id);
+        }
+        ids
+    }
+
+    #[test]
+    fn test_get_customer_allowances_middle_page() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AhjoorPaymentsContract, ());
+        let customer = Address::generate(&env);
+
+        let ids = create_n_allowances(&env, &contract_id, &customer, 5);
+
+        env.as_contract(&contract_id, || {
+
+            let page = PreApprovedSpendingImpl::get_customer_allowances(&env, customer.clone(), 1, 2);
+            assert_eq!(page.len(), 2);
+            assert_eq!(page.get(0).unwrap().allowance_id, ids.get(1).unwrap());
+            assert_eq!(page.get(1).unwrap().allowance_id, ids.get(2).unwrap());
+
+            let all = PreApprovedSpendingImpl::get_customer_allowances(&env, customer.clone(), 0, 5);
+            assert_eq!(all.len(), 5);
+        });
+    }
+
+    #[test]
+    fn test_get_customer_allowances_page_past_end() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AhjoorPaymentsContract, ());
+        let customer = Address::generate(&env);
+
+        let ids = create_n_allowances(&env, &contract_id, &customer, 3);
+
+        env.as_contract(&contract_id, || {
+
+            // Partial page: runs past the end, returns only the remaining entry
+            let partial = PreApprovedSpendingImpl::get_customer_allowances(&env, customer.clone(), 2, 10);
+            assert_eq!(partial.len(), 1);
+            assert_eq!(partial.get(0).unwrap().allowance_id, ids.get(2).unwrap());
+
+            // Offset at and beyond the end returns an empty page
+            assert_eq!(PreApprovedSpendingImpl::get_customer_allowances(&env, customer.clone(), 3, 10).len(), 0);
+            assert_eq!(PreApprovedSpendingImpl::get_customer_allowances(&env, customer.clone(), 50, 10).len(), 0);
+
+            // Zero limit returns nothing; huge limit does not overflow
+            assert_eq!(PreApprovedSpendingImpl::get_customer_allowances(&env, customer.clone(), 0, 0).len(), 0);
+            assert_eq!(PreApprovedSpendingImpl::get_customer_allowances(&env, customer.clone(), 1, u32::MAX).len(), 2);
+
+            // Customer with no allowances
+            let other = Address::generate(&env);
+            assert_eq!(PreApprovedSpendingImpl::get_customer_allowances(&env, other, 0, 10).len(), 0);
         });
     }
 }

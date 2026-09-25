@@ -241,8 +241,13 @@ pub trait PreApprovedSpendingInterface {
     /// Get audit log for an allowance
     fn get_audit_log(env: Env, allowance_id: u32) -> Vec<AllowanceAuditLog>;
 
-    /// Get all allowances for a customer
-    fn get_customer_allowances(env: Env, customer: Address) -> Vec<SpendingAllowance>;
+    /// Get a page of a customer's allowances (at most `limit` entries starting at `offset`)
+    fn get_customer_allowances(
+        env: Env,
+        customer: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<SpendingAllowance>;
 
     /// Get all allowances for a merchant
     fn get_merchant_allowances(env: Env, merchant: Address) -> Vec<SpendingAllowance>;
