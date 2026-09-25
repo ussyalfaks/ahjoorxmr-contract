@@ -30,6 +30,7 @@ Welcome to the Ahjoor contract documentation directory. Below is a structured in
 
 ## `ahjoor-escrow`
 
+- [**Open Bounty Board & Milestone Bounties**](bounty-board.md) — Open competitive work assignment flow, solver claiming, submission review, rejection rounds, cancellation refund, and milestone-gated verifier sign-offs.
 - [**Escrow Auto-Renewal**](escrow-auto-renewal.md) — How buyers can pre-approve renewal cycles for recurring service agreements, how auto-renewals are triggered on release, and how buyers can cancel future renewals.
 - [**Multi-Party Approval**](escrow-multiparty-approval.md) — N-of-M release approval configuration, threshold requirements, approver voting, and interactions with release and dispute flows.
 
