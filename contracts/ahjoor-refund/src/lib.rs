@@ -3536,6 +3536,15 @@ impl AhjoorRefundContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Returns the configured counter-offer expiry in seconds.
+    /// Default: 172_800 (48 hours) if never set.
+    pub fn get_counter_offer_expiry_seconds(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::CounterOfferExpirySeconds)
+            .unwrap_or(DEFAULT_COUNTER_OFFER_EXPIRY_SECONDS)
+    }
+
     /// Merchant submits a counter-offer (partial amount) for a refund request.
     ///
     /// The first offer requires `Requested` status. Subsequent offers while the
@@ -4436,6 +4445,15 @@ impl AhjoorRefundContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Returns whether refunds are auto-approved when the senior arbiter misses their deadline.
+    /// Default: false if never set.
+    pub fn get_auto_approve_on_senior_miss(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey2::AutoApproveOnSeniorMiss)
+            .unwrap_or(false)
+    }
+
     /// Get the configured senior arbiter address.
     pub fn get_senior_arbiter(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey2::SeniorArbiter)
@@ -4788,6 +4806,15 @@ impl AhjoorRefundContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the configured customer abuse block duration in ledgers.
+    /// Default: 518_400 (~30 days at 5 s/ledger) if never set.
+    pub fn get_block_duration_ledgers(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::BlockDurationLedgers)
+            .unwrap_or(DEFAULT_BLOCK_DURATION_LEDGERS)
     }
 
     /// Get the abuse block configuration: (threshold, block_duration_ledgers).

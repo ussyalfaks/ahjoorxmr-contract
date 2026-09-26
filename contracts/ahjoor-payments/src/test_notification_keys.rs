@@ -351,3 +351,23 @@ fn test_get_notification_key_history() {
     assert_eq!(history.len(), 1);
     assert_eq!(history.get(0).unwrap().key, key1);
 }
+
+// ===========================================================================
+//  Test: get_notification_overlap_window (#888)
+// ===========================================================================
+
+#[test]
+fn test_get_notification_overlap_window_default() {
+    let (_env, _admin, _customer, _merchant, _token, client) = setup_test_env();
+
+    // Default is 2_592_000 (30 days in seconds) before any configuration
+    assert_eq!(client.get_notification_overlap_window(), 2_592_000u64);
+}
+
+#[test]
+fn test_get_notification_overlap_window_after_set() {
+    let (_env, admin, _customer, _merchant, _token, client) = setup_test_env();
+
+    client.set_notification_overlap_window(&admin, &3_600u64);
+    assert_eq!(client.get_notification_overlap_window(), 3_600u64);
+}
