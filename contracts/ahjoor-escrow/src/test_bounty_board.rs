@@ -878,3 +878,74 @@ fn test_set_max_bounty_rejection_rounds() {
         assert_eq!(bounty_data.rejection_count, i + 1);
     }
 }
+// ── Getter Tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn test_get_max_bounty_rejection_rounds_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, AhjoorEscrowContract);
+    let client = AhjoorEscrowContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    // Default should be 3
+    assert_eq!(client.get_max_bounty_rejection_rounds(), 3);
+}
+
+#[test]
+fn test_get_max_bounty_rejection_rounds_after_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, AhjoorEscrowContract);
+    let client = AhjoorEscrowContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    // Set custom value
+    client.set_max_bounty_rejection_rounds(&admin, &7);
+
+    // Verify getter returns the set value
+    assert_eq!(client.get_max_bounty_rejection_rounds(), 7);
+}
+
+#[test]
+fn test_get_cancellation_response_window_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, AhjoorEscrowContract);
+    let client = AhjoorEscrowContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    // Default should be 86400 (1 day)
+    assert_eq!(client.get_cancellation_response_window(), 86400);
+}
+
+#[test]
+fn test_get_cancellation_response_window_after_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, AhjoorEscrowContract);
+    let client = AhjoorEscrowContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    // Set custom value
+    client.set_cancellation_response_window(&admin, &172800);
+
+    // Verify getter returns the set value
+    assert_eq!(client.get_cancellation_response_window(), 172800);
+}
