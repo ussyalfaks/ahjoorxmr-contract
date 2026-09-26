@@ -150,6 +150,66 @@ fn test_get_abuse_score_decay_params_default_and_after_set() {
 }
 
 // ===========================================================================
+//  Test: get_counter_offer_expiry_seconds (#891)
+// ===========================================================================
+
+#[test]
+fn test_get_counter_offer_expiry_seconds_default() {
+    let (_env, refund_client, _payment_client, _admin, _token_addr, _tc, _token_admin) = setup_getters();
+
+    // Default is 172_800 (48 hours) before any configuration
+    assert_eq!(refund_client.get_counter_offer_expiry_seconds(), 172_800u64);
+}
+
+#[test]
+fn test_get_counter_offer_expiry_seconds_after_set() {
+    let (_env, refund_client, _payment_client, admin, _token_addr, _tc, _token_admin) = setup_getters();
+
+    refund_client.set_counter_offer_expiry_seconds(&admin, &3_600u64);
+    assert_eq!(refund_client.get_counter_offer_expiry_seconds(), 3_600u64);
+}
+
+// ===========================================================================
+//  Test: get_auto_approve_on_senior_miss (#889)
+// ===========================================================================
+
+#[test]
+fn test_get_auto_approve_on_senior_miss_default_false() {
+    let (_env, refund_client, _payment_client, _admin, _token_addr, _tc, _token_admin) = setup_getters();
+
+    // Default is false before any configuration
+    assert_eq!(refund_client.get_auto_approve_on_senior_miss(), false);
+}
+
+#[test]
+fn test_get_auto_approve_on_senior_miss_after_set() {
+    let (_env, refund_client, _payment_client, admin, _token_addr, _tc, _token_admin) = setup_getters();
+
+    refund_client.set_auto_approve_on_senior_miss(&admin, &true);
+    assert_eq!(refund_client.get_auto_approve_on_senior_miss(), true);
+}
+
+// ===========================================================================
+//  Test: get_block_duration_ledgers (#890)
+// ===========================================================================
+
+#[test]
+fn test_get_block_duration_ledgers_default() {
+    let (_env, refund_client, _payment_client, _admin, _token_addr, _tc, _token_admin) = setup_getters();
+
+    // Default is 518_400 (~30 days) before any configuration
+    assert_eq!(refund_client.get_block_duration_ledgers(), 518_400u64);
+}
+
+#[test]
+fn test_get_block_duration_ledgers_after_set() {
+    let (_env, refund_client, _payment_client, admin, _token_addr, _tc, _token_admin) = setup_getters();
+
+    refund_client.set_block_duration_ledgers(&admin, &100_000u64);
+    assert_eq!(refund_client.get_block_duration_ledgers(), 100_000u64);
+}
+
+// ===========================================================================
 //  Test: get_global_refund_policy (#897)
 // ===========================================================================
 

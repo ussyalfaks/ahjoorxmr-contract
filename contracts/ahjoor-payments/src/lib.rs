@@ -5082,6 +5082,15 @@ impl AhjoorPaymentsContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Returns the configured notification key overlap window in seconds.
+    /// Default: 2_592_000 (30 days) if never set.
+    pub fn get_notification_overlap_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::NotificationKeyRotationConfig)
+            .unwrap_or(DEFAULT_KEY_OVERLAP_WINDOW_SECONDS)
+    }
+
     // --- Token Swap Functions ---
 
     /// Merchant sets their preferred token for receiving payments.
