@@ -77,5 +77,10 @@ pub trait TokenWhitelistInterface {
     fn get_token_suspension(env: Env, token: Address) -> Option<crate::TokenSuspension>;
 
     /// Get suspension history
-    fn get_suspension_history(env: Env, token: Address) -> soroban_sdk::Vec<crate::SuspensionRecord>;
+    fn get_suspension_history(
+        env: Env,
+        token: Address,
+        offset: u32,
+        limit: u32,
+    ) -> soroban_sdk::Vec<crate::SuspensionRecord>;
 }

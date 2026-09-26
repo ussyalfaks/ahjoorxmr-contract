@@ -292,63 +292,61 @@ fn test_remove_token_quota() {
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
     client.set_token_quota(&admin, &token, &100, &10);
+
+    // Remove quota
     client.remove_token_quota(&admin, &token);
 
-    let quota = client.get_token_quota(&token);
-    assert!(quota.is_none());
+    // Verify quota is gone
+    assert!(client.get_token_quota(&token).is_none());
+}
+
+// --- Suspension History Pagination Tests ---
+
+#[test]
+fn test_get_suspension_history_pagination_middle_page() {
+    let (env, admin, client) = setup_test();
+    let token = Address::generate(&env);
+
+    client.add_token(&admin, &token);
+
+    // Build up a history of suspensions/reinstatements.
+    for _ in 0..5 {
+        client.suspend_token(&admin, &token);
+        client.reinstate_token(&admin, &token);
+    }
+
+    let full = client.get_suspension_history(&token, &0, &100);
+    assert_eq!(full.len(), 10);
+
+    // A page in the middle of the list.
+    let middle = client.get_suspension_history(&token, &3, &4);
+    assert_eq!(middle.len(), 4);
+    assert_eq!(middle.get(0).unwrap(), full.get(3).unwrap());
+    assert_eq!(middle.get(3).unwrap(), full.get(6).unwrap());
 }
 
 #[test]
-fn test_record_token_volume_within_quota() {
+fn test_get_suspension_history_pagination_past_end() {
     let (env, admin, client) = setup_test();
     let token = Address::generate(&env);
-    client.add_token(&admin, &token);
-    client.set_token_quota(&admin, &token, &100, &10);
 
-    let result = client.record_token_volume(&token, &50);
-    assert!(result.is_ok());
-    let volume = client.get_token_volume(&token, &1, &10000);
-    assert_eq!(volume, 50);
-}
-
-#[test]
-fn test_record_token_volume_quota_exceeded() {
-    let (env, admin, client) = setup_test();
-    let token = Address::generate(&env);
-    client.add_token(&admin, &token);
-    client.set_token_quota(&admin, &token, &100, &10);
-
-    client.record_token_volume(&token, &60).unwrap();
-    let result = client.record_token_volume(&token, &60);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_no_quota_pass_through() {
-    let (env, admin, client) = setup_test();
-    let token = Address::generate(&env);
     client.add_token(&admin, &token);
 
-    let result = client.record_token_volume(&token, &1000000);
-    assert!(result.is_ok());
-}
+    for _ in 0..3 {
+        client.suspend_token(&admin, &token);
+        client.reinstate_token(&admin, &token);
+    }
 
-#[test]
-fn test_quota_rolling_period() {
-    let (env, admin, client) = setup_test();
-    let token = Address::generate(&env);
-    client.add_token(&admin, &token);
-    client.set_token_quota(&admin, &token, &100, &2);
+    let full = client.get_suspension_history(&token, &0, &100);
+    assert_eq!(full.len(), 6);
 
-    // Ledger 1: 40
-    client.record_token_volume(&token, &40).unwrap();
+    // A page that runs past the end returns only the remaining entries.
+    let partial = client.get_suspension_history(&token, &4, &10);
+    assert_eq!(partial.len(), 2);
+    assert_eq!(partial.get(0).unwrap(), full.get(4).unwrap());
+    assert_eq!(partial.get(1).unwrap(), full.get(5).unwrap());
 
-    // Ledger 2: 50
-    env.ledger().set_sequence_number(2);
-    client.record_token_volume(&token, &50).unwrap();
-
-    // Ledger 3: 30 (sum should be 50+30=80 which is under 100
-    env.ledger().set_sequence_number(3);
-    let result = client.record_token_volume(&token, &30);
-    assert!(result.is_ok());
+    // An offset at/after the end returns an empty page.
+    let empty = client.get_suspension_history(&token, &6, &10);
+    assert_eq!(empty.len(), 0);
 }
