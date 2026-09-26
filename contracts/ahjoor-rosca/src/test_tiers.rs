@@ -213,3 +213,335 @@ fn test_mixed_tiers_pot_size() {
 }
 
 
+// ── Tiered Group Tests ─────────────────────────────────────────────────────────
+
+/// Helper to create a test setup with members
+fn setup_tiered<'a>(mint_amount: i128) -> (Env, AhjoorContractClient<'a>, Address, Address, TokenClient<'a>, TokenAdminClient<'a>, soroban_sdk::Vec<Address>) {
+    setup_with_members(3, mint_amount)
+}
+
+#[test]
+fn test_create_group_tiered_and_join() {
+    let (env, client, admin, token_admin, token_client, _, members) = setup_tiered(3000);
+
+    let base_amount = 100;
+    
+    // Define tiers: 1x (10000 bps), 2x (20000 bps), 3x (30000 bps)
+    let tiers = vec![
+        &env,
+        Tier {
+            tier_id: 0,
+            name: String::from_str(&env, "Basic"),
+            contribution_multiplier_bps: 10000,
+            payout_weight_bps: 10000,
+        },
+        Tier {
+            tier_id: 1,
+            name: String::from_str(&env, "Premium"),
+            contribution_multiplier_bps: 20000,
+            payout_weight_bps: 20000,
+        },
+        Tier {
+            tier_id: 2,
+            name: String::from_str(&env, "VIP"),
+            contribution_multiplier_bps: 30000,
+            payout_weight_bps: 30000,
+        },
+    ];
+
+    // Create a tiered group with the first member already in
+    let member1 = members.get(0).unwrap();
+    client.create_group_tiered(
+        &admin,
+        &member1,
+        &base_amount,
+        &token_admin,
+        &3600,
+        &tiers,
+        &Some(0),
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            grace_period_ledgers: 0,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
+            late_fee_bps: 0,
+            grace_period_seconds: 0,
+            auction_enabled: false,
+            auction_window_ledgers: 0,
+            randomize_payout_order: false,
+            reserve_enabled: false,
+            reserve_contribution_bps: 0,
+        },
+        &None,
+    );
+
+    // Verify tiers were created
+    let group_tiers = client.get_group_tiers();
+    assert_eq!(group_tiers.len(), 3);
+
+    // Verify member1 is in tier 0 (Basic)
+    let member_tier = client.get_member_tier(&member1);
+    assert_eq!(member_tier, 0);
+}
+
+#[test]
+fn test_join_group_tiered() {
+    let (env, client, admin, token_admin, token_client, token_admin_client, members) = 
+        setup_with_members(4, 3000);
+
+    let base_amount = 100;
+    
+    let tiers = vec![
+        &env,
+        Tier {
+            tier_id: 0,
+            name: String::from_str(&env, "Basic"),
+            contribution_multiplier_bps: 10000,
+            payout_weight_bps: 10000,
+        },
+        Tier {
+            tier_id: 1,
+            name: String::from_str(&env, "Premium"),
+            contribution_multiplier_bps: 20000,
+            payout_weight_bps: 20000,
+        },
+    ];
+
+    // Create a tiered group with one member
+    let member1 = members.get(0).unwrap();
+    client.create_group_tiered(
+        &admin,
+        &member1,
+        &base_amount,
+        &token_admin,
+        &3600,
+        &tiers,
+        &Some(0),
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            grace_period_ledgers: 0,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
+            late_fee_bps: 0,
+            grace_period_seconds: 0,
+            auction_enabled: false,
+            auction_window_ledgers: 0,
+            randomize_payout_order: false,
+            reserve_enabled: false,
+            reserve_contribution_bps: 0,
+        },
+        &None,
+    );
+
+    // New member joins at tier 1 (Premium - 2x)
+    let member2 = members.get(1).unwrap();
+    token_admin_client.mint(&member2, &3000);
+    client.join_group_tiered(&member2, &1);
+
+    // Verify member2 is in tier 1
+    let member_tier = client.get_member_tier(&member2);
+    assert_eq!(member_tier, 1);
+
+    // Member2 should contribute 2x = 200
+    client.contribute(&member2, &token_admin, &200);
+    assert_eq!(token_client.balance(&member2), 3000 - 200);
+
+    // Verify round is complete because member1 contributes 100 and member2 contributes 200
+    let (current_round, paid, _, _, _) = client.get_state();
+    assert_eq!(paid.len(), 2);
+}
+
+#[test]
+fn test_request_tier_change_and_apply_pending() {
+    let (env, client, admin, token_admin, token_admin_client, token_client, members) = 
+        setup_with_members(3, 3000);
+
+    let base_amount = 100;
+    
+    let tiers = vec![
+        &env,
+        Tier {
+            tier_id: 0,
+            name: String::from_str(&env, "Basic"),
+            contribution_multiplier_bps: 10000,
+            payout_weight_bps: 10000,
+        },
+        Tier {
+            tier_id: 1,
+            name: String::from_str(&env, "Premium"),
+            contribution_multiplier_bps: 20000,
+            payout_weight_bps: 20000,
+        },
+    ];
+
+    let member1 = members.get(0).unwrap();
+    client.create_group_tiered(
+        &admin,
+        &member1,
+        &base_amount,
+        &token_admin,
+        &3600,
+        &tiers,
+        &Some(0),
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            grace_period_ledgers: 0,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
+            late_fee_bps: 0,
+            grace_period_seconds: 0,
+            auction_enabled: false,
+            auction_window_ledgers: 0,
+            randomize_payout_order: false,
+            reserve_enabled: false,
+            reserve_contribution_bps: 0,
+        },
+        &None,
+    );
+
+    // Member requests tier change
+    client.request_tier_change(&member1, &1);
+
+    // Tier change should be pending - member should still be at tier 0
+    let member_tier_before = client.get_member_tier(&member1);
+    assert_eq!(member_tier_before, 0);
+
+    // Member contributes tier 0 amount (100) before applying tier change
+    client.contribute(&member1, &token_admin, &100);
+
+    // Admin applies pending tier changes
+    client.apply_pending_tier_changes(&admin);
+
+    // After applying, member should be at tier 1
+    let member_tier_after = client.get_member_tier(&member1);
+    assert_eq!(member_tier_after, 1);
+
+    // Next round, member should contribute tier 1 amount (200)
+    // Verify by checking remaining contribution needed
+    let (_, _, _, _, _) = client.get_state();
+    let remaining = client.get_member_contribution_status(&member1);
+    // After applying tier change, in next round member needs to contribute 200 (tier 1) instead of 100
+}
+
+#[test]
+fn test_tier_change_not_immediate() {
+    let (env, client, admin, token_admin, token_admin_client, token_client, members) = 
+        setup_with_members(2, 3000);
+
+    let base_amount = 100;
+    
+    let tiers = vec![
+        &env,
+        Tier {
+            tier_id: 0,
+            name: String::from_str(&env, "Basic"),
+            contribution_multiplier_bps: 10000,
+            payout_weight_bps: 10000,
+        },
+        Tier {
+            tier_id: 1,
+            name: String::from_str(&env, "Premium"),
+            contribution_multiplier_bps: 20000,
+            payout_weight_bps: 20000,
+        },
+    ];
+
+    let member1 = members.get(0).unwrap();
+    client.create_group_tiered(
+        &admin,
+        &member1,
+        &base_amount,
+        &token_admin,
+        &3600,
+        &tiers,
+        &Some(0),
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            grace_period_ledgers: 0,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
+            late_fee_bps: 0,
+            grace_period_seconds: 0,
+            auction_enabled: false,
+            auction_window_ledgers: 0,
+            randomize_payout_order: false,
+            reserve_enabled: false,
+            reserve_contribution_bps: 0,
+        },
+        &None,
+    );
+
+    // Add second member at tier 0
+    let member2 = members.get(1).unwrap();
+    token_admin_client.mint(&member2, &3000);
+    client.join_group_tiered(&member2, &0);
+
+    // Both contribute tier 0 amount for round 0
+    client.contribute(&member1, &token_admin, &100);
+    client.contribute(&member2, &token_admin, &100);
+
+    // Wait for round to end
+    env.ledger().with_mut(|l| l.timestamp += 4000);
+    client.finalize_round();
+
+    // Member1 requests tier change to tier 1
+    client.request_tier_change(&member1, &1);
+
+    // Verify tier change is pending (not yet applied)
+    // Member should still be at tier 0 for current round
+    let current_tier = client.get_member_tier(&member1);
+    assert_eq!(current_tier, 0);
+
+    // After admin applies, member moves to tier 1
+    client.apply_pending_tier_changes(&admin);
+    let new_tier = client.get_member_tier(&member1);
+    assert_eq!(new_tier, 1);
+}

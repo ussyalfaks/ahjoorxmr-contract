@@ -292,3 +292,37 @@ fn test_release_blocked_by_veto_cleared_by_override() {
     let escrow = client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Released);
 }
+// ── Getter Tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn test_get_seller_transfer_veto_window_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(AhjoorEscrowContract, ());
+    let client = AhjoorEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Default should be 200 ledgers
+    assert_eq!(client.get_seller_transfer_veto_window(), 200);
+}
+
+#[test]
+fn test_get_seller_transfer_veto_window_after_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(AhjoorEscrowContract, ());
+    let client = AhjoorEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Set custom value
+    client.set_seller_transfer_veto_window(&admin, &500);
+
+    // Verify getter returns the set value
+    assert_eq!(client.get_seller_transfer_veto_window(), 500);
+}
