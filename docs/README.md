@@ -7,6 +7,8 @@ reference docs for the repository.
 
 ## `ahjoor-payments`
 
+- [**Merchant KYB Verification**](merchant-kyb.md) — How a merchant's KYB status is set, renewed, and revoked, what `set_kyb_enforcement` gates at payment creation, and how `get_merchant_kyb_status` reports expiry.
+
 ## 2. ROSCA Contract (`ahjoor-rosca`)
 
 - [**Contribution Receipts in ROSCA**](rosca-contribution-receipts.md) — NFT-style contribution receipt data format, automatic minting on round finalization, event emissions, and member retrieval/verification functions.
@@ -33,6 +35,9 @@ reference docs for the repository.
 
 - [**Escrow Auto-Renewal**](escrow-auto-renewal.md) — How buyers can pre-approve renewal cycles for recurring service agreements, how auto-renewals are triggered on release, and how buyers can cancel future renewals.
 - [**Multi-Party Approval**](escrow-multiparty-approval.md) — N-of-M release approval configuration, threshold requirements, approver voting, and interactions with release and dispute flows.
+- [**Dispute Timeout Enforcement**](escrow-dispute-timeout.md) — How stalled disputes are auto-resolved after a configurable timeout, per-escrow timeout overrides, default winner configuration, and the arbiter timeout counter.
+- [**Seller Veto Mechanism**](escrow-seller-veto.md) — How sellers can veto a fund release within a cooldown window, how the cooldown interacts with repeated veto attempts, and how admin override resets the clock.
+- [**Inspector Role**](inspector-role.md) — How a neutral inspector is assigned at escrow creation, the `submit_inspection_result` flow, dual-approval inspector replacement, and how the reputation score and threshold gate future assignments.
 
 ## `ahjoor-rosca`
 
