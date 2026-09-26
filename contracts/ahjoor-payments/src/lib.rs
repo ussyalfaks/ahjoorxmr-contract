@@ -5618,7 +5618,6 @@ impl AhjoorPaymentsContract {
 
     /// #327: Admin force resume a paused subscription.
     pub fn admin_resume_subscription(env: Env, admin: Address, sub_id: u32) -> u32 {
-        admin.require_auth();
         Self::require_admin(&env, &admin);
 
         let mut sub: Subscription = env
@@ -11031,6 +11030,12 @@ mod test_invoice_cap;
 
 #[cfg(test)]
 mod test_customer_cancel;
+
+#[cfg(test)]
+mod test_recurring_payment;
+
+#[cfg(test)]
+mod test_subscription_v2;
 
 #[cfg(test)]
 mod test;

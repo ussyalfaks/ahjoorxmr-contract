@@ -1,5 +1,6 @@
 #![cfg(test)]
 extern crate alloc;
+extern crate std;
 use super::*;
 use proptest::prelude::*;
 use soroban_sdk::token::Client as TokenClient;
@@ -1794,4 +1795,145 @@ fn test_get_refund_stats_by_merchant_mixed_activity() {
         stats.total_requested,
         s.refund_client.get_merchant_refund_stats(&merchant).total_requested
     );
+}
+
+// ===========================================================================
+//  Fuzz-like Input Sweep (#925)
+// ===========================================================================
+
+/// Invokes `request_refund` expecting a rejection and asserts the panic
+/// carries `expected` rather than some unrelated error.
+fn assert_request_refund_rejected(
+    s: &TestSetup,
+    customer: &Address,
+    payment_id: u32,
+    amount: i128,
+    reason: &String,
+    reason_code: u32,
+    expected: &str,
+) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        s.refund_client
+            .request_refund(customer, &payment_id, &amount, reason, &reason_code);
+    }));
+    let payload = result.expect_err("request_refund should have been rejected");
+    let msg = payload
+        .downcast_ref::<alloc::string::String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|m| alloc::string::String::from(*m)))
+        .unwrap_or_default();
+    assert!(
+        msg.contains(expected),
+        "expected panic containing {:?}, got: {}",
+        expected,
+        msg
+    );
+}
+
+#[test]
+fn test_fuzz_like_refund_inputs_100_cases() {
+    let s = setup();
+
+    // A single full-refund tier acts as the refund deadline: requests made
+    // more than WINDOW seconds after the payment must fail with
+    // RefundWindowExpired.
+    const WINDOW: u64 = 10_000;
+    let mut tiers = Vec::new(&s.env);
+    tiers.push_back((WINDOW, 10_000u32));
+    s.refund_client.set_refund_tiers(&s.admin, &tiers);
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.env.ledger().set_timestamp(1_000);
+
+    let mut accepted: u32 = 0;
+    let mut rejected: u32 = 0;
+    let mut seed: u64 = 0x5EF_0D;
+    for _ in 0..100 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let payment_amount = (((seed >> 16) % 5_000) as i128) + 1;
+        let reason_code = ((seed >> 32) % 5) as u32;
+        let reason = String::from_str(&s.env, &alloc::format!("reason-{:016x}", seed));
+
+        let pid = create_completed_payment(&s, &customer, &merchant, payment_amount);
+        let created_at = s.env.ledger().timestamp();
+        let counter_before = s.refund_client.get_refund_counter();
+
+        match seed % 10 {
+            // Zero amount.
+            0 => {
+                assert_request_refund_rejected(
+                    &s, &customer, pid, 0, &reason, reason_code,
+                    "Refund amount must be positive",
+                );
+                rejected += 1;
+            }
+            // Negative amount.
+            1 => {
+                let amount = -(((seed >> 8) % 1_000_000) as i128) - 1;
+                assert_request_refund_rejected(
+                    &s, &customer, pid, amount, &reason, reason_code,
+                    "Refund amount must be positive",
+                );
+                rejected += 1;
+            }
+            // Out-of-range reason code.
+            2 => {
+                let bad_code = 5 + ((seed >> 40) as u32 % (u32::MAX - 5));
+                assert_request_refund_rejected(
+                    &s, &customer, pid, payment_amount, &reason, bad_code,
+                    "Invalid reason code: must be 0-4",
+                );
+                rejected += 1;
+            }
+            // Deadline already passed.
+            3 => {
+                s.env
+                    .ledger()
+                    .set_timestamp(created_at + WINDOW + 1 + (seed >> 24) % 100_000);
+                assert_request_refund_rejected(
+                    &s, &customer, pid, payment_amount, &reason, reason_code,
+                    "RefundWindowExpired",
+                );
+                rejected += 1;
+            }
+            // Over-sized request: clamped to the refundable amount by the tier.
+            4 => {
+                let amount = payment_amount + 1 + ((seed >> 8) % 10_000) as i128;
+                let rid = s
+                    .refund_client
+                    .request_refund(&customer, &pid, &amount, &reason, &reason_code);
+                assert_eq!(s.refund_client.get_refund(&rid).amount, payment_amount);
+                accepted += 1;
+            }
+            // Valid request inside the window (inclusive of the boundary).
+            _ => {
+                s.env
+                    .ledger()
+                    .set_timestamp(created_at + (seed >> 24) % (WINDOW + 1));
+                let amount = (((seed >> 8) as i128) % payment_amount) + 1;
+                let rid = s
+                    .refund_client
+                    .request_refund(&customer, &pid, &amount, &reason, &reason_code);
+                let refund = s.refund_client.get_refund(&rid);
+                assert_eq!(refund.status, RefundStatus::Requested);
+                assert_eq!(refund.amount, amount);
+                assert_eq!(refund.payment_id, pid);
+                assert_eq!(refund.reason_code, reason_code);
+                assert_eq!(refund.reason, reason);
+                accepted += 1;
+            }
+        }
+
+        let counter_after = s.refund_client.get_refund_counter();
+        if seed % 10 <= 3 {
+            assert_eq!(counter_after, counter_before, "rejected case must not create a refund");
+        } else {
+            assert_eq!(counter_after, counter_before + 1);
+        }
+    }
+
+    assert_eq!(accepted + rejected, 100);
+    assert!(accepted > 0 && rejected > 0, "sweep must cover both outcomes");
+    assert_eq!(s.refund_client.get_refund_counter(), accepted);
 }
