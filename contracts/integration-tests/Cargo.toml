@@ -13,6 +13,8 @@ soroban-sdk = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 ahjoor-rosca = { path = "../ahjoor-rosca" }
+ahjoor-payments = { path = "../ahjoor-payments" }
+ahjoor-refund = { path = "../ahjoor-refund" }
 
 [features]
 testutils = []
