@@ -7,3 +7,6 @@
 
 <!-- handsoff-issue-877 -->
 - #877: feat(escrow): Add get_insurance_config view function
+
+<!-- handsoff-issue-979 -->
+- #979: feat(escrow): Add third-party fee sponsorship for escrow protocol fees
