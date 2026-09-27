@@ -10,3 +10,6 @@
 
 <!-- handsoff-issue-979 -->
 - #979: feat(escrow): Add third-party fee sponsorship for escrow protocol fees
+
+<!-- handsoff-issue-983 -->
+- #983: feat(refund): Add merchant-configured restocking fee deduction
