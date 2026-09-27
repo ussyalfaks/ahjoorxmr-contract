@@ -13,3 +13,6 @@
 
 <!-- handsoff-issue-983 -->
 - #983: feat(refund): Add merchant-configured restocking fee deduction
+
+<!-- handsoff-issue-985 -->
+- #985: feat(refund): Add product recall events with claimable bulk refunds
