@@ -16,3 +16,6 @@
 
 <!-- handsoff-issue-985 -->
 - #985: feat(refund): Add product recall events with claimable bulk refunds
+
+<!-- handsoff-issue-986 -->
+- #986: feat(rosca): Add payout beneficiary nomination for members
