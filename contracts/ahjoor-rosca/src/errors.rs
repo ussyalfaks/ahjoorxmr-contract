@@ -244,4 +244,44 @@ pub enum ExtError2 {
     BeneficiaryLocked = 134,
     /// The beneficiary address is invalid (e.g. the contract itself).
     InvalidBeneficiary = 135,
+    // ── Group Charter ─────────────────────────────────────────────────────────
+    /// No charter has been set for this group.
+    CharterNotSet = 136,
+    /// The acknowledged version does not match the current charter version.
+    CharterVersionMismatch = 137,
+    /// The member has not acknowledged the current charter version.
+    CharterNotAcknowledged = 138,
+    // ── Membership Succession ─────────────────────────────────────────────────
+    /// Successor must not be the member itself or an existing member of the group.
+    InvalidSuccessor = 139,
+    /// No successor designation exists for this member / successor pair.
+    SuccessorNotDesignated = 140,
+    /// The designated successor has already accepted.
+    SuccessionAlreadyAccepted = 141,
+    /// The designated successor has not accepted yet.
+    SuccessionNotAccepted = 142,
+    /// The member has not missed enough consecutive contributions yet.
+    SuccessionThresholdNotMet = 143,
+    /// Succession trigger rounds must be positive.
+    InvalidSuccessionTrigger = 144,
+}
+
+/// Extension error codes 151+ — overflow from ExtError2 (50-variant limit).
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtError3 {
+    // ── Contribution Streak Bonus ─────────────────────────────────────────────
+    /// streak_bonus_bps must be between 0 and 10_000.
+    InvalidStreakBonusBps = 151,
+    /// The cycle has not completed yet, so no allocation exists.
+    StreakCycleNotCompleted = 152,
+    /// The member was not eligible for the cycle's streak bonus.
+    StreakNotEligible = 153,
+    /// The member already claimed the cycle's streak bonus.
+    StreakBonusAlreadyClaimed = 154,
+    // ── Payout Vesting ────────────────────────────────────────────────────────
+    /// The member has no vesting record.
+    NoVestingRecord = 155,
+    /// Nothing has vested since the last claim.
+    NothingVested = 156,
 }

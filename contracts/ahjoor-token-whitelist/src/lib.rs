@@ -73,12 +73,22 @@ pub struct SuspensionRecord {
     pub reason_hash: BytesN<32>,
 }
 
+/// Who applied a suspension recorded in the suspension history.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuspensionActor {
+    Admin,
+    Guardian,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct SuspensionHistoryEntry {
     pub start_ledger: u32,
     pub expiry_ledger: u32,
     pub reason_hash: BytesN<32>,
+    pub actor: SuspensionActor,
+    pub suspended_by: Address,
 }
 
 #[contracttype]
@@ -156,6 +166,15 @@ pub enum DataKey {
     VoteRecord(u32, Address),
     VoteWeightSnapshot(u32, Address),
     TokenDeprecation(Address),
+    /// Emergency guardian: may only apply capped, timed suspensions.
+    Guardian,
+    /// Maximum suspension length (ledgers) the guardian may apply.
+    MaxGuardianSuspensionLedgers,
+    /// Number of tokens with a `TokenDeprecation` entry. Lets whitelist
+    /// lookups skip the deprecation read when nothing is deprecated. Absent
+    /// on contracts initialized before this key existed, in which case the
+    /// read is always performed.
+    DeprecatedTokenCount,
 }
 
 #[contracttype]
@@ -200,6 +219,8 @@ mod test_governance;
 mod test_suspension;
 #[cfg(test)]
 mod test_deprecation;
+#[cfg(test)]
+mod test_guardian;
 
 pub use client::TokenWhitelistClient;
 
@@ -215,6 +236,7 @@ impl TokenWhitelistContract {
             panic!("Already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::DeprecatedTokenCount, &0u32);
         let empty_vec: Vec<Address> = Vec::new(&env);
         env.storage().persistent().set(&DataKey::WhitelistedTokens, &empty_vec);
         env.storage().persistent().extend_ttl(
@@ -489,6 +511,7 @@ impl TokenWhitelistContract {
             &TokenDeprecation { deprecated_at_ledger: current_ledger, sunset_ledger },
         );
         env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        Self::adjust_deprecated_count(&env, true);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_token_deprecated(&env, token, admin, sunset_ledger);
     }
@@ -508,6 +531,7 @@ impl TokenWhitelistContract {
             panic!("Token already sunset");
         }
         env.storage().persistent().remove(&key);
+        Self::adjust_deprecated_count(&env, false);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_token_undeprecated(&env, token, admin);
     }
@@ -586,6 +610,81 @@ impl TokenWhitelistContract {
     ) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::apply_suspension(
+            &env,
+            &token,
+            suspend_duration_ledgers,
+            reason_hash,
+            SuspensionActor::Admin,
+            &admin,
+        );
+    }
+
+    /// Emergency suspension by the guardian. Always lasts exactly
+    /// `max_guardian_suspension_ledgers`; only the admin can lift or extend
+    /// it. The guardian has no other powers.
+    pub fn guardian_suspend_token(
+        env: Env,
+        guardian: Address,
+        token: Address,
+        reason_hash: BytesN<32>,
+    ) {
+        guardian.require_auth();
+        let stored: Option<Address> = env.storage().instance().get(&DataKey::Guardian);
+        if stored != Some(guardian.clone()) {
+            panic!("Unauthorized: caller is not guardian");
+        }
+        let cap: u32 = env
+            .storage().instance()
+            .get(&DataKey::MaxGuardianSuspensionLedgers)
+            .unwrap_or(0);
+        if cap == 0 {
+            panic!("Guardian suspension cap not set");
+        }
+        Self::apply_suspension(&env, &token, cap, reason_hash, SuspensionActor::Guardian, &guardian);
+    }
+
+    /// Sets (`Some`) or removes (`None`) the emergency guardian. Admin-gated.
+    pub fn set_guardian(env: Env, admin: Address, guardian: Option<Address>) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        match &guardian {
+            Some(g) => env.storage().instance().set(&DataKey::Guardian, g),
+            None => env.storage().instance().remove(&DataKey::Guardian),
+        }
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        events::emit_guardian_set(&env, admin, guardian);
+    }
+
+    pub fn get_guardian(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Guardian)
+    }
+
+    /// Sets `max_guardian_suspension_ledgers`: caps (and fixes) the length of
+    /// guardian suspensions. 0 disables guardian suspensions. Admin-gated.
+    pub fn set_guardian_suspension_cap(env: Env, admin: Address, ledgers: u32) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::MaxGuardianSuspensionLedgers, &ledgers);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        events::emit_max_guardian_suspension_set(&env, ledgers);
+    }
+
+    pub fn get_guardian_suspension_cap(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxGuardianSuspensionLedgers)
+            .unwrap_or(0)
+    }
+
+    fn apply_suspension(
+        env: &Env,
+        token: &Address,
+        suspend_duration_ledgers: u32,
+        reason_hash: BytesN<32>,
+        actor: SuspensionActor,
+        suspended_by: &Address,
+    ) {
         if !env.storage().persistent().has(&DataKey::WhitelistMembership(token.clone())) {
             panic!("Token not whitelisted");
         }
@@ -608,9 +707,22 @@ impl TokenWhitelistContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
-        Self::add_to_suspension_history(&env, &token, current_ledger, expiry_ledger, reason_hash.clone());
+        Self::add_to_suspension_history(
+            env,
+            token,
+            SuspensionHistoryEntry {
+                start_ledger: current_ledger,
+                expiry_ledger,
+                reason_hash: reason_hash.clone(),
+                actor,
+                suspended_by: suspended_by.clone(),
+            },
+        );
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        events::emit_token_suspended(&env, token, expiry_ledger, reason_hash);
+        if actor == SuspensionActor::Guardian {
+            events::emit_token_suspended_by_guardian(env, token.clone(), suspended_by.clone(), expiry_ledger);
+        }
+        events::emit_token_suspended(env, token.clone(), expiry_ledger, reason_hash);
     }
 
     pub fn lift_token_suspension(env: Env, admin: Address, token: Address) {
@@ -684,18 +796,12 @@ impl TokenWhitelistContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    fn add_to_suspension_history(
-        env: &Env,
-        token: &Address,
-        start_ledger: u32,
-        expiry_ledger: u32,
-        reason_hash: BytesN<32>,
-    ) {
+    fn add_to_suspension_history(env: &Env, token: &Address, entry: SuspensionHistoryEntry) {
         let mut history: Vec<SuspensionHistoryEntry> = env
             .storage().persistent()
             .get(&DataKey::SuspensionHistory(token.clone()))
             .unwrap_or_else(|| Vec::new(env));
-        history.push_back(SuspensionHistoryEntry { start_ledger, expiry_ledger, reason_hash });
+        history.push_back(entry);
         if history.len() > SUSPENSION_HISTORY_LIMIT {
             let start_idx = history.len() - SUSPENSION_HISTORY_LIMIT;
             let mut trimmed: Vec<SuspensionHistoryEntry> = Vec::new(env);
@@ -1007,6 +1113,16 @@ impl TokenWhitelistContract {
         }
         if env.storage().persistent().has(&DataKey::TokenDeprecation(token.clone())) {
             env.storage().persistent().remove(&DataKey::TokenDeprecation(token.clone()));
+            Self::adjust_deprecated_count(env, false);
+        }
+    }
+
+    /// Tracks `DeprecatedTokenCount` when it exists (see its doc comment).
+    fn adjust_deprecated_count(env: &Env, increment: bool) {
+        let maybe: Option<u32> = env.storage().instance().get(&DataKey::DeprecatedTokenCount);
+        if let Some(count) = maybe {
+            let next = if increment { count + 1 } else { count.saturating_sub(1) };
+            env.storage().instance().set(&DataKey::DeprecatedTokenCount, &next);
         }
     }
 
@@ -1015,6 +1131,11 @@ impl TokenWhitelistContract {
     /// delisted and `TokenSunset` is emitted. Returns `true` if the token
     /// has been sunset (and is therefore no longer whitelisted).
     fn apply_sunset_if_due(env: &Env, token: &Address) -> bool {
+        let deprecated_count: Option<u32> =
+            env.storage().instance().get(&DataKey::DeprecatedTokenCount);
+        if deprecated_count == Some(0) {
+            return false;
+        }
         let maybe: Option<TokenDeprecation> = env
             .storage().persistent()
             .get(&DataKey::TokenDeprecation(token.clone()));

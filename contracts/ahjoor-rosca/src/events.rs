@@ -2253,3 +2253,226 @@ pub fn emit_payout_delivered(
     }
     .publish(e);
 }
+
+// ── Group Charter ─────────────────────────────────────────────────────────────
+
+/// Event: A new charter version became the group's current charter.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CharterSet {
+    pub version: u32,
+    pub charter_hash: BytesN<32>,
+    pub uri: soroban_sdk::String,
+}
+
+pub fn emit_charter_set(e: &Env, version: u32, charter_hash: BytesN<32>, uri: soroban_sdk::String) {
+    CharterSet { version, charter_hash, uri }.publish(e);
+}
+
+/// Event: A charter change after activation was submitted for governance.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CharterUpdateProposed {
+    pub proposal_id: u32,
+    pub proposer: Address,
+    pub charter_hash: BytesN<32>,
+}
+
+pub fn emit_charter_update_proposed(
+    e: &Env,
+    proposal_id: u32,
+    proposer: Address,
+    charter_hash: BytesN<32>,
+) {
+    CharterUpdateProposed { proposal_id, proposer, charter_hash }.publish(e);
+}
+
+/// Event: An address acknowledged a charter version.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CharterAcknowledged {
+    pub member: Address,
+    pub version: u32,
+}
+
+pub fn emit_charter_acknowledged(e: &Env, member: Address, version: u32) {
+    CharterAcknowledged { member, version }.publish(e);
+}
+
+// ── Membership Succession ─────────────────────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SuccessorDesignated {
+    pub member: Address,
+    pub successor: Address,
+}
+
+pub fn emit_successor_designated(e: &Env, member: Address, successor: Address) {
+    SuccessorDesignated { member, successor }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SuccessorAccepted {
+    pub member: Address,
+    pub successor: Address,
+}
+
+pub fn emit_successor_accepted(e: &Env, member: Address, successor: Address) {
+    SuccessorAccepted { member, successor }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SuccessionClaimed {
+    pub member: Address,
+    pub successor: Address,
+    pub missed_rounds: u32,
+    pub debt_transferred: i128,
+}
+
+pub fn emit_succession_claimed(
+    e: &Env,
+    member: Address,
+    successor: Address,
+    missed_rounds: u32,
+    debt_transferred: i128,
+) {
+    SuccessionClaimed { member, successor, missed_rounds, debt_transferred }.publish(e);
+}
+
+// ── Contribution Streak Bonus ─────────────────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct StreakBonusPoolFunded {
+    pub funder: Address,
+    pub amount: i128,
+    pub pool_balance: i128,
+}
+
+pub fn emit_streak_bonus_pool_funded(e: &Env, funder: Address, amount: i128, pool_balance: i128) {
+    StreakBonusPoolFunded { funder, amount, pool_balance }.publish(e);
+}
+
+/// Event: A member's streak broke for `cycle`. `reason` is one of
+/// `late`, `skip`, `missed` or `exit`.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct StreakBroken {
+    pub member: Address,
+    pub cycle: u32,
+    pub reason: Symbol,
+}
+
+pub fn emit_streak_broken(e: &Env, member: Address, cycle: u32, reason: Symbol) {
+    StreakBroken { member, cycle, reason }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct StreakBonusAllocated {
+    pub cycle: u32,
+    pub eligible_count: u32,
+    pub per_member_amount: i128,
+}
+
+pub fn emit_streak_bonus_allocated(e: &Env, cycle: u32, eligible_count: u32, per_member_amount: i128) {
+    StreakBonusAllocated { cycle, eligible_count, per_member_amount }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct StreakBonusClaimed {
+    pub member: Address,
+    pub cycle: u32,
+    pub amount: i128,
+}
+
+pub fn emit_streak_bonus_claimed(e: &Env, member: Address, cycle: u32, amount: i128) {
+    StreakBonusClaimed { member, cycle, amount }.publish(e);
+}
+
+// ── Payout Vesting ────────────────────────────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutVestingSet {
+    pub vesting_ledgers: u32,
+}
+
+pub fn emit_payout_vesting_set(e: &Env, vesting_ledgers: u32) {
+    PayoutVestingSet { vesting_ledgers }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutVestingUpdateProposed {
+    pub proposal_id: u32,
+    pub proposer: Address,
+    pub vesting_ledgers: u32,
+}
+
+pub fn emit_payout_vesting_update_proposed(
+    e: &Env,
+    proposal_id: u32,
+    proposer: Address,
+    vesting_ledgers: u32,
+) {
+    PayoutVestingUpdateProposed { proposal_id, proposer, vesting_ledgers }.publish(e);
+}
+
+/// Event: A round payout was locked in a vesting record instead of paid out.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutVested {
+    pub round: u32,
+    pub member: Address,
+    pub amount: i128,
+    pub start_ledger: u32,
+    pub duration_ledgers: u32,
+}
+
+pub fn emit_payout_vested(
+    e: &Env,
+    round: u32,
+    member: Address,
+    amount: i128,
+    start_ledger: u32,
+    duration_ledgers: u32,
+) {
+    PayoutVested { round, member, amount, start_ledger, duration_ledgers }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestedClaimed {
+    pub member: Address,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+pub fn emit_vested_claimed(e: &Env, member: Address, recipient: Address, amount: i128) {
+    VestedClaimed { member, recipient, amount }.publish(e);
+}
+
+/// Event: Unvested payout covered a missed contribution for `round`.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VestingCoveredDefault {
+    pub member: Address,
+    pub round: u32,
+    pub amount: i128,
+    pub fully_covered: bool,
+}
+
+pub fn emit_vesting_covered_default(
+    e: &Env,
+    member: Address,
+    round: u32,
+    amount: i128,
+    fully_covered: bool,
+) {
+    VestingCoveredDefault { member, round, amount, fully_covered }.publish(e);
+}

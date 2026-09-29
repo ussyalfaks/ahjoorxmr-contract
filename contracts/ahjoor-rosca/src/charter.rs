@@ -62,13 +62,14 @@ pub(crate) fn apply_charter(env: &Env, charter_hash: BytesN<32>, uri: String) ->
     version
 }
 
-/// Opens a `CharterUpdate` proposal carrying the new charter. The charter is
-/// applied by `execute_proposal` if the vote passes.
-pub(crate) fn propose_charter_update(
+/// Opens a governance proposal of `proposal_type` created by `proposer`,
+/// voting for `CHARTER_VOTING_WINDOW_SECONDS`, and returns its id. Shared by
+/// the charter and payout-vesting update flows.
+pub(crate) fn open_governance_proposal(
     env: &Env,
     proposer: &Address,
-    charter_hash: BytesN<32>,
-    uri: String,
+    proposal_type: ProposalType,
+    description: &str,
 ) -> u32 {
     let mut proposal_counter: u32 = env
         .storage()
@@ -84,7 +85,7 @@ pub(crate) fn propose_charter_update(
         .get(&DataKey2::QuorumConfig)
         .unwrap_or(Map::new(env));
     let required_quorum = quorum_config
-        .get(ProposalType::CharterUpdate)
+        .get(proposal_type)
         .unwrap_or_else(|| {
             let global_q: u32 = env
                 .storage()
@@ -98,9 +99,9 @@ pub(crate) fn propose_charter_update(
     let deadline = current_time + CHARTER_VOTING_WINDOW_SECONDS;
     let proposal = Proposal {
         id: proposal_id,
-        proposal_type: ProposalType::CharterUpdate,
+        proposal_type,
         creator: proposer.clone(),
-        description: String::from_str(env, "Group charter update"),
+        description: String::from_str(env, description),
         target_member: proposer.clone(),
         votes_for: 0,
         votes_against: 0,
@@ -132,6 +133,32 @@ pub(crate) fn propose_charter_update(
         .instance()
         .set(&DataKey::ProposalCounter, &proposal_counter);
 
+    events::emit_prop_new(
+        env,
+        proposal_id,
+        proposer.clone(),
+        proposer.clone(),
+        current_time,
+        deadline,
+    );
+    proposal_id
+}
+
+/// Opens a `CharterUpdate` proposal carrying the new charter. The charter is
+/// applied by `execute_proposal` if the vote passes.
+pub(crate) fn propose_charter_update(
+    env: &Env,
+    proposer: &Address,
+    charter_hash: BytesN<32>,
+    uri: String,
+) -> u32 {
+    let proposal_id = open_governance_proposal(
+        env,
+        proposer,
+        ProposalType::CharterUpdate,
+        "Group charter update",
+    );
+
     let pending_key = DataKey5::PendingCharter(proposal_id);
     env.storage()
         .persistent()
@@ -142,14 +169,6 @@ pub(crate) fn propose_charter_update(
         PERSISTENT_BUMP_AMOUNT,
     );
 
-    events::emit_prop_new(
-        env,
-        proposal_id,
-        proposer.clone(),
-        proposer.clone(),
-        current_time,
-        deadline,
-    );
     events::emit_charter_update_proposed(env, proposal_id, proposer.clone(), charter_hash);
     proposal_id
 }

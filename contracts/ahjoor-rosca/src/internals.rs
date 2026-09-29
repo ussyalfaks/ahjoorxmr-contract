@@ -1,4 +1,4 @@
-use crate::{errors::{Error, ExtError}, events, audit_trail, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
+use crate::{errors::{Error, ExtError}, events, audit_trail, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
 use soroban_sdk::{panic_with_error, token, Address, Bytes, BytesN, Env, Map, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -88,6 +88,9 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         .get(&DataKey::RewardPool)
         .unwrap_or(0);
     let base_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+    // Base-token funds held for vesting payouts and streak bonuses are not
+    // part of the round pot.
+    let reserved_balance = vesting::locked_balance(env) + streak::reserved_balance(env);
 
     let approved_tokens: Vec<Address> = env
         .storage()
@@ -200,6 +203,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         if token_addr == base_token {
             balance -= reward_pool;
             balance -= insurance_pool;
+            balance -= reserved_balance;
             actual_pot = balance;
         }
     }
@@ -277,6 +281,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
             // shortfalls.
             balance -= reward_pool;
             balance -= insurance_pool;
+            balance -= reserved_balance;
             total_payout_history_amt = balance;
         }
 
@@ -293,6 +298,11 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
             if should_reinvest && token_addr == base_token {
                 reinvested_amount = payout_amount;
                 events::emit_payout_reinvested(env, payout_recipient.clone(), current_round, payout_amount);
+            } else if payout_amount > 0
+                && token_addr == base_token
+                && vesting::vesting_ledgers(env) > 0
+            {
+                vesting::vest_payout(env, &payout_recipient, payout_amount, current_round);
             } else if payout_amount > 0 {
                 // Transfer payout to the nominated beneficiary, or the recipient
                 // themselves when no beneficiary is set.
@@ -608,6 +618,13 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
     if cycle_len > 0 && new_round % cycle_len == 0 {
         // New cycle starts, record the timestamp with ledger-mode fix
         let cycle_number = new_round / cycle_len;
+        streak::on_cycle_completed(env, cycle_number - 1);
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .unwrap_or(Vec::new(env));
+        streak::record_roster(env, cycle_number, &members);
         let cycle_start_timestamp = if use_timestamp {
             env.ledger().timestamp()
         } else {

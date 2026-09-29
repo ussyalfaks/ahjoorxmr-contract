@@ -229,3 +229,26 @@ fn test_cross_contract_client_deprecation_checks() {
     cross.undeprecate_token(&admin, &token);
     assert!(cross.is_token_allowed_for_new(&token));
 }
+
+#[test]
+fn test_sunset_still_applies_after_other_deprecations_resolve() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup(&env);
+    let (a, b, c) = (Address::generate(&env), Address::generate(&env), Address::generate(&env));
+    client.add_token(&admin, &a);
+    client.add_token(&admin, &b);
+    client.add_token(&admin, &c);
+
+    let now = env.ledger().sequence();
+    client.deprecate_token(&admin, &a, &(now + 10));
+    client.deprecate_token(&admin, &b, &(now + 10));
+    client.deprecate_token(&admin, &c, &(now + 10));
+    // Resolve two deprecations through different paths.
+    client.undeprecate_token(&admin, &a);
+    client.remove_token(&admin, &b);
+
+    env.ledger().with_mut(|l| l.sequence_number = now + 10);
+    assert!(client.is_whitelisted(&a));
+    assert!(!client.is_whitelisted(&c));
+}

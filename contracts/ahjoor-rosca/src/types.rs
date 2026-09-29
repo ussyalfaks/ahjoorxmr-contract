@@ -146,6 +146,7 @@ pub enum ProposalType {
     Reinstatement = 4, // #218
     MemberFreeze = 5,  // Member-initiated emergency freeze
     CharterUpdate = 6, // Replace the group charter after activation
+    PayoutVestingUpdate = 7, // Change payout_vesting_ledgers after activation
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -449,6 +450,121 @@ pub enum DataKey5 {
     // ── Payout Beneficiary Nomination ─────────────────────────────────────────
     /// Address — the beneficiary nominated by a member to receive their payout.
     PayoutBeneficiary(Address),
+
+    // ── Group Charter ─────────────────────────────────────────────────────────
+    /// GroupCharter — current charter (hash + URI + version). Absent = no charter.
+    GroupCharter,
+    /// u32 — latest charter version acknowledged by an address (persistent).
+    CharterAck(Address),
+    /// (BytesN<32>, String) — charter awaiting a `CharterUpdate` proposal (persistent).
+    PendingCharter(u32),
+
+    // ── Membership Succession ─────────────────────────────────────────────────
+    /// u32 — consecutive missed contributions that allow a successor to claim.
+    SuccessionTriggerRounds,
+    /// Map<Address, u32> — consecutive rounds each member has missed.
+    ConsecutiveMisses,
+    /// SuccessorDesignation — member → designated successor (persistent).
+    Successor(Address),
+    /// Address — successor → the member whose slot they took over (persistent).
+    SucceededFrom(Address),
+
+    // ── Contribution Streak Bonus ─────────────────────────────────────────────
+    /// u32 — share of the streak pool allocated per qualifying member, in bps.
+    StreakBonusBps,
+    /// i128 — funded streak bonus balance not yet allocated to a cycle.
+    StreakBonusPool,
+    /// i128 — allocated to completed cycles but not yet claimed.
+    StreakBonusAllocated,
+    /// Vec<Address> — members at the start of a cycle (persistent).
+    StreakRoster(u32),
+    /// Vec<Address> — members whose streak broke during a cycle (persistent).
+    StreakBroken(u32),
+    /// StreakCycleAllocation — eligible members and per-member share (persistent).
+    StreakAllocation(u32),
+    /// bool — (cycle, member) has claimed their streak bonus (persistent).
+    StreakClaimed(u32, Address),
+
+    // ── Payout Vesting ────────────────────────────────────────────────────────
+    /// u32 — ledgers over which each round payout vests (0 = lump sum).
+    PayoutVestingLedgers,
+    /// VestingRecord — a member's current vesting payout (persistent).
+    VestingRecord(Address),
+    /// i128 — base-token balance locked in vesting records.
+    VestingLocked,
+    /// u32 — vesting period awaiting a `PayoutVestingUpdate` proposal (persistent).
+    PendingVestingLedgers(u32),
+}
+
+// ── Contribution Streak Bonus ─────────────────────────────────────────────────
+
+/// Snapshot taken when a cycle completes: every member in `eligible` may claim
+/// `per_member_amount` once.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreakCycleAllocation {
+    pub cycle: u32,
+    pub eligible: Vec<Address>,
+    pub per_member_amount: i128,
+    pub claimed_count: u32,
+}
+
+/// View returned by `get_streak_status`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreakStatus {
+    /// Cycle currently in progress (0-based).
+    pub current_cycle: u32,
+    /// `true` while the member is on the cycle roster with no late
+    /// contribution, skip, missed round or emergency exit request.
+    pub on_track: bool,
+    /// Most recently completed cycle the member is eligible for and has not
+    /// yet claimed, if any.
+    pub claimable_cycle: Option<u32>,
+    /// Amount claimable for `claimable_cycle` (0 when none).
+    pub claimable_amount: i128,
+}
+
+// ── Payout Vesting ────────────────────────────────────────────────────────────
+
+/// A round payout vesting linearly from `start` (ledger) over `duration`
+/// ledgers. `covered` is the part of the unvested tail used to cover the
+/// member's missed contributions; it is no longer claimable.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VestingRecord {
+    pub member: Address,
+    pub total: i128,
+    pub released: i128,
+    pub start: u32,
+    pub duration: u32,
+    pub covered: i128,
+}
+
+// ── Group Charter ─────────────────────────────────────────────────────────────
+
+/// Off-chain rules document anchored by hash. `version` starts at 1 and is
+/// bumped on every change; members must acknowledge the current version.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupCharter {
+    pub version: u32,
+    pub charter_hash: BytesN<32>,
+    pub uri: String,
+    pub set_at_ledger: u32,
+}
+
+// ── Membership Succession ─────────────────────────────────────────────────────
+
+/// A member's designated successor. The successor must accept before they
+/// can claim the slot.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuccessorDesignation {
+    pub member: Address,
+    pub successor: Address,
+    pub accepted: bool,
+    pub designated_at_ledger: u32,
 }
 
 // ── Scoped Co-Admin Role ──────────────────────────────────────────────────────

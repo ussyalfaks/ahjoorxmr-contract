@@ -1262,3 +1262,26 @@ pub fn emit_recall_closed(e: &Env, recall_id: u32, merchant: Address, released_a
     }
     .publish(e);
 }
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundDestinationSet {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub destination: Address,
+}
+
+pub fn emit_refund_destination_set(e: &Env, refund_id: u32, customer: Address, destination: Address) {
+    RefundDestinationSet { refund_id, customer, destination }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AlternateDestinationPolicySet {
+    pub merchant: Address,
+    pub allow: bool,
+}
+
+pub fn emit_alternate_destination_policy_set(e: &Env, merchant: Address, allow: bool) {
+    AlternateDestinationPolicySet { merchant, allow }.publish(e);
+}
