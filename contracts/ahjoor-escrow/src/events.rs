@@ -1799,3 +1799,44 @@ pub fn emit_escrow_fee_sponsorship_settled(
     }
     .publish(e);
 }
+
+/// #977: Settlement offer proposed on a disputed escrow
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SettlementProposed {
+    pub escrow_id: u32,
+    pub proposer: Address,
+    pub seller_amount: i128,
+}
+
+pub fn emit_settlement_proposed(e: &Env, escrow_id: u32, proposer: Address, seller_amount: i128) {
+    SettlementProposed { escrow_id, proposer, seller_amount }.publish(e);
+}
+
+/// #977: Settlement offer accepted; dispute closed without arbiter
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SettlementAccepted {
+    pub escrow_id: u32,
+    pub accepter: Address,
+    pub seller_amount: i128,
+    pub buyer_amount: i128,
+}
+
+pub fn emit_settlement_accepted(e: &Env, escrow_id: u32, accepter: Address, seller_amount: i128, buyer_amount: i128) {
+    SettlementAccepted { escrow_id, accepter, seller_amount, buyer_amount }.publish(e);
+}
+
+/// #978: Arbiter recused and replaced from the pool
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ArbiterRecused {
+    pub escrow_id: u32,
+    pub old_arbiter: Address,
+    pub new_arbiter: Address,
+    pub reason_hash: BytesN<32>,
+}
+
+pub fn emit_arbiter_recused(e: &Env, escrow_id: u32, old_arbiter: Address, new_arbiter: Address, reason_hash: BytesN<32>) {
+    ArbiterRecused { escrow_id, old_arbiter, new_arbiter, reason_hash }.publish(e);
+}

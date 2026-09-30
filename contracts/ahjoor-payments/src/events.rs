@@ -2137,3 +2137,51 @@ pub fn emit_tip_subscription_cancelled(e: &Env, subscription_id: u32, customer: 
         (subscription_id, customer),
     );
 }
+
+/// #982: Merchant accepted token list updated
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantAcceptedTokensUpdated {
+    pub merchant: Address,
+    pub tokens: Vec<Address>,
+}
+
+pub fn emit_merchant_accepted_tokens_updated(e: &Env, merchant: Address, tokens: Vec<Address>) {
+    MerchantAcceptedTokensUpdated { merchant, tokens }.publish(e);
+}
+
+/// #981: Payout address change requested
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutAddressChangeRequested {
+    pub merchant: Address,
+    pub new_payout: Address,
+    pub effective_ledger: u32,
+}
+
+pub fn emit_payout_address_change_requested(e: &Env, merchant: Address, new_payout: Address, effective_ledger: u32) {
+    PayoutAddressChangeRequested { merchant, new_payout, effective_ledger }.publish(e);
+}
+
+/// #981: Payout address change cancelled
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutAddressChangeCancelled {
+    pub merchant: Address,
+}
+
+pub fn emit_payout_address_change_cancelled(e: &Env, merchant: Address) {
+    PayoutAddressChangeCancelled { merchant }.publish(e);
+}
+
+/// #981: Payout address change applied
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutAddressChangeApplied {
+    pub merchant: Address,
+    pub new_payout: Address,
+}
+
+pub fn emit_payout_address_change_applied(e: &Env, merchant: Address, new_payout: Address) {
+    PayoutAddressChangeApplied { merchant, new_payout }.publish(e);
+}

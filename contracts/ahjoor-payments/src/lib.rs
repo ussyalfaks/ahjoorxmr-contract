@@ -109,6 +109,8 @@ const MAX_NOTIFICATION_KEY_HISTORY: u32 = 5;
 const DEFAULT_KEY_OVERLAP_WINDOW_SECONDS: u64 = 30 * 24 * 3600;
 /// Default evidence submission window: 7 days in ledgers (~120,960 ledgers at 5s/ledger) (#308)
 const DEFAULT_EVIDENCE_WINDOW_LEDGERS: u32 = 120_960;
+/// #981: default payout address change delay (~24h at 5s ledgers).
+const DEFAULT_PAYOUT_CHANGE_DELAY_LEDGERS: u32 = 17_280;
 /// Maximum evidence submissions per party (#308)
 const MAX_EVIDENCE_SUBMISSIONS: u32 = 5;
 /// Default cooling-off period: 0 ledgers (disabled by default) (#309)
@@ -233,6 +235,12 @@ pub enum ExtError {
     NotPaymentCustomer = 74,
     /// Payment is not in Authorized status for customer cancellation (#803).
     NotAuthorizedForCancel = 75,
+    /// #982: token is not on the merchant's accepted token list.
+    TokenNotAcceptedByMerchant = 76,
+    /// #981: pending payout address change has not reached its effective ledger.
+    PayoutChangeNotReady = 77,
+    /// #981: no pending payout address change for this merchant.
+    NoPendingPayoutChange = 78,
     /// Capture deadline has passed; customer can no longer cancel (#803).
     CancelPastCaptureDeadline = 76,
 }
@@ -1138,6 +1146,22 @@ pub enum DataKey3 {
     SplitPayees(u32),
     /// #980: Instance: maximum number of payees in a split payment
     MaxSplitPayees,
+    /// #982: Persistent: merchant's accepted token list (empty = all allowed)
+    MerchantAcceptedTokens(Address),
+    /// #981: Persistent: merchant's active payout address
+    PayoutAddress(Address),
+    /// #981: Persistent: merchant's pending payout address change
+    PendingPayoutChange(Address),
+    /// #981: Instance: delay in ledgers before a payout address change applies
+    PayoutChangeDelayLedgers,
+}
+
+/// #981: Pending time-locked payout address change.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingPayoutChange {
+    pub new_payout: Address,
+    pub effective_ledger: u32,
 }
 
 mod events;
@@ -1482,7 +1506,7 @@ impl AhjoorPaymentsContract {
         Self::validate_split_recipients(&split_recipients);
 
         // Token whitelist validation
-        Self::require_token_allowed(&env, &token);
+        Self::require_token_accepted(&env, &merchant, &token);
 
         // Merchant allowlist check (#58)
         Self::require_merchant_approved(&env, &merchant);
@@ -1760,7 +1784,7 @@ impl AhjoorPaymentsContract {
 
             Self::validate_reference(&env, &request.reference);
             Self::validate_metadata(&env, &request.metadata);
-            Self::require_token_allowed(&env, &request.token);
+            Self::require_token_accepted(&env, &request.merchant, &request.token);
             Self::require_merchant_approved(&env, &request.merchant);
 
             let client = token::Client::new(&env, &request.token);
@@ -1988,7 +2012,7 @@ impl AhjoorPaymentsContract {
         Self::check_and_update_withdrawal_rate_limit(&env, &merchant, net_amount);
 
         let token_client = token::Client::new(&env, &settlement_token);
-        token_client.transfer(&env.current_contract_address(), &merchant, &net_amount);
+        token_client.transfer(&env.current_contract_address(), &Self::resolve_payout_address(&env, &merchant), &net_amount);
 
         if fee_collected > 0 {
             if let Some(fee_recipient) = env
@@ -2727,7 +2751,7 @@ impl AhjoorPaymentsContract {
         if payment_token == usdc_token {
             customer.require_auth();
             Self::enforce_rate_limit(&env, &customer, 1);
-            Self::require_token_allowed(&env, &payment_token);
+            Self::require_token_accepted(&env, &merchant, &payment_token);
             Self::require_merchant_approved(&env, &merchant);
 
             let client = token::Client::new(&env, &payment_token);
@@ -2791,7 +2815,7 @@ impl AhjoorPaymentsContract {
 
         customer.require_auth();
         Self::enforce_rate_limit(&env, &customer, 1);
-        Self::require_token_allowed(&env, &payment_token);
+        Self::require_token_accepted(&env, &merchant, &payment_token);
         Self::require_merchant_approved(&env, &merchant);
 
         let oracle_addr: Address = env
@@ -4063,7 +4087,7 @@ impl AhjoorPaymentsContract {
 
         Self::validate_reference(&env, &reference);
         Self::validate_metadata(&env, &metadata);
-        Self::require_token_allowed(&env, &token);
+        Self::require_token_accepted(&env, &merchant, &token);
         Self::require_merchant_approved(&env, &merchant);
 
         // --- External ID uniqueness check ---
@@ -5041,7 +5065,7 @@ impl AhjoorPaymentsContract {
             .expect("Collateral token not configured");
 
         let token_client = token::Client::new(&env, &usdc_token);
-        token_client.transfer(&env.current_contract_address(), &merchant, &amount);
+        token_client.transfer(&env.current_contract_address(), &Self::resolve_payout_address(&env, &merchant), &amount);
 
         env.storage().persistent().set(&key, &remaining);
         env.storage().persistent().extend_ttl(
@@ -5387,6 +5411,101 @@ impl AhjoorPaymentsContract {
         env.storage()
             .instance()
             .get(&DataKey::TokenWhitelistContract)
+    }
+
+    // ── #982: Per-merchant accepted token list ────────────────────────────────
+
+    /// Restrict which globally allowed tokens the merchant accepts.
+    /// An empty list accepts all globally allowed tokens.
+    pub fn set_merchant_accepted_tokens(env: Env, merchant: Address, tokens: Vec<Address>) {
+        merchant.require_auth();
+        for token in tokens.iter() {
+            Self::require_token_allowed(&env, &token);
+        }
+        let key = DataKey3::MerchantAcceptedTokens(merchant.clone());
+        if tokens.is_empty() {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &tokens);
+        }
+        events::emit_merchant_accepted_tokens_updated(&env, merchant, tokens);
+    }
+
+    pub fn get_merchant_accepted_tokens(env: Env, merchant: Address) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::MerchantAcceptedTokens(merchant))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    // ── #981: Time-locked payout address rotation ─────────────────────────────
+
+    pub fn set_payout_change_delay_ledgers(env: Env, admin: Address, delay_ledgers: u32) {
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey3::PayoutChangeDelayLedgers, &delay_ledgers);
+    }
+
+    pub fn get_payout_change_delay_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::PayoutChangeDelayLedgers)
+            .unwrap_or(DEFAULT_PAYOUT_CHANGE_DELAY_LEDGERS)
+    }
+
+    pub fn request_payout_address_change(env: Env, merchant: Address, new_payout: Address) {
+        merchant.require_auth();
+        let effective_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(Self::get_payout_change_delay_ledgers(env.clone()));
+        let pending = PendingPayoutChange {
+            new_payout: new_payout.clone(),
+            effective_ledger,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey3::PendingPayoutChange(merchant.clone()), &pending);
+        events::emit_payout_address_change_requested(&env, merchant, new_payout, effective_ledger);
+    }
+
+    pub fn cancel_payout_address_change(env: Env, merchant: Address) {
+        merchant.require_auth();
+        let key = DataKey3::PendingPayoutChange(merchant.clone());
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, ExtError::NoPendingPayoutChange);
+        }
+        env.storage().persistent().remove(&key);
+        events::emit_payout_address_change_cancelled(&env, merchant);
+    }
+
+    /// Anyone may apply a pending change once its delay has elapsed.
+    pub fn apply_payout_address_change(env: Env, merchant: Address) {
+        let key = DataKey3::PendingPayoutChange(merchant.clone());
+        let pending: PendingPayoutChange = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ExtError::NoPendingPayoutChange));
+        if env.ledger().sequence() < pending.effective_ledger {
+            panic_with_error!(&env, ExtError::PayoutChangeNotReady);
+        }
+        env.storage().persistent().remove(&key);
+        env.storage()
+            .persistent()
+            .set(&DataKey3::PayoutAddress(merchant.clone()), &pending.new_payout);
+        events::emit_payout_address_change_applied(&env, merchant, pending.new_payout);
+    }
+
+    pub fn get_payout_address(env: Env, merchant: Address) -> Address {
+        Self::resolve_payout_address(&env, &merchant)
+    }
+
+    pub fn get_pending_payout_change(env: Env, merchant: Address) -> Option<PendingPayoutChange> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::PendingPayoutChange(merchant))
     }
 
     /// Check if a token is allowed via the whitelist contract.
@@ -6535,6 +6654,27 @@ impl AhjoorPaymentsContract {
         (seconds + LEDGER_CLOSE_TIME_SECONDS - 1) / LEDGER_CLOSE_TIME_SECONDS
     }
 
+    /// #982: Validates token is globally allowed and accepted by the merchant.
+    fn require_token_accepted(env: &Env, merchant: &Address, token: &Address) {
+        Self::require_token_allowed(env, token);
+        let accepted: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::MerchantAcceptedTokens(merchant.clone()))
+            .unwrap_or(Vec::new(env));
+        if !accepted.is_empty() && !accepted.contains(token) {
+            panic_with_error!(env, ExtError::TokenNotAcceptedByMerchant);
+        }
+    }
+
+    /// #981: Active payout address for a merchant (falls back to merchant).
+    fn resolve_payout_address(env: &Env, merchant: &Address) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::PayoutAddress(merchant.clone()))
+            .unwrap_or(merchant.clone())
+    }
+
     /// Validates that a token is allowed via the whitelist contract
     fn require_token_allowed(env: &Env, token: &Address) {
         if let Some(whitelist_contract) = env
@@ -6605,7 +6745,7 @@ impl AhjoorPaymentsContract {
             panic!("capture_deadline_ledger must be in the future");
         }
 
-        Self::require_token_allowed(&env, &token);
+        Self::require_token_accepted(&env, &merchant, &token);
         Self::require_merchant_approved(&env, &merchant);
 
         let client = token::Client::new(&env, &token);
@@ -9029,7 +9169,7 @@ impl AhjoorPaymentsContract {
             panic!("Interval ledgers must be positive");
         }
 
-        Self::require_token_allowed(&env, &token);
+        Self::require_token_accepted(&env, &merchant, &token);
         Self::require_merchant_approved(&env, &merchant);
 
         let mut counter: u32 = env
@@ -10134,7 +10274,7 @@ impl AhjoorPaymentsContract {
         if amount <= 0 {
             panic!("amount must be positive");
         }
-        Self::require_token_allowed(&env, &token);
+        Self::require_token_accepted(&env, &merchant, &token);
         Self::require_merchant_approved(&env, &merchant);
 
         let cfg: RetryConfig = env

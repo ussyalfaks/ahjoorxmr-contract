@@ -337,6 +337,29 @@ pub enum EscrowErrorExt5 {
     NoProtocolFeeToSponsor = 13,
     /// The escrow is in a terminal state and cannot be sponsored.
     EscrowNotSponsorable = 14,
+    /// #978: no eligible replacement arbiter in the pool.
+    NoEligibleArbiter = 15,
+    /// #978: only the currently assigned arbiter may recuse.
+    OnlyAssignedArbiterCanRecuse = 16,
+    /// #977: no open settlement offer for this escrow.
+    NoSettlementOffer = 17,
+    /// #977: the proposer cannot accept their own settlement offer.
+    ProposerCannotAcceptOwnOffer = 18,
+    /// #977: only buyer or seller may propose/accept a settlement.
+    OnlyBuyerOrSellerCanSettle = 19,
+    /// #977: settlement seller amount must be between 0 and escrowed amount.
+    SettlementAmountOutOfRange = 20,
+    /// #977: only the proposer may withdraw a settlement offer.
+    OnlyProposerCanWithdrawSettlement = 21,
+}
+
+/// #977: Mutual settlement offer for a disputed escrow.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementOffer {
+    pub proposer: Address,
+    pub seller_amount: i128,
+    pub created_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -881,6 +904,8 @@ pub enum DataKey3 {
     PrincipalFunded(u32),
     /// Third-party protocol fee sponsorship for an escrow
     FeeSponsorship(u32),
+    /// #977: open mutual settlement offer for a disputed escrow
+    SettlementOffer(u32),
 }
 
 /// A third party's pre-funded protocol fee for a specific escrow.
@@ -3225,6 +3250,11 @@ impl AhjoorEscrowContract {
             panic_with_error!(&env, EscrowErrorExt::OnlyArbiterCanResolveDispute);
         }
 
+        // #977: an arbiter ruling supersedes any open settlement offer
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::SettlementOffer(escrow_id));
+
         let cooling_off_seconds: u64 = env
             .storage()
             .instance()
@@ -3909,6 +3939,195 @@ impl AhjoorEscrowContract {
             arbiter_timeout_count + 1,
         );
 
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    // ── #977: Mutual settlement offers ────────────────────────────────────────
+
+    fn load_disputed_escrow_for_party(env: &Env, caller: &Address, escrow_id: u32) -> Escrow {
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+        if escrow.status != EscrowStatus::Disputed
+            && escrow.status != EscrowStatus::PartiallyDisputed
+        {
+            panic_with_error!(env, EscrowErrorExt::EscrowIsNotDisputed);
+        }
+        if *caller != escrow.buyer && *caller != escrow.seller {
+            panic_with_error!(env, EscrowErrorExt5::OnlyBuyerOrSellerCanSettle);
+        }
+        escrow
+    }
+
+    /// Propose a split of the disputed amount. Replaces any earlier offer.
+    pub fn propose_settlement(env: Env, caller: Address, escrow_id: u32, seller_amount: i128) {
+        Self::require_not_paused(&env);
+        caller.require_auth();
+        let escrow = Self::load_disputed_escrow_for_party(&env, &caller, escrow_id);
+        if seller_amount < 0 || seller_amount > escrow.amount {
+            panic_with_error!(&env, EscrowErrorExt5::SettlementAmountOutOfRange);
+        }
+        let offer = SettlementOffer {
+            proposer: caller.clone(),
+            seller_amount,
+            created_at: env.ledger().timestamp(),
+        };
+        let key = DataKey3::SettlementOffer(escrow_id);
+        env.storage().persistent().set(&key, &offer);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        events::emit_settlement_proposed(&env, escrow_id, caller, seller_amount);
+    }
+
+    /// Accept the counterparty's settlement offer. No arbiter fee is charged.
+    pub fn accept_settlement(env: Env, caller: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        caller.require_auth();
+        let mut escrow = Self::load_disputed_escrow_for_party(&env, &caller, escrow_id);
+        let key = DataKey3::SettlementOffer(escrow_id);
+        let offer: SettlementOffer = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt5::NoSettlementOffer));
+        if offer.proposer == caller {
+            panic_with_error!(&env, EscrowErrorExt5::ProposerCannotAcceptOwnOffer);
+        }
+        env.storage().persistent().remove(&key);
+
+        let client = token::Client::new(&env, &escrow.token);
+        let buyer_amount = escrow.amount - offer.seller_amount;
+        if offer.seller_amount > 0 {
+            client.transfer(&env.current_contract_address(), &escrow.seller, &offer.seller_amount);
+        }
+        if buyer_amount > 0 {
+            Self::transfer_to_buyers(&env, &escrow, buyer_amount, escrow_id);
+        }
+        // No fees are taken on a mutual settlement: return any sponsorship and collateral.
+        Self::refund_fee_sponsorship(&env, escrow_id, &escrow.token);
+        let collateral: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SellerCollateral(escrow_id))
+            .unwrap_or(0);
+        if collateral > 0 {
+            client.transfer(&env.current_contract_address(), &escrow.seller, &collateral);
+            env.storage().persistent().remove(&DataKey::SellerCollateral(escrow_id));
+        }
+        Self::burn_receipt_if_exists(&env, escrow_id);
+
+        let old_status = escrow.status;
+        escrow.status = EscrowStatus::Resolved;
+        Self::update_dispute_count(&env, old_status, escrow.status);
+        Self::record_status_history(&env, escrow_id, escrow.status);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        if let Some(mut dispute) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Dispute>(&DataKey::Dispute(escrow_id))
+        {
+            dispute.resolved = true;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Dispute(escrow_id), &dispute);
+        }
+        events::emit_settlement_accepted(&env, escrow_id, caller, offer.seller_amount, buyer_amount);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Withdraw an open settlement offer. Only the proposer may call.
+    pub fn withdraw_settlement(env: Env, caller: Address, escrow_id: u32) {
+        caller.require_auth();
+        let key = DataKey3::SettlementOffer(escrow_id);
+        let offer: SettlementOffer = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt5::NoSettlementOffer));
+        if offer.proposer != caller {
+            panic_with_error!(&env, EscrowErrorExt5::OnlyProposerCanWithdrawSettlement);
+        }
+        env.storage().persistent().remove(&key);
+    }
+
+    pub fn get_settlement_offer(env: Env, escrow_id: u32) -> Option<SettlementOffer> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::SettlementOffer(escrow_id))
+    }
+
+    // ── #978: Arbiter recusal ─────────────────────────────────────────────────
+
+    /// Assigned arbiter steps away; a replacement is drawn from the arbiter pool.
+    /// Resets the dispute timeout clock and does not count as a timeout.
+    pub fn recuse_arbiter(env: Env, arbiter: Address, escrow_id: u32, reason_hash: BytesN<32>) {
+        Self::require_not_paused(&env);
+        arbiter.require_auth();
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+        if arbiter != escrow.arbiter {
+            panic_with_error!(&env, EscrowErrorExt5::OnlyAssignedArbiterCanRecuse);
+        }
+        let disputed = escrow.status == EscrowStatus::Disputed
+            || escrow.status == EscrowStatus::PartiallyDisputed;
+        if !disputed && !Self::is_open_escrow_status(escrow.status) {
+            panic_with_error!(&env, EscrowError::EscrowIsNotActive);
+        }
+
+        let pool: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ArbiterPool)
+            .unwrap_or(Vec::new(&env));
+        let len = pool.len();
+        let mut replacement: Option<Address> = None;
+        for i in 0..len {
+            let candidate = pool.get((escrow_id % len + i) % len).unwrap();
+            if candidate != arbiter && candidate != escrow.buyer && candidate != escrow.seller {
+                replacement = Some(candidate);
+                break;
+            }
+        }
+        let new_arbiter = replacement
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt5::NoEligibleArbiter));
+
+        escrow.arbiter = new_arbiter.clone();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::DisputeDeadlineStart(escrow_id))
+        {
+            env.storage().persistent().set(
+                &DataKey::DisputeDeadlineStart(escrow_id),
+                &env.ledger().timestamp(),
+            );
+        }
+        events::emit_arbiter_recused(&env, escrow_id, arbiter, new_arbiter, reason_hash);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
