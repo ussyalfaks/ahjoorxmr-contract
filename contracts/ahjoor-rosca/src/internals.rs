@@ -1,4 +1,4 @@
-use crate::{errors::{Error, ExtError}, events, audit_trail, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
+use crate::{errors::{Error, ExtError}, events, audit_trail, hardship, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, MemberPayoutEntry, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
 use soroban_sdk::{panic_with_error, token, Address, Bytes, BytesN, Env, Map, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -37,6 +37,9 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         .instance()
         .get(&DataKey::CurrentRound)
         .unwrap();
+    // #1030: settle hardship earmarks first so a covered shortfall is part of
+    // this round's pot.
+    hardship::settle_round(env, current_round);
     let payout_order: Vec<Address> = env.storage().instance().get(&DataKey::PayoutOrder).unwrap();
     let suspended_members: Vec<Address> = env
         .storage()
@@ -88,9 +91,17 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         .get(&DataKey::RewardPool)
         .unwrap_or(0);
     let base_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-    // Base-token funds held for vesting payouts and streak bonuses are not
-    // part of the round pot.
-    let reserved_balance = vesting::locked_balance(env) + streak::reserved_balance(env);
+    // Base-token funds held for vesting payouts, streak bonuses, the emergency
+    // reserve and unsettled hardship earmarks are not part of the round pot.
+    let emergency_reserve: i128 = env
+        .storage()
+        .persistent()
+        .get(&DataKey3::EmergencyReserveBalance)
+        .unwrap_or(0);
+    let reserved_balance = vesting::locked_balance(env)
+        + streak::reserved_balance(env)
+        + emergency_reserve
+        + hardship::earmarked(env);
 
     let approved_tokens: Vec<Address> = env
         .storage()
@@ -303,6 +314,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
                 && vesting::vesting_ledgers(env) > 0
             {
                 vesting::vest_payout(env, &payout_recipient, payout_amount, current_round);
+                record_member_payout(env, &payout_recipient, current_round, &token_addr, payout_amount);
             } else if payout_amount > 0 {
                 // Transfer payout to the nominated beneficiary, or the recipient
                 // themselves when no beneficiary is set.
@@ -312,6 +324,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
                     .get(&DataKey5::PayoutBeneficiary(payout_recipient.clone()))
                     .unwrap_or(payout_recipient.clone());
                 client.transfer(&env.current_contract_address(), &payout_destination, &payout_amount);
+                record_member_payout(env, &payout_recipient, current_round, &token_addr, payout_amount);
                 events::emit_payout_delivered(
                     env,
                     current_round,
@@ -553,9 +566,43 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
     }
 }
 
+/// #1028: appends a payout entry to `member`'s payout history.
+pub(crate) fn record_member_payout(
+    env: &Env,
+    member: &Address,
+    round: u32,
+    token: &Address,
+    amount: i128,
+) {
+    let count_key = DataKey5::MemberPayoutCount(member.clone());
+    let index: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let entry_key = DataKey5::MemberPayoutEntry(member.clone(), index);
+    let entry = MemberPayoutEntry {
+        cycle: streak::cycle_of_round(env, round),
+        round,
+        amount,
+        token: token.clone(),
+        ledger: env.ledger().sequence(),
+    };
+    env.storage().persistent().set(&entry_key, &entry);
+    env.storage().persistent().extend_ttl(
+        &entry_key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+    env.storage().persistent().set(&count_key, &(index + 1));
+    env.storage().persistent().extend_ttl(
+        &count_key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
 /// Advances the round counter, clears paid-members and per-round contributions,
 /// and sets a new deadline.
 pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
+    // #1030: rounds closed without a payout still settle hardship earmarks.
+    hardship::settle_round(env, current_round);
     // #227: Apply pending round duration if one was scheduled
     let pending_duration: Option<u64> = env.storage().instance().get(&DataKey4::PendingRoundDuration);
     let duration: u64 = if let Some(pending) = pending_duration {
@@ -709,7 +756,17 @@ pub(crate) fn apply_prepaid_for_member(env: &Env, member: &Address) {
         .get(&DataKey2::MemberTiers)
         .unwrap_or(Map::new(env));
     let tier_bps = tiers.get(member.clone()).unwrap_or(10_000);
-    let member_required = (contribution_amount * tier_bps as i128) / 10_000;
+    let current_round: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::CurrentRound)
+        .unwrap_or(0);
+    let member_required = hardship::required_for(
+        env,
+        member,
+        current_round,
+        (contribution_amount * tier_bps as i128) / 10_000,
+    );
     if member_required <= 0 {
         return;
     }
@@ -756,11 +813,6 @@ pub(crate) fn apply_prepaid_for_member(env: &Env, member: &Address) {
         .instance()
         .set(&DataKey::PaidMembers, &next_paid);
 
-    let current_round: u32 = env
-        .storage()
-        .instance()
-        .get(&DataKey::CurrentRound)
-        .unwrap_or(0);
     events::emit_prepaid_consumed(env, member.clone(), current_round, remaining_needed);
 }
 

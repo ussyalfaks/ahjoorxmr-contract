@@ -39,6 +39,7 @@ mod events;
 mod internals;
 pub mod savings_goal_tracking;
 pub mod savings_goal_tracking_impl;
+mod hardship;
 mod streak;
 mod succession;
 mod vesting;
@@ -917,7 +918,16 @@ impl AhjoorContract {
             .get(&DataKey2::MemberTiers)
             .unwrap_or(Map::new(&env));
         let tier_bps = tiers.get(contributor.clone()).unwrap_or(10_000); // Default to 1x (10000 bps)
-        let member_required_amount = (base_amount * tier_bps as i128) / 10_000;
+        // #1030: an approved hardship reduction lowers this round's requirement.
+        let member_required_amount = hardship::required_for(
+            &env,
+            &contributor,
+            env.storage()
+                .instance()
+                .get(&DataKey::CurrentRound)
+                .unwrap_or(0),
+            (base_amount * tier_bps as i128) / 10_000,
+        );
 
         let amount_to_transfer = if token == base_token {
             amount // For base token, transfer the exact amount specified
@@ -4998,6 +5008,9 @@ impl AhjoorContract {
             }
             ProposalType::PayoutVestingUpdate => {
                 vesting::execute_vesting_update(&env, proposal_id);
+            }
+            ProposalType::HardshipReduction => {
+                hardship::execute(&env, proposal_id);
             }
             ProposalType::MemberFreeze => {
                 let mut reasons: Map<u32, BytesN<32>> = env
@@ -9434,7 +9447,15 @@ impl AhjoorContract {
             .get(&DataKey2::MemberTiers)
             .unwrap_or(Map::new(&env));
         let tier_bps = tiers.get(member.clone()).unwrap_or(10_000);
-        let member_required_amount = (base_amount * tier_bps as i128) / 10_000;
+        let member_required_amount = hardship::required_for(
+            &env,
+            &member,
+            env.storage()
+                .instance()
+                .get(&DataKey::CurrentRound)
+                .unwrap_or(0),
+            (base_amount * tier_bps as i128) / 10_000,
+        );
 
         let mut member_contributions: Map<Address, i128> = env
             .storage()
@@ -13066,6 +13087,97 @@ impl AhjoorContract {
             None => 0,
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Member Payout History (#1028) ─────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// View: every payout `member` has received, oldest first, across all of
+    /// the group's cycles. One entry is recorded per token transfer (or
+    /// vesting lock) made when a round is paid out to the member.
+    ///
+    /// Returns the slice `[start, start + limit)`; `limit` is capped at
+    /// `audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE`. An out-of-range `start`
+    /// or a `limit` of `0` returns an empty vec, as does a member who has
+    /// never been paid. Entries are append-only, so pages are stable.
+    ///
+    /// `group_id` is accepted for API consistency with other group-scoped
+    /// functions; this contract manages a single group per instance.
+    pub fn get_member_payout_history(
+        env: Env,
+        _group_id: u32,
+        member: Address,
+        start: u32,
+        limit: u32,
+    ) -> Vec<MemberPayoutEntry> {
+        let total: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey5::MemberPayoutCount(member.clone()))
+            .unwrap_or(0);
+        let mut page: Vec<MemberPayoutEntry> = Vec::new(&env);
+        if limit == 0 || start >= total {
+            return page;
+        }
+        let limit = limit.min(audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE);
+        let end = start.saturating_add(limit).min(total);
+        for i in start..end {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get(&DataKey5::MemberPayoutEntry(member.clone(), i))
+            {
+                page.push_back(entry);
+            }
+        }
+        page
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Hardship Contribution Reduction (#1030) ───────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Request to contribute `reduced_amount` instead of the full contribution
+    /// for `round` only. Opens a `HardshipReduction` governance proposal and
+    /// returns its id; vote with `vote_on_proposal` and apply with
+    /// `execute_proposal`. On approval the shortfall is drawn from the
+    /// emergency reserve.
+    ///
+    /// Fails with `InvalidHardshipAmount` unless `0 < reduced_amount < full
+    /// contribution`, `HardshipRoundPassed` for a past round,
+    /// `HardshipAlreadyUsedThisCycle` when the member already has a pending or
+    /// approved request in the round's cycle, and
+    /// `InsufficientReserveForHardship` when the reserve cannot cover the
+    /// shortfall (checked again at execution).
+    ///
+    /// `group_id` is accepted for API consistency with other group-scoped
+    /// functions; this contract manages a single group per instance.
+    pub fn request_hardship_reduction(
+        env: Env,
+        _group_id: u32,
+        member: Address,
+        round: u32,
+        reduced_amount: i128,
+    ) -> u32 {
+        internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
+        member.require_auth();
+        let proposal_id = hardship::request(&env, &member, round, reduced_amount);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        proposal_id
+    }
+
+    /// View: the hardship request attached to `proposal_id`, if any.
+    pub fn get_hardship_request(env: Env, proposal_id: u32) -> Option<HardshipRequest> {
+        hardship::get_request(&env, proposal_id)
+    }
+
+    /// View: the approved hardship reduction for `member` in `round`, if any.
+    pub fn get_hardship_reduction(env: Env, member: Address, round: u32) -> Option<HardshipRequest> {
+        hardship::get_reduction(&env, &member, round)
+    }
 }
 
 mod test;
@@ -13098,4 +13210,6 @@ mod test_charter;
 mod test_succession;
 mod test_streak_bonus;
 mod test_payout_vesting;
+mod test_member_payout_history;
+mod test_hardship_reduction;
 pub use events::*;

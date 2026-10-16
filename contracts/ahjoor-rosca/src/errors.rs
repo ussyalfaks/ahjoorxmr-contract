@@ -284,4 +284,13 @@ pub enum ExtError3 {
     NoVestingRecord = 155,
     /// Nothing has vested since the last claim.
     NothingVested = 156,
+    // ── Hardship Contribution Reduction (#1030) ──────────────────────────────
+    /// reduced_amount must be positive and below the member's full contribution.
+    InvalidHardshipAmount = 157,
+    /// The round has already been paid out or closed.
+    HardshipRoundPassed = 158,
+    /// The member already has a pending or approved hardship request this cycle.
+    HardshipAlreadyUsedThisCycle = 159,
+    /// The emergency reserve cannot cover the requested shortfall.
+    InsufficientReserveForHardship = 160,
 }

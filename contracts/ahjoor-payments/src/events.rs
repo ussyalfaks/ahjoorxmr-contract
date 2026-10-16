@@ -2185,3 +2185,89 @@ pub struct PayoutAddressChangeApplied {
 pub fn emit_payout_address_change_applied(e: &Env, merchant: Address, new_payout: Address) {
     PayoutAddressChangeApplied { merchant, new_payout }.publish(e);
 }
+
+/// #1051: Admin configured a merchant's rolling reserve
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RollingReserveSet {
+    pub merchant: Address,
+    pub bps: u32,
+    pub hold_ledgers: u32,
+}
+
+pub fn emit_rolling_reserve_set(e: &Env, merchant: Address, bps: u32, hold_ledgers: u32) {
+    RollingReserveSet { merchant, bps, hold_ledgers }.publish(e);
+}
+
+/// #1051: Part of a settlement was held in the merchant's rolling reserve
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RollingReserveHeld {
+    pub merchant: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub release_ledger: u32,
+}
+
+pub fn emit_rolling_reserve_held(
+    e: &Env,
+    merchant: Address,
+    token: Address,
+    amount: i128,
+    release_ledger: u32,
+) {
+    RollingReserveHeld { merchant, token, amount, release_ledger }.publish(e);
+}
+
+/// #1051: Matured rolling reserve paid out to the merchant
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RollingReserveReleased {
+    pub merchant: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+pub fn emit_rolling_reserve_released(e: &Env, merchant: Address, token: Address, amount: i128) {
+    RollingReserveReleased { merchant, token, amount }.publish(e);
+}
+
+/// #1051: A refund drew on the merchant's rolling reserve
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RollingReserveDrawn {
+    pub merchant: Address,
+    pub payment_id: u32,
+    pub token: Address,
+    pub amount: i128,
+}
+
+pub fn emit_rolling_reserve_drawn(
+    e: &Env,
+    merchant: Address,
+    payment_id: u32,
+    token: Address,
+    amount: i128,
+) {
+    RollingReserveDrawn { merchant, payment_id, token, amount }.publish(e);
+}
+
+/// #1051: Merchant refunded a settled payment
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SettledPaymentRefunded {
+    pub payment_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+    pub from_reserve: i128,
+}
+
+pub fn emit_settled_payment_refunded(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    amount: i128,
+    from_reserve: i128,
+) {
+    SettledPaymentRefunded { payment_id, merchant, amount, from_reserve }.publish(e);
+}

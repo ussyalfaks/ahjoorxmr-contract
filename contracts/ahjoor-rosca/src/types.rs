@@ -147,6 +147,7 @@ pub enum ProposalType {
     MemberFreeze = 5,  // Member-initiated emergency freeze
     CharterUpdate = 6, // Replace the group charter after activation
     PayoutVestingUpdate = 7, // Change payout_vesting_ledgers after activation
+    HardshipReduction = 8, // One-round contribution reduction covered by the emergency reserve
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -494,6 +495,24 @@ pub enum DataKey5 {
     VestingLocked,
     /// u32 — vesting period awaiting a `PayoutVestingUpdate` proposal (persistent).
     PendingVestingLedgers(u32),
+
+    // ── Member Payout History (#1028) ─────────────────────────────────────────
+    /// u32 — number of payout entries recorded for a member (persistent).
+    MemberPayoutCount(Address),
+    /// MemberPayoutEntry — (member, index) → payout entry (persistent).
+    MemberPayoutEntry(Address, u32),
+
+    // ── Hardship Contribution Reduction (#1030) ───────────────────────────────
+    /// HardshipRequest — proposal_id → hardship request (persistent).
+    HardshipRequest(u32),
+    /// u32 — (member, cycle) → proposal_id of the member's latest request (persistent).
+    HardshipCycleRequest(Address, u32),
+    /// HardshipRequest — (member, round) → approved reduction (persistent).
+    HardshipReduction(Address, u32),
+    /// Vec<Address> — round → members with an approved reduction (persistent).
+    HardshipRoundMembers(u32),
+    /// i128 — reserve funds drawn for approved reductions, not yet settled.
+    HardshipEarmarked,
 }
 
 // ── Contribution Streak Bonus ─────────────────────────────────────────────────
@@ -1140,4 +1159,38 @@ pub struct GroupAnalytics {
     pub avg_credit_score: i128,
     pub avg_reputation_score: i128,
     pub fee_bps: u32,
+}
+
+// ── Member Payout History (#1028) ─────────────────────────────────────────────
+
+/// One payout transfer a member received, returned by
+/// `get_member_payout_history`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemberPayoutEntry {
+    /// Cycle (0-based) the paid round belongs to.
+    pub cycle: u32,
+    /// Round (0-based, counted across cycles) that was paid out.
+    pub round: u32,
+    pub amount: i128,
+    pub token: Address,
+    /// Ledger sequence at which the payout was made.
+    pub ledger: u32,
+}
+
+// ── Hardship Contribution Reduction (#1030) ───────────────────────────────────
+
+/// A member's request to contribute `reduced_amount` instead of their full
+/// contribution for one `round`, with `shortfall` drawn from the emergency
+/// reserve once the `HardshipReduction` proposal is approved.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HardshipRequest {
+    pub proposal_id: u32,
+    pub member: Address,
+    pub round: u32,
+    pub cycle: u32,
+    pub reduced_amount: i128,
+    pub shortfall: i128,
+    pub approved: bool,
 }

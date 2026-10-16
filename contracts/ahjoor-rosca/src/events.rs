@@ -2476,3 +2476,72 @@ pub fn emit_vesting_covered_default(
 ) {
     VestingCoveredDefault { member, round, amount, fully_covered }.publish(e);
 }
+
+// ── Hardship Contribution Reduction (#1030) ───────────────────────────────────
+
+/// Event: A member requested a one-round hardship contribution reduction.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct HardshipReductionRequested {
+    pub proposal_id: u32,
+    pub member: Address,
+    pub round: u32,
+    pub reduced_amount: i128,
+    pub shortfall: i128,
+}
+
+pub fn emit_hardship_reduction_requested(
+    e: &Env,
+    proposal_id: u32,
+    member: Address,
+    round: u32,
+    reduced_amount: i128,
+    shortfall: i128,
+) {
+    HardshipReductionRequested { proposal_id, member, round, reduced_amount, shortfall }.publish(e);
+}
+
+/// Event: A hardship reduction was approved and `shortfall` drawn from the
+/// emergency reserve.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct HardshipReductionApproved {
+    pub proposal_id: u32,
+    pub member: Address,
+    pub round: u32,
+    pub reduced_amount: i128,
+    pub shortfall: i128,
+}
+
+pub fn emit_hardship_reduction_approved(
+    e: &Env,
+    proposal_id: u32,
+    member: Address,
+    round: u32,
+    reduced_amount: i128,
+    shortfall: i128,
+) {
+    HardshipReductionApproved { proposal_id, member, round, reduced_amount, shortfall }.publish(e);
+}
+
+/// Event: A round with an approved hardship reduction ended. `added_to_pot`
+/// is true when the member contributed and the shortfall joined the round
+/// pot; false when it was returned to the emergency reserve.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct HardshipShortfallSettled {
+    pub member: Address,
+    pub round: u32,
+    pub shortfall: i128,
+    pub added_to_pot: bool,
+}
+
+pub fn emit_hardship_shortfall_settled(
+    e: &Env,
+    member: Address,
+    round: u32,
+    shortfall: i128,
+    added_to_pot: bool,
+) {
+    HardshipShortfallSettled { member, round, shortfall, added_to_pot }.publish(e);
+}
