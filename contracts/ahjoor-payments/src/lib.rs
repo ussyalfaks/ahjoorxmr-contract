@@ -243,6 +243,14 @@ pub enum ExtError {
     NoPendingPayoutChange = 78,
     /// Capture deadline has passed; customer can no longer cancel (#803).
     CancelPastCaptureDeadline = 76,
+    /// Reusable payment request does not exist.
+    PaymentRequestNotFound = 80,
+    /// Reusable payment request has expired.
+    PaymentRequestExpired = 81,
+    /// Reusable payment request is inactive.
+    PaymentRequestInactive = 82,
+    /// Reusable payment request has reached its use limit.
+    PaymentRequestExhausted = 83,
 }
 
 /// Per-merchant withdrawal rate limit config (#231).
@@ -531,6 +539,20 @@ pub struct PaymentRequest {
     pub token: Address,
     pub reference: Option<String>,
     pub metadata: Option<Map<String, String>>,
+}
+
+/// Reusable merchant payment link with an optional use limit and expiry.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReusablePaymentRequest {
+    pub request_id: u32,
+    pub merchant: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub max_uses: Option<u32>,
+    pub uses: u32,
+    pub expires_at: Option<u64>,
+    pub active: bool,
 }
 
 /// Consent record for zero-amount agreement signing (#307)
@@ -1154,6 +1176,12 @@ pub enum DataKey3 {
     PendingPayoutChange(Address),
     /// #981: Instance: delay in ledgers before a payout address change applies
     PayoutChangeDelayLedgers,
+    /// Instance: counter for reusable merchant payment requests.
+    PaymentRequestCounter,
+    /// Persistent: reusable merchant payment request.
+    PaymentRequest(u32),
+    /// Persistent: payment ID to reusable payment request ID.
+    PaymentRequestPayment(u32),
 }
 
 /// #981: Pending time-locked payout address change.
@@ -1359,6 +1387,170 @@ impl AhjoorPaymentsContract {
     /// Accepts optional reference (max 64 bytes) and metadata (max 5 keys) (#67).
     /// Accepts optional idempotency_key to prevent duplicate payments.
     /// Returns the new payment ID.
+    pub fn create_payment_request(
+        env: Env,
+        merchant: Address,
+        token: Address,
+        amount: i128,
+        max_uses: Option<u32>,
+        expires_at: Option<u64>,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        if amount <= 0 {
+            panic!("Payment amount must be positive");
+        }
+        if max_uses == Some(0) {
+            panic_with_error!(&env, ExtError::InvalidAmount);
+        }
+        if expires_at.is_some_and(|expiry| expiry <= env.ledger().timestamp()) {
+            panic_with_error!(&env, ExtError::PaymentRequestExpired);
+        }
+
+        Self::require_token_accepted(&env, &merchant, &token);
+        Self::require_merchant_approved(&env, &merchant);
+
+        let request_id: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::PaymentRequestCounter)
+            .unwrap_or(0);
+        let next_id = request_id
+            .checked_add(1)
+            .expect("Payment request counter overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey3::PaymentRequestCounter, &next_id);
+
+        let request = ReusablePaymentRequest {
+            request_id,
+            merchant,
+            token,
+            amount,
+            max_uses,
+            uses: 0,
+            expires_at,
+            active: true,
+        };
+        let key = DataKey3::PaymentRequest(request_id);
+        env.storage().persistent().set(&key, &request);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        request_id
+    }
+
+    /// Pay a reusable request, creating a normal escrow payment linked to it.
+    pub fn pay_request(env: Env, customer: Address, request_id: u32) -> u32 {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        let request_key = DataKey3::PaymentRequest(request_id);
+        let mut request: ReusablePaymentRequest = env
+            .storage()
+            .persistent()
+            .get(&request_key)
+            .unwrap_or_else(|| panic_with_error!(&env, ExtError::PaymentRequestNotFound));
+
+        if !request.active {
+            panic_with_error!(&env, ExtError::PaymentRequestInactive);
+        }
+        if request
+            .expires_at
+            .is_some_and(|expiry| env.ledger().timestamp() >= expiry)
+        {
+            panic_with_error!(&env, ExtError::PaymentRequestExpired);
+        }
+        if request.max_uses.is_some_and(|max_uses| request.uses >= max_uses) {
+            panic_with_error!(&env, ExtError::PaymentRequestExhausted);
+        }
+
+        request.uses = request
+            .uses
+            .checked_add(1)
+            .expect("Payment request use counter overflow");
+        env.storage().persistent().set(&request_key, &request);
+        env.storage().persistent().extend_ttl(
+            &request_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let payment_id = Self::create_payment_with_expiry(
+            env.clone(),
+            customer,
+            request.merchant,
+            request.amount,
+            request.token,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let payment_link_key = DataKey3::PaymentRequestPayment(payment_id);
+        env.storage()
+            .persistent()
+            .set(&payment_link_key, &request_id);
+        env.storage().persistent().extend_ttl(
+            &payment_link_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        payment_id
+    }
+
+    /// Deactivate a reusable payment request. Only its merchant may do so.
+    pub fn deactivate_payment_request(env: Env, merchant: Address, request_id: u32) {
+        merchant.require_auth();
+        let key = DataKey3::PaymentRequest(request_id);
+        let mut request: ReusablePaymentRequest = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ExtError::PaymentRequestNotFound));
+        if request.merchant != merchant {
+            panic!("Only the payment request merchant can deactivate it");
+        }
+        request.active = false;
+        env.storage().persistent().set(&key, &request);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Return a reusable payment request, or None if it does not exist.
+    pub fn get_payment_request(env: Env, request_id: u32) -> Option<ReusablePaymentRequest> {
+        let key = DataKey3::PaymentRequest(request_id);
+        let request = env.storage().persistent().get(&key);
+        if request.is_some() {
+            env.storage().persistent().extend_ttl(
+                &key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+        request
+    }
+
+    /// Return the request ID associated with a payment created by `pay_request`.
+    pub fn get_payment_request_for_payment(env: Env, payment_id: u32) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::PaymentRequestPayment(payment_id))
+    }
+
     pub fn create_payment(
         env: Env,
         customer: Address,

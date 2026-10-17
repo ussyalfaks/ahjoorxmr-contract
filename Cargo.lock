@@ -22,6 +22,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahjoor-common"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "ahjoor-errors"
 version = "0.1.0"
 
