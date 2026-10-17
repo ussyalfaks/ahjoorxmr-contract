@@ -83,4 +83,7 @@ pub trait TokenWhitelistInterface {
         offset: u32,
         limit: u32,
     ) -> soroban_sdk::Vec<crate::SuspensionRecord>;
+
+    /// Check if a token is usable (combined whitelist, suspension, deprecation, and quota check)
+    fn is_token_usable(env: Env, token: Address) -> bool;
 }

@@ -351,6 +351,30 @@ pub enum EscrowErrorExt5 {
     SettlementAmountOutOfRange = 20,
     /// #977: only the proposer may withdraw a settlement offer.
     OnlyProposerCanWithdrawSettlement = 21,
+    /// Revision request feature: only buyer can request revisions.
+    OnlyBuyerCanRequestRevision = 22,
+    /// Revision request feature: only active escrows can have revision requests.
+    RevisionRequestOnlyAllowedActiveEscrow = 23,
+    /// Revision request feature: maximum revision requests reached.
+    MaximumRevisionRequestsReached = 24,
+    /// Revision request feature: no pending revision request exists.
+    NoPendingRevisionRequest = 25,
+    /// Revision request feature: only seller can acknowledge revision.
+    OnlySellerCanAcknowledgeRevision = 26,
+    /// Revision request feature: invalid revision request ID.
+    InvalidRevisionRequestID = 27,
+    /// Revision request feature: revision response deadline not yet passed.
+    RevisionResponseDeadlineNotPassed = 28,
+    /// Arbiter staking: insufficient bond deposited.
+    InsufficientArbiterBond = 29,
+    /// Arbiter staking: arbiter bond not found.
+    ArbiterBondNotFound = 30,
+    /// Arbiter staking: bond amount must be positive.
+    BondAmountMustBePositive = 31,
+    /// Arbiter staking: arbiter has active escrows, cannot withdraw bond.
+    ArbiterHasActiveEscrows = 32,
+    /// Arbiter staking: only admin can set minimum bond.
+    OnlyAdminCanSetMinBond = 33,
 }
 
 /// #977: Mutual settlement offer for a disputed escrow.
@@ -651,6 +675,16 @@ pub struct PartialReleaseRequest {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionRequest {
+    pub request_id: u32,
+    pub requested_by: Address,
+    pub revision_notes_hash: BytesN<32>,
+    pub created_at: u64,
+    pub response_deadline: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscrowTemplateConfig {
     pub arbiter: Address,
     pub token: Address,
@@ -906,6 +940,20 @@ pub enum DataKey3 {
     FeeSponsorship(u32),
     /// #977: open mutual settlement offer for a disputed escrow
     SettlementOffer(u32),
+    /// Revision request feature: pending revision request per escrow
+    PendingRevisionRequest(u32),
+    /// Revision request feature: revision request counter per escrow
+    RevisionRequestCounter(u32),
+    /// Revision request feature: maximum allowed revision requests per escrow
+    MaxRevisionRequests(u32),
+    /// Revision request feature: default response deadline for revision requests (seconds)
+    RevisionResponseDeadline,
+    /// Arbiter staking: bond record per arbiter
+    ArbiterBond(Address),
+    /// Arbiter staking: minimum required bond amount
+    MinArbiterBond,
+    /// Arbiter staking: bond token address
+    ArbiterBondToken,
 }
 
 /// A third party's pre-funded protocol fee for a specific escrow.
@@ -923,6 +971,18 @@ pub struct FeeSponsorship {
     /// True once the sponsorship has been consumed or returned.
     pub settled: bool,
 }
+
+/// Arbiter staking bond record for pool arbiters.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbiterBond {
+    pub arbiter: Address,
+    pub bond_amount: i128,
+    pub token: Address,
+    pub staked_at: u64,
+    pub active_escrow_count: u32,
+}
+
 
 /// #357: On-chain reputation record for an inspector.
 #[contracttype]
@@ -5577,6 +5637,287 @@ impl AhjoorEscrowContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+    }
+
+    /// Buyer requests a revision before releasing funds.
+    /// Bounded by max_revision_requests to prevent abuse.
+    pub fn request_revision(
+        env: Env,
+        buyer: Address,
+        escrow_id: u32,
+        revision_notes_hash: BytesN<32>,
+    ) {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if buyer != escrow.buyer {
+            panic_with_error!(&env, EscrowErrorExt5::OnlyBuyerCanRequestRevision);
+        }
+
+        if escrow.status != EscrowStatus::Active {
+            panic_with_error!(&env, EscrowErrorExt5::RevisionRequestOnlyAllowedActiveEscrow);
+        }
+
+        // Check if there's already a pending request
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey3::PendingRevisionRequest(escrow_id))
+        {
+            panic_with_error!(&env, EscrowErrorExt2::RequestAlreadyPending);
+        }
+
+        // Get or initialize revision counter
+        let counter: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::RevisionRequestCounter(escrow_id))
+            .unwrap_or(0);
+
+        // Get max revision requests (default to 3 if not set)
+        let max_requests: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::MaxRevisionRequests(escrow_id))
+            .unwrap_or(3);
+
+        if counter >= max_requests {
+            panic_with_error!(&env, EscrowErrorExt5::MaximumRevisionRequestsReached);
+        }
+
+        // Get response deadline (default to 7 days if not set)
+        let response_deadline_seconds: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::RevisionResponseDeadline)
+            .unwrap_or(7 * 24 * 60 * 60);
+
+        let now = env.ledger().timestamp();
+        let request = RevisionRequest {
+            request_id: counter + 1,
+            requested_by: buyer.clone(),
+            revision_notes_hash,
+            created_at: now,
+            response_deadline: now + response_deadline_seconds,
+        };
+
+        // Store the request
+        env.storage()
+            .persistent()
+            .set(&DataKey3::PendingRevisionRequest(escrow_id), &request);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::PendingRevisionRequest(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Increment counter
+        env.storage()
+            .persistent()
+            .set(&DataKey3::RevisionRequestCounter(escrow_id), &(counter + 1));
+        env.storage().persistent().extend_ttl(
+            &DataKey3::RevisionRequestCounter(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_revision_requested(&env, escrow_id, counter + 1, buyer);
+    }
+
+    /// Seller acknowledges the revision request and commits to making changes.
+    pub fn acknowledge_revision(env: Env, seller: Address, escrow_id: u32, request_id: u32) {
+        Self::require_not_paused(&env);
+        seller.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if seller != escrow.seller {
+            panic_with_error!(&env, EscrowErrorExt5::OnlySellerCanAcknowledgeRevision);
+        }
+
+        // Get pending request
+        let request: RevisionRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PendingRevisionRequest(escrow_id))
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt5::NoPendingRevisionRequest));
+
+        if request.request_id != request_id {
+            panic_with_error!(&env, EscrowErrorExt5::InvalidRevisionRequestID);
+        }
+
+        // Remove pending request
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::PendingRevisionRequest(escrow_id));
+
+        events::emit_revision_acknowledged(&env, escrow_id, request_id, seller);
+    }
+
+    /// Buyer rejects revision (can escalate to dispute if needed).
+    pub fn reject_revision(
+        env: Env,
+        buyer: Address,
+        escrow_id: u32,
+        request_id: u32,
+        reason_hash: BytesN<32>,
+    ) {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if buyer != escrow.buyer {
+            panic_with_error!(&env, EscrowErrorExt5::OnlyBuyerCanRequestRevision);
+        }
+
+        // Get pending request
+        let request: RevisionRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PendingRevisionRequest(escrow_id))
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt5::NoPendingRevisionRequest));
+
+        if request.request_id != request_id {
+            panic_with_error!(&env, EscrowErrorExt5::InvalidRevisionRequestID);
+        }
+
+        // Remove pending request
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::PendingRevisionRequest(escrow_id));
+
+        events::emit_revision_rejected(&env, escrow_id, request_id, reason_hash);
+    }
+
+    /// Escalate revision request to dispute if seller doesn't respond within deadline.
+    pub fn escalate_revision_to_dispute(env: Env, buyer: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if buyer != escrow.buyer {
+            panic_with_error!(&env, EscrowErrorExt5::OnlyBuyerCanRequestRevision);
+        }
+
+        // Get pending request
+        let request: RevisionRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PendingRevisionRequest(escrow_id))
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt5::NoPendingRevisionRequest));
+
+        // Check if deadline passed
+        let now = env.ledger().timestamp();
+        if now < request.response_deadline {
+            panic_with_error!(&env, EscrowErrorExt5::RevisionResponseDeadlineNotPassed);
+        }
+
+        // Remove pending request
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::PendingRevisionRequest(escrow_id));
+
+        // Escalate to dispute
+        let mut escrow_mut = escrow;
+        let old_status = escrow_mut.status;
+        escrow_mut.status = EscrowStatus::Disputed;
+
+        Self::update_dispute_count(&env, old_status, EscrowStatus::Disputed);
+        Self::record_status_history(&env, escrow_id, EscrowStatus::Disputed);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow_mut);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Create a dispute record
+        let dispute = Dispute {
+            escrow_id,
+            reason: String::from_str(&env, "Revision request escalation"),
+            created_at: now,
+            resolved: false,
+            dispute_amount: escrow_mut.amount,
+            timeout_seconds: None,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Dispute(escrow_id), &dispute);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Dispute(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_revision_escalated_to_dispute(&env, escrow_id, request.request_id);
+    }
+
+    /// Get pending revision request for an escrow.
+    pub fn get_revision_request(env: Env, escrow_id: u32) -> Option<RevisionRequest> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::PendingRevisionRequest(escrow_id))
+    }
+
+    /// Admin function to set maximum allowed revision requests per escrow.
+    pub fn set_max_revision_requests(env: Env, admin: Address, escrow_id: u32, max_requests: u32) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+
+        env.storage()
+            .instance()
+            .set(&DataKey3::MaxRevisionRequests(escrow_id), &max_requests);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin function to set default revision response deadline.
+    pub fn set_revision_response_deadline(env: Env, admin: Address, deadline_seconds: u64) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+
+        if deadline_seconds == 0 {
+            panic_with_error!(&env, EscrowErrorExt2::DeadlineMustBePositive);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey3::RevisionResponseDeadline, &deadline_seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get revision request counter for an escrow.
+    pub fn get_revision_count(env: Env, escrow_id: u32) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::RevisionRequestCounter(escrow_id))
+            .unwrap_or(0)
     }
 
     /// Transfer buyer role in an active escrow to a new address.

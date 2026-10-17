@@ -488,6 +488,48 @@ impl TokenWhitelistContract {
         !env.storage().persistent().has(&DataKey::TokenDeprecation(token))
     }
 
+    /// Combined usability check: returns `true` only if the token is whitelisted,
+    /// not suspended, not deprecated, and passes quota checks (if configured).
+    /// This is the most comprehensive check for whether a token can be used
+    /// in a new transaction or position.
+    pub fn is_token_usable(env: Env, token: Address) -> bool {
+        // First check basic allowance (whitelist + suspension)
+        if !Self::is_token_allowed(env.clone(), token.clone()) {
+            return false;
+        }
+        
+        // Check deprecation status
+        if env.storage().persistent().has(&DataKey::TokenDeprecation(token.clone())) {
+            return false;
+        }
+        
+        // Check if token has quota restrictions and if they're exceeded
+        let quota_key = DataKey::TokenQuota(token.clone());
+        if let Some(quota) = env.storage().persistent().get::<_, TokenQuota>(&quota_key) {
+            let current_ledger = env.ledger().sequence();
+            let bucket_span = quota.period_ledgers / VOLUME_AGG_BUCKET_COUNT;
+            let current_bucket_id = current_ledger / bucket_span;
+            
+            let mut total_volume: i128 = 0;
+            for slot_idx in 0..VOLUME_AGG_BUCKET_COUNT {
+                let key = DataKey::TokenVolumeAggBucket(token.clone(), slot_idx);
+                if let Some(bucket) = env.storage().persistent().get::<_, VolumeAggBucket>(&key) {
+                    if current_bucket_id >= bucket.bucket_id 
+                        && current_bucket_id - bucket.bucket_id < VOLUME_AGG_BUCKET_COUNT {
+                        total_volume = total_volume.saturating_add(bucket.volume);
+                    }
+                }
+            }
+            
+            // If quota is already exceeded, token is not usable
+            if total_volume >= quota.max_volume_per_period {
+                return false;
+            }
+        }
+        
+        true
+    }
+
     /// Marks a whitelisted token as deprecated. The token is rejected by
     /// `is_token_allowed_for_new` immediately, stays valid for
     /// `is_token_allowed` / `is_whitelisted` until `sunset_ledger`, and is

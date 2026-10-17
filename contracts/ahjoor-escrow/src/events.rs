@@ -1840,3 +1840,33 @@ pub struct ArbiterRecused {
 pub fn emit_arbiter_recused(e: &Env, escrow_id: u32, old_arbiter: Address, new_arbiter: Address, reason_hash: BytesN<32>) {
     ArbiterRecused { escrow_id, old_arbiter, new_arbiter, reason_hash }.publish(e);
 }
+
+// --- Revision Request Events ---
+
+pub fn emit_revision_requested(e: &Env, escrow_id: u32, request_id: u32, buyer: Address) {
+    e.events().publish(
+        (Symbol::new(e, "RevisionRequested"),),
+        (escrow_id, request_id, buyer),
+    );
+}
+
+pub fn emit_revision_acknowledged(e: &Env, escrow_id: u32, request_id: u32, seller: Address) {
+    e.events().publish(
+        (Symbol::new(e, "RevisionAcknowledged"),),
+        (escrow_id, request_id, seller),
+    );
+}
+
+pub fn emit_revision_rejected(e: &Env, escrow_id: u32, request_id: u32, reason_hash: BytesN<32>) {
+    e.events().publish(
+        (Symbol::new(e, "RevisionRejected"),),
+        (escrow_id, request_id, reason_hash),
+    );
+}
+
+pub fn emit_revision_escalated_to_dispute(e: &Env, escrow_id: u32, request_id: u32) {
+    e.events().publish(
+        (Symbol::new(e, "RevisionEscalated"),),
+        (escrow_id, request_id),
+    );
+}
