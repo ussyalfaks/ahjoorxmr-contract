@@ -122,6 +122,8 @@ pub struct Refund {
     pub reason: String,
     pub reason_code: u32,
     pub requested_at: u64,
+    /// Ledger sequence at which the refund was requested (#583 SLA tracking).
+    pub requested_ledger: u32,
     pub approved_at: Option<u64>,
     pub processed_at: Option<u64>,
     pub rejected_at: Option<u64>,
@@ -159,6 +161,20 @@ pub struct RefundStats {
     pub total_rejected: u32,
     pub total_processed: u32,
     pub total_amount_refunded: i128,
+}
+
+/// #583: Per-merchant refund SLA tracking.
+/// Running sums of response times (in ledgers) from refund request to merchant
+/// response (approve, reject or counter-offer). Auto-approved requests are
+/// counted separately; missed deadlines increment `missed_count`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantRefundSLA {
+    pub total_response_ledgers: u64,
+    pub responded_count: u32,
+    pub max_response_ledgers: u32,
+    pub missed_count: u32,
+    pub auto_approved_count: u32,
 }
 
 #[derive(Clone)]
@@ -358,6 +374,10 @@ pub enum DataKey2 {
     // --- Feature: Alternate Refund Destination ---
     /// Whether a merchant accepts customer-designated refund destinations (default true).
     AllowAlternateDestination(Address),
+
+    // --- Feature: Merchant Refund SLA Tracking (#583) ---
+    /// Per-merchant refund SLA running sums.
+    MerchantRefundSLA(Address),
 }
 
 mod events;
@@ -978,6 +998,7 @@ impl AhjoorRefundContract {
             reason,
             reason_code,
             requested_at: now,
+            requested_ledger: env.ledger().sequence(),
             approved_at: if is_auto_approved { Some(now) } else { None },
             processed_at: None,
             rejected_at: None,
@@ -1046,6 +1067,11 @@ impl AhjoorRefundContract {
         }
 
         Self::update_stats_on_request(&env, &merchant, effective_amount);
+
+        // #583: Auto-approved requests are counted separately in SLA (not a missed deadline).
+        if is_auto_approved {
+            Self::record_sla_auto_approved(&env, &merchant, false);
+        }
 
         // #166: Record this request timestamp in temporary storage (before customer is moved)
         if cooldown > 0 {
@@ -1184,6 +1210,11 @@ impl AhjoorRefundContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        // #583: Record merchant response time for SLA (non-auto-approved only).
+        if refund.auto_approved_source.is_none() {
+            Self::record_sla_response(&env, &refund.merchant, refund.requested_ledger);
+        }
+
         // #164: Remove from pending queue
         Self::remove_from_pending_queue(&env, refund_id);
 
@@ -1249,6 +1280,11 @@ impl AhjoorRefundContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+
+        // #583: Record merchant response time for SLA (non-auto-approved only).
+        if refund.auto_approved_source.is_none() {
+            Self::record_sla_response(&env, &refund.merchant, refund.requested_ledger);
+        }
 
         // #164: Remove from pending queue
         Self::remove_from_pending_queue(&env, refund_id);
@@ -1361,6 +1397,7 @@ impl AhjoorRefundContract {
             reason: String::from_str(&env, "merchant_initiated"),
             reason_code: 4, // "Other" — merchant-initiated
             requested_at: now,
+            requested_ledger: env.ledger().sequence(),
             approved_at: Some(now),
             processed_at: Some(now),
             rejected_at: None,
@@ -1849,6 +1886,9 @@ impl AhjoorRefundContract {
         );
 
         Self::update_stats_on_process(&env, &refund.merchant, refund.amount);
+
+        // #583: Auto-approval after dispute window = merchant missed the deadline.
+        Self::record_sla_auto_approved(&env, &refund.merchant, true);
 
         events::emit_refund_auto_approved(&env, refund_id, refund.customer, refund.amount);
 
@@ -2530,6 +2570,9 @@ impl AhjoorRefundContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        // #583: Auto-reject after idle window = merchant missed the deadline.
+        Self::record_sla_missed(&env, &refund.merchant);
+
         // #164: Remove from pending queue
         Self::remove_from_pending_queue(&env, refund_id);
 
@@ -2837,6 +2880,7 @@ impl AhjoorRefundContract {
             reason: String::from_str(&env, "escrow_refund"),
             reason_code: 4, // Other
             requested_at: now,
+            requested_ledger: env.ledger().sequence(),
             approved_at: Some(now),
             processed_at: Some(now),
             rejected_at: None,
@@ -2908,6 +2952,39 @@ impl AhjoorRefundContract {
     /// and buyer-trust-tier/abuse-scoring consumers.
     pub fn get_refund_stats_by_merchant(env: &Env, merchant: Address) -> RefundStats {
         Self::get_merchant_refund_stats(env, merchant)
+    }
+
+    /// #583: Get a merchant's refund SLA.
+    /// Returns `(avg_ledgers, max_ledgers, responded, missed)`.
+    /// `avg_ledgers` is the average response time in ledgers across responded
+    /// (non-auto-approved) refunds. `responded` counts merchant actions
+    /// (approve/reject/counter-offer). `missed` counts deadlines exceeded.
+    /// Auto-approved requests are tracked separately in `auto_approved_count`
+    /// (internal) and do not affect `avg_ledgers`/`max_ledgers`/`responded`.
+    pub fn get_merchant_refund_sla(env: &Env, merchant: Address) -> (u32, u32, u32, u32) {
+        let sla: MerchantRefundSLA = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::MerchantRefundSLA(merchant.clone()))
+            .unwrap_or(MerchantRefundSLA {
+                total_response_ledgers: 0,
+                responded_count: 0,
+                max_response_ledgers: 0,
+                missed_count: 0,
+                auto_approved_count: 0,
+            });
+
+        let avg_ledgers = if sla.responded_count > 0 {
+            (sla.total_response_ledgers / sla.responded_count as u64) as u32
+        } else {
+            0
+        };
+        (
+            avg_ledgers,
+            sla.max_response_ledgers,
+            sla.responded_count,
+            sla.missed_count,
+        )
     }
 
     /// Update the refund fee in basis points. Admin only. Max 200 bps (2%).
@@ -3465,6 +3542,65 @@ impl AhjoorRefundContract {
         );
     }
 
+    // --- #583: Merchant Refund SLA Tracking Helpers ---
+
+    fn get_or_init_merchant_sla(env: &Env, merchant: &Address) -> MerchantRefundSLA {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::MerchantRefundSLA(merchant.clone()))
+            .unwrap_or(MerchantRefundSLA {
+                total_response_ledgers: 0,
+                responded_count: 0,
+                max_response_ledgers: 0,
+                missed_count: 0,
+                auto_approved_count: 0,
+            })
+    }
+
+    fn save_merchant_sla(env: &Env, merchant: &Address, sla: &MerchantRefundSLA) {
+        env.storage()
+            .persistent()
+            .set(&DataKey2::MerchantRefundSLA(merchant.clone()), sla);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::MerchantRefundSLA(merchant.clone()),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Record a merchant response (approve/reject/counter-offer) for SLA.
+    fn record_sla_response(env: &Env, merchant: &Address, requested_ledger: u32) {
+        let current_ledger = env.ledger().sequence();
+        let response_ledgers = current_ledger.saturating_sub(requested_ledger);
+        let mut sla = Self::get_or_init_merchant_sla(env, merchant);
+        sla.total_response_ledgers = sla
+            .total_response_ledgers
+            .saturating_add(response_ledgers as u64);
+        sla.responded_count = sla.responded_count.saturating_add(1);
+        if response_ledgers > sla.max_response_ledgers {
+            sla.max_response_ledgers = response_ledgers;
+        }
+        Self::save_merchant_sla(env, merchant, &sla);
+    }
+
+    /// Record an auto-approved refund for SLA. If `missed` is true, the merchant
+    /// missed a deadline before being auto-approved.
+    fn record_sla_auto_approved(env: &Env, merchant: &Address, missed: bool) {
+        let mut sla = Self::get_or_init_merchant_sla(env, merchant);
+        sla.auto_approved_count = sla.auto_approved_count.saturating_add(1);
+        if missed {
+            sla.missed_count = sla.missed_count.saturating_add(1);
+        }
+        Self::save_merchant_sla(env, merchant, &sla);
+    }
+
+    /// Record a missed deadline for SLA (e.g. auto-reject after idle window).
+    fn record_sla_missed(env: &Env, merchant: &Address) {
+        let mut sla = Self::get_or_init_merchant_sla(env, merchant);
+        sla.missed_count = sla.missed_count.saturating_add(1);
+        Self::save_merchant_sla(env, merchant, &sla);
+    }
+
     fn validate_refund_tiers(tiers: &Vec<(u64, u32)>) {
         let mut prev_max = 0u64;
         for i in 0..tiers.len() {
@@ -3811,6 +3947,7 @@ impl AhjoorRefundContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        let was_requested = refund.status == RefundStatus::Requested;
         refund.status = RefundStatus::CounterOffered;
         env.storage()
             .persistent()
@@ -3820,6 +3957,11 @@ impl AhjoorRefundContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+
+        // #583: Record merchant response time for first counter-offer (non-auto-approved only).
+        if was_requested && refund.auto_approved_source.is_none() {
+            Self::record_sla_response(&env, &refund.merchant, refund.requested_ledger);
+        }
 
         events::emit_refund_counter_offered(&env, refund_id, merchant, amount, offer.expiry);
 
@@ -4144,6 +4286,10 @@ impl AhjoorRefundContract {
                         PERSISTENT_LIFETIME_THRESHOLD,
                         PERSISTENT_BUMP_AMOUNT,
                     );
+                    // #583: Record merchant response time for SLA (non-auto-approved only).
+                    if refund.auto_approved_source.is_none() {
+                        Self::record_sla_response(&env, &refund.merchant, refund.requested_ledger);
+                    }
                     Self::remove_from_pending_queue(&env, refund_id);
                     Self::decrement_fraud_score(&env, &refund.customer);
                     Self::update_stats_on_approve(&env, &refund.merchant);

@@ -5188,3 +5188,176 @@ fn test_remove_arbiter_valid_size_batch_still_works() {
     let result = s.client.try_remove_arbiter(&s.admin, &arbiter, &escrow_ids);
     assert!(result.is_ok());
 }
+
+// ===========================================================================
+//  Issue #586: Escrow Document Attachment
+// ===========================================================================
+
+#[test]
+fn test_attach_document_buyer() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(&buyer, &seller, &arbiter, &250, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
+
+    let doc_hash = BytesN::from_array(&s.env, &[1u8; 32]);
+    let kind = Symbol::new(&s.env, "contract");
+
+    s.client.attach_document(&buyer, &escrow_id, &doc_hash, &kind);
+
+    let docs = s.client.get_documents(&escrow_id, &0, &10);
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs.get(0).unwrap().party, buyer);
+    assert_eq!(docs.get(0).unwrap().doc_hash, doc_hash);
+    assert_eq!(docs.get(0).unwrap().kind, kind);
+}
+
+#[test]
+fn test_attach_document_seller() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(&buyer, &seller, &arbiter, &250, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
+
+    let doc_hash = BytesN::from_array(&s.env, &[2u8; 32]);
+    let kind = Symbol::new(&s.env, "spec");
+
+    s.client.attach_document(&seller, &escrow_id, &doc_hash, &kind);
+
+    let docs = s.client.get_documents(&escrow_id, &0, &10);
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs.get(0).unwrap().party, seller);
+    assert_eq!(docs.get(0).unwrap().doc_hash, doc_hash);
+    assert_eq!(docs.get(0).unwrap().kind, kind);
+}
+
+#[test]
+fn test_attach_document_arbiter() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(&buyer, &seller, &arbiter, &250, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
+
+    let doc_hash = BytesN::from_array(&s.env, &[3u8; 32]);
+    let kind = Symbol::new(&s.env, "deliverable");
+
+    s.client.attach_document(&arbiter, &escrow_id, &doc_hash, &kind);
+
+    let docs = s.client.get_documents(&escrow_id, &0, &10);
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs.get(0).unwrap().party, arbiter);
+    assert_eq!(docs.get(0).unwrap().doc_hash, doc_hash);
+    assert_eq!(docs.get(0).unwrap().kind, kind);
+}
+
+#[test]
+fn test_attach_document_outsider_rejected() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    let outsider = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(&buyer, &seller, &arbiter, &250, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
+
+    let doc_hash = BytesN::from_array(&s.env, &[4u8; 32]);
+    let kind = Symbol::new(&s.env, "contract");
+
+    let result = s.client.try_attach_document(&outsider, &escrow_id, &doc_hash, &kind);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_attach_document_append_only_history() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(&buyer, &seller, &arbiter, &250, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
+
+    let doc1 = BytesN::from_array(&s.env, &[10u8; 32]);
+    let doc2 = BytesN::from_array(&s.env, &[20u8; 32]);
+    let doc3 = BytesN::from_array(&s.env, &[30u8; 32]);
+
+    s.client.attach_document(&buyer, &escrow_id, &doc1, &Symbol::new(&s.env, "contract"));
+    s.client.attach_document(&seller, &escrow_id, &doc2, &Symbol::new(&s.env, "spec"));
+    s.client.attach_document(&arbiter, &escrow_id, &doc3, &Symbol::new(&s.env, "deliverable"));
+
+    let docs = s.client.get_documents(&escrow_id, &0, &10);
+    assert_eq!(docs.len(), 3);
+    assert_eq!(docs.get(0).unwrap().doc_hash, doc1);
+    assert_eq!(docs.get(0).unwrap().party, buyer);
+    assert_eq!(docs.get(1).unwrap().doc_hash, doc2);
+    assert_eq!(docs.get(1).unwrap().party, seller);
+    assert_eq!(docs.get(2).unwrap().doc_hash, doc3);
+    assert_eq!(docs.get(2).unwrap().party, arbiter);
+}
+
+#[test]
+fn test_attach_document_pagination() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(&buyer, &seller, &arbiter, &250, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
+
+    for i in 0..7u32 {
+        let doc_hash = BytesN::from_array(&s.env, &[i as u8; 32]);
+        s.client.attach_document(&buyer, &escrow_id, &doc_hash, &Symbol::new(&s.env, "contract"));
+    }
+
+    let page1 = s.client.get_documents(&escrow_id, &0, &3);
+    assert_eq!(page1.len(), 3);
+
+    let page2 = s.client.get_documents(&escrow_id, &3, &3);
+    assert_eq!(page2.len(), 3);
+
+    let page3 = s.client.get_documents(&escrow_id, &6, &3);
+    assert_eq!(page3.len(), 1);
+}
+
+#[test]
+fn test_attach_document_per_escrow_cap() {
+    let s = setup();
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(&buyer, &seller, &arbiter, &250, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
+
+    // Fill up to the cap (MAX_DOCUMENTS_PER_ESCROW = 50)
+    for i in 0..50u32 {
+        let doc_hash = BytesN::from_array(&s.env, &[i as u8; 32]);
+        s.client.attach_document(&buyer, &escrow_id, &doc_hash, &Symbol::new(&s.env, "contract"));
+    }
+
+    let docs = s.client.get_documents(&escrow_id, &0, &100);
+    assert_eq!(docs.len(), 50);
+
+    // The 51st document should be rejected
+    let doc_hash = BytesN::from_array(&s.env, &[99u8; 32]);
+    let result = s.client.try_attach_document(&buyer, &escrow_id, &doc_hash, &Symbol::new(&s.env, "contract"));
+    assert!(result.is_err());
+}

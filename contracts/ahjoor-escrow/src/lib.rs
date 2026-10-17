@@ -351,6 +351,10 @@ pub enum EscrowErrorExt5 {
     SettlementAmountOutOfRange = 20,
     /// #977: only the proposer may withdraw a settlement offer.
     OnlyProposerCanWithdrawSettlement = 21,
+    /// #586: caller is not the buyer, seller, or arbiter of the escrow.
+    NotAuthorizedToAttachDocument = 22,
+    /// #586: the per-escrow document cap has been reached.
+    DocumentsCapReached = 23,
 }
 
 /// #977: Mutual settlement offer for a disputed escrow.
@@ -360,6 +364,16 @@ pub struct SettlementOffer {
     pub proposer: Address,
     pub seller_amount: i128,
     pub created_at: u64,
+}
+
+/// #586: A document hash attached to an escrow by a party, with timestamp.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Document {
+    pub doc_hash: BytesN<32>,
+    pub party: Address,
+    pub kind: Symbol,
+    pub attached_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -906,6 +920,8 @@ pub enum DataKey3 {
     FeeSponsorship(u32),
     /// #977: open mutual settlement offer for a disputed escrow
     SettlementOffer(u32),
+    /// #586: ordered append-only document history per escrow (escrow_id → Vec<Document>).
+    EscrowDocuments(u32),
 }
 
 /// A third party's pre-funded protocol fee for a specific escrow.
@@ -986,6 +1002,8 @@ const DEFAULT_SELLER_TRANSFER_VETO_WINDOW: u32 = 200; // #244: default buyer vet
 const DEFAULT_CANCELLATION_RESPONSE_WINDOW: u64 = 86400; // #229: default 1 day in seconds
 /// #366: default admin veto override window — 48 hours
 const DEFAULT_VETO_OVERRIDE_WINDOW_SECONDS: u64 = 48 * 60 * 60;
+/// #586: maximum number of documents that can be attached to a single escrow.
+const MAX_DOCUMENTS_PER_ESCROW: u32 = 50;
 
 // ── #319: Bounty Board for Open Competitive Work Assignment ──────────────────
 
@@ -2709,6 +2727,87 @@ impl AhjoorEscrowContract {
         );
 
         events::emit_evidence_submitted(&env, escrow_id, party, evidence_hash);
+    }
+
+    /// #586: Attach a document hash to an escrow with an append-only history.
+    /// Restricted to the buyer, seller, or arbiter of the escrow.
+    /// Caps the number of documents per escrow at `MAX_DOCUMENTS_PER_ESCROW`.
+    pub fn attach_document(
+        env: Env,
+        party: Address,
+        escrow_id: u32,
+        doc_hash: BytesN<32>,
+        kind: Symbol,
+    ) {
+        Self::require_not_paused(&env);
+        party.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if party != escrow.buyer && party != escrow.seller && party != escrow.arbiter {
+            panic_with_error!(&env, EscrowErrorExt5::NotAuthorizedToAttachDocument);
+        }
+
+        let key = DataKey3::EscrowDocuments(escrow_id);
+        let mut docs: Vec<Document> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        if docs.len() >= MAX_DOCUMENTS_PER_ESCROW {
+            panic_with_error!(&env, EscrowErrorExt5::DocumentsCapReached);
+        }
+
+        docs.push_back(Document {
+            doc_hash,
+            party: party.clone(),
+            kind,
+            attached_at: env.ledger().timestamp(),
+        });
+
+        env.storage().persistent().set(&key, &docs);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_document_attached(
+            &env,
+            escrow_id,
+            party,
+            doc_hash,
+            kind,
+            env.ledger().timestamp(),
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #586: Get a page of documents attached to an escrow, oldest first.
+    /// `start` is the offset; `limit` is the max number to return.
+    pub fn get_documents(env: Env, escrow_id: u32, start: u32, limit: u32) -> Vec<Document> {
+        let key = DataKey3::EscrowDocuments(escrow_id);
+        let all: Vec<Document> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+        let total = all.len();
+        let start_idx = start.min(total);
+        let end_idx = (start_idx + limit).min(total);
+        let mut result = Vec::new(&env);
+        for i in start_idx..end_idx {
+            result.push_back(all.get(i).unwrap());
+        }
+        result
     }
 
     /// Returns evidence submissions for buyer and seller in one call.
