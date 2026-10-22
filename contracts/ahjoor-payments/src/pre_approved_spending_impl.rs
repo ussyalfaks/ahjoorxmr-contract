@@ -505,7 +505,40 @@ impl PreApprovedSpendingImpl {
         allowances
     }
 
-    /// Verify consent is valid
+    /// Verifies if a consent record is currently valid and active.
+    ///
+    /// This is a lightweight validation function used internally by the pre-approved
+    /// spending module to check consent status before processing allowance operations.
+    /// It validates both the consent's status and temporal validity.
+    ///
+    /// # Arguments
+    /// * `env` - Reference to the contract environment
+    /// * `consent_id` - The unique ID of the consent record to verify
+    ///
+    /// # Returns
+    /// Returns `true` if:
+    /// * The consent record exists
+    /// * The consent status is `Active`
+    /// * Current timestamp <= consent's `expires_at` timestamp
+    ///
+    /// Returns `false` if the consent doesn't exist, is not active, or has expired.
+    ///
+    /// # Storage
+    /// Reads the `ConsentRecord` from persistent storage using the consent key.
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// // Check consent validity before processing an allowance
+    /// if verify_consent(&env, consent_id) {
+    ///     // Proceed with spending allowance operation
+    /// } else {
+    ///     // Reject operation - invalid or expired consent
+    /// }
+    /// ```
+    ///
+    /// # Note
+    /// This differs from `is_consent_valid()` in the main contract, which uses
+    /// a natural key lookup. This function requires the consent_id directly.
     pub fn verify_consent(env: &Env, consent_id: u32) -> bool {
         if let Some(consent) = env.storage().persistent().get::<_, ConsentRecord>(&consent_key(env, consent_id)) {
             let now = env.ledger().timestamp();
