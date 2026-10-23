@@ -5326,9 +5326,43 @@ impl AhjoorPaymentsContract {
 
     // --- Notification Keys ---
 
-    /// Merchant registers a notification key for event routing.
-    /// The key is included in all payment-related events for this merchant.
-    /// Key size is bounded to prevent storage abuse (max 128 bytes).
+    /// Registers a notification key for merchant event routing and encryption.
+    ///
+    /// Merchants use this to register a public key or identifier that will be included
+    /// in all payment-related events. Integrators can use this key for:
+    /// * End-to-end encryption of sensitive payment data in events
+    /// * Webhook signature verification
+    /// * Event routing and filtering in multi-tenant systems
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `merchant` - Address of the merchant (must authenticate)
+    /// * `key` - The notification key as bytes (1-128 bytes)
+    ///
+    /// # Panics
+    /// * If contract is paused
+    /// * If key exceeds 128 bytes
+    /// * If key is empty
+    ///
+    /// # Storage
+    /// * Stores key in persistent storage under `MerchantNotificationKey`
+    /// * Extends TTL for persistent availability
+    ///
+    /// # Events
+    /// Emits `NotificationKeyRegistered` event with merchant address and key.
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// // Register a base64-encoded public key
+    /// let key = Bytes::from_slice(&env, b"ssh-ed25519 AAAAC3...");
+    /// contract.register_notification_key(env, merchant_addr, key);
+    /// ```
+    ///
+    /// # Integration Notes
+    /// * This sets or replaces the current notification key
+    /// * For key rotation with backward compatibility, use `rotate_notification_key()`
+    /// * All subsequent events for this merchant will include this key
+    /// * The key size limit (128 bytes) prevents storage abuse
     pub fn register_notification_key(env: Env, merchant: Address, key: Bytes) {
         Self::require_not_paused(&env);
         merchant.require_auth();
@@ -5383,8 +5417,54 @@ impl AhjoorPaymentsContract {
     // Notification Key Rotation (#377)
     // =========================================================================
 
-    /// Rotate notification key with overlap window for backward-compatible decryption.
-    /// Sets old key's valid_until to now + overlap_window, adds new key with valid_from = now.
+    /// Rotates a merchant's notification key with an overlap window for backward compatibility.
+    ///
+    /// This function enables secure key rotation by:
+    /// 1. Setting the old key's `valid_until` to `now + overlap_window`
+    /// 2. Activating the new key with `valid_from = now`
+    /// 3. Archiving the old key in rotation history
+    ///
+    /// During the overlap window, integrators can decrypt events using either the old or new key,
+    /// preventing service disruption during key transitions.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `merchant` - Address of the merchant (must authenticate)
+    /// * `new_key` - The new notification key as bytes (1-128 bytes)
+    ///
+    /// # Panics
+    /// * If contract is paused
+    /// * If new key exceeds 128 bytes
+    /// * If new key is empty
+    ///
+    /// # Storage
+    /// * Updates active key to `new_key` in `MerchantNotificationKey`
+    /// * Archives old key in `NotificationKeyHistory` with validity window
+    /// * Maintains up to `MAX_NOTIFICATION_KEY_HISTORY` (5) historical entries
+    /// * Extends TTL for persistent storage
+    ///
+    /// # Overlap Window
+    /// The overlap duration is configured via `set_notification_overlap_window()` (admin only).
+    /// Default: 30 days (2,592,000 seconds).
+    ///
+    /// # Events
+    /// Emits `NotificationKeyRotated` event with merchant, old key hash, new key, and overlap window.
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// // Rotate to a new key with automatic overlap
+    /// let new_key = Bytes::from_slice(&env, b"ssh-ed25519 NEWKEY...");
+    /// contract.rotate_notification_key(env, merchant_addr, new_key);
+    ///
+    /// // During overlap period, integrators can decrypt with either key
+    /// // After overlap expires, only new key is valid
+    /// ```
+    ///
+    /// # Integration Notes
+    /// * Use `get_notification_key_at()` to retrieve the historically valid key for past events
+    /// * Use `get_notification_key_history()` to see all recent key rotations
+    /// * Integrators should maintain both old and new keys during the overlap window
+    /// * Historical keys are automatically pruned beyond `MAX_NOTIFICATION_KEY_HISTORY` entries
     pub fn rotate_notification_key(
         env: Env,
         merchant: Address,
@@ -5484,7 +5564,51 @@ impl AhjoorPaymentsContract {
             .get(&DataKey::MerchantNotificationKey(merchant))
     }
 
-    /// Get notification key valid at a specific timestamp (historical lookup).
+    /// Retrieves the notification key that was valid at a specific timestamp (historical lookup).
+    ///
+    /// This function enables integrators to:
+    /// * Decrypt or verify historical events using the key active when the event was emitted
+    /// * Audit notification key usage over time
+    /// * Recover encrypted event data after key rotations
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `merchant` - Address of the merchant
+    /// * `timestamp` - Unix timestamp (seconds since epoch) to query
+    ///
+    /// # Returns
+    /// * `Some(key)` if a key was valid at the specified timestamp
+    /// * `None` if no key was registered or valid at that time
+    ///
+    /// # Lookup Logic
+    /// * If `timestamp >= now`, returns the current active key
+    /// * If `timestamp < now`, searches the rotation history for a key where:
+    ///   `valid_from <= timestamp <= valid_until`
+    ///
+    /// # Storage
+    /// * Reads from `MerchantNotificationKey` (current active key)
+    /// * Reads from `NotificationKeyHistory` (up to 5 historical entries)
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// // Retrieve key used at a past timestamp (e.g., from event metadata)
+    /// let event_timestamp = 1704067200; // 2024-01-01 00:00:00 UTC
+    /// let historical_key = contract.get_notification_key_at(
+    ///     env,
+    ///     merchant_addr,
+    ///     event_timestamp,
+    /// );
+    ///
+    /// if let Some(key) = historical_key {
+    ///     // Decrypt event data using this key
+    /// }
+    /// ```
+    ///
+    /// # Integration Notes
+    /// * Essential for decrypting archived events after key rotations
+    /// * History is limited to `MAX_NOTIFICATION_KEY_HISTORY` (5) entries
+    /// * Older keys beyond this limit are not retrievable
+    /// * Returns current key for future or current timestamps
     pub fn get_notification_key_at(
         env: Env,
         merchant: Address,
@@ -5516,7 +5640,55 @@ impl AhjoorPaymentsContract {
         None
     }
 
-    /// Return the full notification key rotation history for a merchant.
+    /// Returns the complete notification key rotation history for a merchant.
+    ///
+    /// This function provides a full audit trail of all recent notification key rotations,
+    /// including each key's validity window. Useful for:
+    /// * Debugging key rotation issues
+    /// * Auditing notification key lifecycle
+    /// * Verifying overlap window configurations
+    /// * Tracking key usage patterns
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `merchant` - Address of the merchant
+    ///
+    /// # Returns
+    /// A vector of `NotificationKeyEntry` records, each containing:
+    /// * `key` - The historical notification key (bytes)
+    /// * `key_hash` - SHA-256 hash of the key for identification
+    /// * `valid_from` - Unix timestamp when this key became valid
+    /// * `valid_until` - Unix timestamp when this key expired
+    ///
+    /// Returns an empty vector if no rotation history exists (first key or no rotations yet).
+    ///
+    /// # Storage
+    /// Reads from `NotificationKeyHistory` in persistent storage.
+    /// History is capped at `MAX_NOTIFICATION_KEY_HISTORY` (5) most recent entries.
+    ///
+    /// # History Maintenance
+    /// * Oldest entries are automatically pruned when exceeding the limit
+    /// * Only rotated keys appear in history (current active key is not included)
+    /// * Use `get_active_notification_key()` for the current key
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// // Retrieve full rotation history
+    /// let history = contract.get_notification_key_history(env, merchant_addr);
+    ///
+    /// for entry in history.iter() {
+    ///     // entry.key - the historical key
+    ///     // entry.key_hash - unique identifier
+    ///     // entry.valid_from - start of validity
+    ///     // entry.valid_until - end of validity
+    /// }
+    /// ```
+    ///
+    /// # Integration Notes
+    /// * Historical entries are ordered by rotation time (implementation-dependent)
+    /// * Each entry includes the overlap window period in its `valid_until` timestamp
+    /// * Use this for compliance auditing and key lifecycle management
+    /// * Combine with `get_notification_key_at()` for timestamp-based key retrieval
     pub fn get_notification_key_history(
         env: Env,
         merchant: Address,
@@ -10688,8 +10860,50 @@ impl AhjoorPaymentsContract {
     // =========================================================================
 
     /// Create a consent record for a customer to sign terms without token transfer.
-    /// Merchant calls this to create a record keyed by (merchant, customer, terms_version).
-    /// Returns the consent_id.
+    /// Creates a new consent record for pre-approved spending authorization.
+    ///
+    /// This function allows merchants to create a consent record that customers can sign
+    /// to authorize future automatic payments. The consent is keyed by the combination of
+    /// merchant, customer, and terms version, ensuring unique agreements per version.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `merchant` - Address of the merchant creating the consent record (must authenticate)
+    /// * `customer` - Address of the customer who will sign the consent
+    /// * `terms_hash` - SHA-256 hash of the terms and conditions document
+    /// * `terms_version` - Version identifier for the terms (1-64 bytes, e.g., "v2.1", "2024-Q1")
+    /// * `expiry_ledger` - Ledger sequence when this consent expires (must be in the future)
+    ///
+    /// # Returns
+    /// Returns the unique `consent_id` assigned to this consent record.
+    ///
+    /// # Panics
+    /// * If contract is paused
+    /// * If `terms_version` is empty or exceeds 64 bytes
+    /// * If `expiry_ledger` is not in the future
+    ///
+    /// # Storage
+    /// * Creates a `ConsentRecord` in persistent storage with TTL extension
+    /// * Creates an index mapping `(merchant, customer, terms_version)` to `consent_id`
+    ///
+    /// # Events
+    /// Emits `ConsentRecordCreated` event with consent details.
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// let consent_id = contract.create_consent_record(
+    ///     env,
+    ///     merchant_addr,
+    ///     customer_addr,
+    ///     terms_hash,
+    ///     String::from_str(&env, "v1.0"),
+    ///     env.ledger().sequence() + 5_000_000, // ~290 days at 5s/ledger
+    /// );
+    /// ```
+    ///
+    /// # Integration Notes
+    /// After creating a consent record, the customer must call `sign_consent()` to activate it.
+    /// Use `is_consent_valid()` to check if a signed consent is active before processing payments.
     pub fn create_consent_record(
         env: Env,
         merchant: Address,
@@ -10905,8 +11119,44 @@ impl AhjoorPaymentsContract {
         record_id
     }
 
-    /// Customer signs a consent record, authenticating their acceptance.
-    /// No token transfer occurs. Consent record must not be expired or revoked.
+    /// Customer signs a consent record to authorize pre-approved spending.
+    ///
+    /// This function allows customers to authenticate and accept the terms of a consent record
+    /// created by a merchant. Signing activates the consent, enabling automatic payments according
+    /// to the agreed terms. No token transfer occurs during signing.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `customer` - Address of the customer signing the consent (must authenticate)
+    /// * `consent_id` - The unique ID of the consent record to sign
+    ///
+    /// # Panics
+    /// * If contract is paused
+    /// * If consent record not found
+    /// * If consent has been revoked
+    /// * If consent already signed
+    /// * If consent has expired
+    /// * If caller is not the designated customer for this consent
+    ///
+    /// # Storage
+    /// Updates the `ConsentRecord` with:
+    /// * `is_signed` set to `true`
+    /// * `signed_at` timestamp set to current ledger timestamp
+    /// * TTL extended for persistent storage
+    ///
+    /// # Events
+    /// Emits `ConsentSigned` event with consent ID, customer address, and timestamp.
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// // Customer signs the consent created by merchant
+    /// contract.sign_consent(env, customer_addr, consent_id);
+    /// ```
+    ///
+    /// # Integration Notes
+    /// After signing, the merchant can process automatic payments using this consent.
+    /// The consent remains valid until expiration or revocation.
+    /// Use `is_consent_valid()` before each automatic payment to verify consent status.
     pub fn sign_consent(env: Env, customer: Address, consent_id: u32) {
         customer.require_auth();
         Self::require_not_paused(&env);
@@ -10950,7 +11200,49 @@ impl AhjoorPaymentsContract {
         events::emit_consent_signed(&env, consent_id, customer, consent.signed_at);
     }
 
-    /// Check if a consent record is valid (signed, not expired, not revoked).
+    /// Verifies if a consent record is currently valid for processing automatic payments.
+    ///
+    /// This is a read-only validation function that checks whether a consent exists and meets
+    /// all validity requirements. It uses the natural key `(merchant, customer, terms_version)`
+    /// to look up the consent and validate its state.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `merchant` - Address of the merchant
+    /// * `customer` - Address of the customer
+    /// * `terms_version` - Version identifier of the terms (must match exactly)
+    ///
+    /// # Returns
+    /// Returns `true` if:
+    /// * A consent record exists for the given key
+    /// * The consent is signed by the customer
+    /// * The consent has not been revoked
+    /// * The consent has not expired (expiry_ledger > current ledger)
+    ///
+    /// Returns `false` otherwise (including if no consent exists).
+    ///
+    /// # Storage
+    /// * Reads from the consent index and consent record in persistent storage
+    /// * Extends TTL on successful read to maintain storage availability
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// // Before processing an automatic payment
+    /// let is_valid = contract.is_consent_valid(
+    ///     env,
+    ///     merchant_addr,
+    ///     customer_addr,
+    ///     String::from_str(&env, "v1.0"),
+    /// );
+    ///
+    /// if is_valid {
+    ///     // Proceed with automatic payment
+    /// }
+    /// ```
+    ///
+    /// # Integration Notes
+    /// Call this before every automatic payment to ensure consent is still active.
+    /// This prevents processing payments on expired, revoked, or unsigned consents.
     pub fn is_consent_valid(
         env: Env,
         merchant: Address,
@@ -10987,8 +11279,48 @@ impl AhjoorPaymentsContract {
         false
     }
 
-    /// Revoke a consent record (e.g., on account closure).
-    /// Only the merchant or admin can revoke.
+    /// Revokes a consent record, immediately invalidating it for future automatic payments.
+    ///
+    /// This function allows merchants or admins to revoke a consent record, preventing
+    /// any further automatic payments under that consent. Common use cases include
+    /// account closures, customer requests, or terms violations.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `caller` - Address revoking the consent (must be merchant or admin, must authenticate)
+    /// * `consent_id` - The unique ID of the consent record to revoke
+    ///
+    /// # Authorization
+    /// Only the following can revoke a consent:
+    /// * The merchant who created the consent
+    /// * The contract admin
+    ///
+    /// # Panics
+    /// * If contract is paused
+    /// * If consent record not found
+    /// * If caller is neither the merchant nor the admin
+    ///
+    /// # Storage
+    /// Updates the `ConsentRecord` with:
+    /// * `is_revoked` set to `true`
+    /// * TTL extended for persistent storage
+    ///
+    /// # Events
+    /// Emits `ConsentRevoked` event with consent ID and caller address.
+    ///
+    /// # Example Usage
+    /// ```ignore
+    /// // Merchant revokes consent (e.g., on customer account closure)
+    /// contract.revoke_consent(env, merchant_addr, consent_id);
+    ///
+    /// // Admin revokes consent (e.g., on policy violation)
+    /// contract.revoke_consent(env, admin_addr, consent_id);
+    /// ```
+    ///
+    /// # Integration Notes
+    /// After revocation, `is_consent_valid()` will return `false` for this consent.
+    /// Revocation is permanent and cannot be undone - a new consent must be created.
+    /// The revoked record remains in storage for audit purposes.
     pub fn revoke_consent(env: Env, caller: Address, consent_id: u32) {
         caller.require_auth();
         Self::require_not_paused(&env);
