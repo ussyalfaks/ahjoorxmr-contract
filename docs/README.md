@@ -5,6 +5,7 @@ reference docs for the repository, grouped by contract.
 
 ## `ahjoor-payments`
 
+- [**Payout Address Rotation**](payments-payout-address-rotation.md) — How merchants can securely change their payout address with a delay period for stolen-key protection.
 - [**Failed Auto-Debit Retry Queue in ahjoor-payments**](payments-retry-queue.md) — Configurable exponential back-off retry queue for failed recurring debits, early customer retry trigger, max attempt handling, and recurring invoice cycle integration.
 - [**Merchant Collateral in ahjoor-payments**](payments-collateral.md) — Overview of required collateral deposits, minimum balances, withdrawals, and dispute slashing.
 - [**Merchant Referral Program in ahjoor-payments**](payments-referral.md) — Referral registration, commission accrual on referred-merchant fees, the commission window, and claiming accrued balances.
@@ -37,6 +38,7 @@ reference docs for the repository, grouped by contract.
 
 ## `ahjoor-escrow`
 
+- [**Escrow Time-Based Release**](escrow-time-based-release.md) — Comparison of three time-driven release modes: time-locked escrows, inactivity-triggered release, and scheduled tranche releases.
 - [**Open Bounty Board & Milestone Bounties**](bounty-board.md) — Open competitive work assignment flow, solver claiming, submission review, rejection rounds, cancellation refund, and milestone-gated verifier sign-offs.
 - [**Escrow Auto-Renewal**](escrow-auto-renewal.md) — How buyers can pre-approve renewal cycles for recurring service agreements, how auto-renewals are triggered on release, and how buyers can cancel future renewals.
 - [**Multi-Party Approval**](escrow-multiparty-approval.md) — N-of-M release approval configuration, threshold requirements, approver voting, and interactions with release and dispute flows.
