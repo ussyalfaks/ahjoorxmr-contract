@@ -126,7 +126,7 @@ fn test_inspector_score_initialized_on_first_ruling() {
     let req = make_request(&env, &seller, &arbiter, &token, 1000);
     let eid = client.create_escrow_with_inspector(&buyer, &req, &Some(inspector.clone()));
     client.dispute_escrow(&buyer, &eid, &String::from_str(&env, "test"), &1000);
-    client.resolve_dispute(&arbiter, &eid, &50);
+    client.resolve_dispute(&arbiter, &eid, &50, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     // First ruling: initialized to neutral (1, 1, 10_000)
     let (total, correct, accuracy) = client.get_inspector_score(&inspector);
@@ -148,10 +148,10 @@ fn test_inspector_score_increases_on_ruling() {
     let e2 = client.create_escrow_with_inspector(&buyer, &req, &Some(inspector.clone()));
 
     client.dispute_escrow(&buyer, &e1, &String::from_str(&env, "d"), &1000);
-    client.resolve_dispute(&arbiter, &e1, &0);
+    client.resolve_dispute(&arbiter, &e1, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     client.dispute_escrow(&buyer, &e2, &String::from_str(&env, "d"), &1000);
-    client.resolve_dispute(&arbiter, &e2, &0);
+    client.resolve_dispute(&arbiter, &e2, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     // Two rulings: first initializes to (1,1), second increments to (2,2)
     let (total, correct, _accuracy) = client.get_inspector_score(&inspector);
@@ -167,7 +167,7 @@ fn test_inspector_score_decreases_on_appeal() {
     let req = make_request(&env, &seller, &arbiter, &token, 1000);
     let eid = client.create_escrow_with_inspector(&buyer, &req, &Some(inspector.clone()));
     client.dispute_escrow(&buyer, &eid, &String::from_str(&env, "d"), &1000);
-    client.resolve_dispute(&arbiter, &eid, &0);
+    client.resolve_dispute(&arbiter, &eid, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     // Score after ruling: (1, 1)
     let (total_before, correct_before, _) = client.get_inspector_score(&inspector);
@@ -194,7 +194,7 @@ fn test_low_score_inspector_blocked_from_high_value_escrow() {
     let req = make_request(&env, &seller, &arbiter, &token, 500);
     let e1 = client.create_escrow_with_inspector(&buyer, &req, &Some(inspector.clone()));
     client.dispute_escrow(&buyer, &e1, &String::from_str(&env, "d"), &500);
-    client.resolve_dispute(&arbiter, &e1, &0);
+    client.resolve_dispute(&arbiter, &e1, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
     client.appeal_inspector_ruling(&admin, &e1);
 
     // Set threshold: min 5000 bps for escrows above 1000
@@ -217,7 +217,7 @@ fn test_replaced_inspector_score_penalized() {
     let req = make_request(&env, &seller, &arbiter, &token, 1000);
     let first_escrow = client.create_escrow_with_inspector(&buyer, &req, &Some(old_inspector.clone()));
     client.dispute_escrow(&buyer, &first_escrow, &String::from_str(&env, "d"), &1000);
-    client.resolve_dispute(&arbiter, &first_escrow, &0);
+    client.resolve_dispute(&arbiter, &first_escrow, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     let (total_before, correct_before, accuracy_before) = client.get_inspector_score(&old_inspector);
     assert_eq!((total_before, correct_before, accuracy_before), (1, 1, 10_000));
@@ -310,18 +310,18 @@ fn test_multiple_inspectors_independent_scores() {
     let req1 = make_request(&env, &seller, &arbiter, &token, 1000);
     let e1 = client.create_escrow_with_inspector(&buyer, &req1, &Some(inspector1.clone()));
     client.dispute_escrow(&buyer, &e1, &String::from_str(&env, "d"), &1000);
-    client.resolve_dispute(&arbiter, &e1, &0);
+    client.resolve_dispute(&arbiter, &e1, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     // Inspector 2: two successful rulings
     let req2 = make_request(&env, &seller, &arbiter, &token, 1000);
     let e2 = client.create_escrow_with_inspector(&buyer, &req2, &Some(inspector2.clone()));
     client.dispute_escrow(&buyer, &e2, &String::from_str(&env, "d"), &1000);
-    client.resolve_dispute(&arbiter, &e2, &0);
+    client.resolve_dispute(&arbiter, &e2, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     let req3 = make_request(&env, &seller, &arbiter, &token, 1000);
     let e3 = client.create_escrow_with_inspector(&buyer, &req3, &Some(inspector2.clone()));
     client.dispute_escrow(&buyer, &e3, &String::from_str(&env, "d"), &1000);
-    client.resolve_dispute(&arbiter, &e3, &0);
+    client.resolve_dispute(&arbiter, &e3, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     // Verify independent scores
     let (total1, correct1, _) = client.get_inspector_score(&inspector1);
@@ -343,7 +343,7 @@ fn test_inspector_score_accuracy_calculation() {
         let req = make_request(&env, &seller, &arbiter, &token, 1000);
         let eid = client.create_escrow_with_inspector(&buyer, &req, &Some(inspector.clone()));
         client.dispute_escrow(&buyer, &eid, &String::from_str(&env, "dispute"), &1000);
-        client.resolve_dispute(&arbiter, &eid, &0);
+        client.resolve_dispute(&arbiter, &eid, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
         
         // Appeal the last one
         if i == 2 {
@@ -413,7 +413,7 @@ fn test_high_score_inspector_allowed_high_value_escrow() {
         let req = make_request(&env, &seller, &arbiter, &token, 500);
         let eid = client.create_escrow_with_inspector(&buyer, &req, &Some(inspector.clone()));
         client.dispute_escrow(&buyer, &eid, &String::from_str(&env, "d"), &500);
-        client.resolve_dispute(&arbiter, &eid, &0);
+        client.resolve_dispute(&arbiter, &eid, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
     }
 
     // Verify high score (5/5 = 10_000 bps)
@@ -442,7 +442,7 @@ fn test_inspector_appeal_multiple_times() {
         let req = make_request(&env, &seller, &arbiter, &token, 1000);
         let eid = client.create_escrow_with_inspector(&buyer, &req, &Some(inspector.clone()));
         client.dispute_escrow(&buyer, &eid, &String::from_str(&env, "d"), &1000);
-        client.resolve_dispute(&arbiter, &eid, &0);
+        client.resolve_dispute(&arbiter, &eid, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
         escrow_ids.push_back(eid);
     }
 
@@ -537,12 +537,12 @@ fn test_inspector_score_threshold_below_amount_allows_escrow() {
     let req1 = make_request(&env, &seller, &arbiter, &token, 500);
     let e1 = client.create_escrow_with_inspector(&buyer, &req1, &Some(inspector.clone()));
     client.dispute_escrow(&buyer, &e1, &String::from_str(&env, "d"), &500);
-    client.resolve_dispute(&arbiter, &e1, &0);
+    client.resolve_dispute(&arbiter, &e1, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     let req2 = make_request(&env, &seller, &arbiter, &token, 500);
     let e2 = client.create_escrow_with_inspector(&buyer, &req2, &Some(inspector.clone()));
     client.dispute_escrow(&buyer, &e2, &String::from_str(&env, "d"), &500);
-    client.resolve_dispute(&arbiter, &e2, &0);
+    client.resolve_dispute(&arbiter, &e2, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
     client.appeal_inspector_ruling(&admin, &e2);
 
     let (_, _, accuracy) = client.get_inspector_score(&inspector);
@@ -565,7 +565,7 @@ fn test_get_inspector_ruling_appealed() {
     let req = make_request(&env, &seller, &arbiter, &token, 1000);
     let eid = client.create_escrow_with_inspector(&buyer, &req, &Some(inspector.clone()));
     client.dispute_escrow(&buyer, &eid, &String::from_str(&env, "d"), &1000);
-    client.resolve_dispute(&arbiter, &eid, &0);
+    client.resolve_dispute(&arbiter, &eid, &0, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     // False before any appeal.
     assert_eq!(client.get_inspector_ruling_appealed(&eid), false);

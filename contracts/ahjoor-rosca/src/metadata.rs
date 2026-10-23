@@ -51,7 +51,10 @@ pub(crate) fn directory_entry(env: &Env) -> GroupDirectoryEntry {
         .unwrap_or(Vec::new(env));
     GroupDirectoryEntry {
         group_id: env.current_contract_address(),
-        metadata: get_metadata(env),
+        metadata: match get_metadata(env) {
+            Some(metadata) => Vec::from_array(env, [metadata]),
+            None => Vec::new(env),
+        },
         status: env
             .storage()
             .instance()

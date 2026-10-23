@@ -84,7 +84,7 @@ fn hash(env: &Env, byte: u8) -> BytesN<32> {
 fn test_admin_sets_metadata_and_event_is_emitted() {
     let s = setup();
     assert_eq!(s.client.get_group_metadata(&0), None);
-    assert_eq!(s.client.get_directory_entry().metadata, None);
+    assert_eq!(s.client.get_directory_entry().metadata.len(), 0);
 
     let name = String::from_str(&s.env, "Lagos Market Traders");
     let category = Symbol::new(&s.env, "traders");
@@ -121,7 +121,7 @@ fn test_directory_entry_includes_metadata() {
     assert_eq!(entry.contribution_amount, 100);
     assert_eq!(entry.member_count, 2);
     assert_eq!(entry.current_round, 0);
-    let metadata = entry.metadata.unwrap();
+    let metadata = entry.metadata.get(0).unwrap();
     assert_eq!(metadata.name, name);
     assert_eq!(metadata.category, category);
 }

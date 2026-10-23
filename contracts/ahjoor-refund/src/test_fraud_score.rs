@@ -283,10 +283,12 @@ fn test_request_over_threshold_is_not_auto_approved() {
 #[test]
 fn test_customer_at_fraud_score_cap_is_not_auto_approved() {
     let s = setup();
+    // Raise the score first: with auto-approval on, the refunds it requests
+    // would be auto-approved and could no longer be rejected.
+    raise_fraud_score(&s, 1);
     s.refund_client
         .set_auto_approve_threshold(&s.merchant, &REFUND_AMOUNT);
     s.refund_client.set_auto_approve_fraud_score_cap(&s.admin, &1);
-    raise_fraud_score(&s, 1);
 
     let rid = request(&s, REFUND_AMOUNT);
     let refund = s.refund_client.get_refund(&rid);

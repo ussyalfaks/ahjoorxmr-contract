@@ -4628,6 +4628,44 @@ impl AhjoorPaymentsContract {
             .unwrap_or(0)
     }
 
+    /// Paginated read of a customer's refunded payment IDs (#1075), oldest
+    /// first: payments that were refunded, cancelled in cooling-off, or
+    /// withdrawn by the customer before capture. `start` indexes into that
+    /// filtered list; `limit` is capped at `MAX_CUSTOMER_PAYMENTS_PAGE_SIZE`.
+    pub fn get_customer_refunds(env: Env, customer: Address, start: u32, limit: u32) -> Vec<u32> {
+        let all: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CustomerPayments(customer))
+            .unwrap_or(Vec::new(&env));
+        let limit = limit.min(MAX_CUSTOMER_PAYMENTS_PAGE_SIZE);
+
+        let mut page = Vec::new(&env);
+        let mut matched: u32 = 0;
+        for payment_id in all.iter() {
+            if page.len() >= limit {
+                break;
+            }
+            let payment: Option<Payment> =
+                env.storage().persistent().get(&DataKey::Payment(payment_id));
+            let is_refund = payment.is_some_and(|p| {
+                matches!(
+                    p.status,
+                    PaymentStatus::Refunded
+                        | PaymentStatus::CancelledInCoolingOff
+                        | PaymentStatus::CustomerCancelled
+                )
+            });
+            if is_refund {
+                if matched >= start {
+                    page.push_back(payment_id);
+                }
+                matched += 1;
+            }
+        }
+        page
+    }
+
     pub fn get_payment_counter(env: Env) -> u32 {
         env.storage()
             .instance()

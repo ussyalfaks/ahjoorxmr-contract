@@ -141,7 +141,7 @@ fn test_sponsored_dispute_verdict_takes_fee_from_sponsorship() {
         &String::from_str(&s.env, "Issue"),
         &1_000,
     );
-    s.client.resolve_dispute(&s.arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&s.arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     assert_eq!(s.token_client.balance(&s.seller), 1_000);
     assert_eq!(s.client.get_accrued_fees(&s.token_addr), 10);
@@ -209,7 +209,7 @@ fn test_sponsor_refunded_on_full_buyer_verdict() {
         &String::from_str(&s.env, "Not delivered"),
         &1_000,
     );
-    s.client.resolve_dispute(&s.arbiter, &escrow_id, &100u32);
+    s.client.resolve_dispute(&s.arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     assert_eq!(s.token_client.balance(&s.sponsor), 1_000);
 }
@@ -244,7 +244,7 @@ fn test_fee_increase_shortfall_falls_back_to_escrow_deduction() {
         &String::from_str(&s.env, "Issue"),
         &1_000,
     );
-    s.client.resolve_dispute(&s.arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&s.arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     // 10 covered by sponsor, 10 shortfall deducted from the escrow amount.
     assert_eq!(s.token_client.balance(&s.sponsor), 990);

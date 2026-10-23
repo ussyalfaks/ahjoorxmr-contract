@@ -867,7 +867,7 @@ fn test_partial_dispute_50_50_split() {
     assert_eq!(dispute.resolved, false);
 
     // Arbiter resolves the disputed portion to seller
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
     assert_eq!(s.token_client.balance(&seller), 200);
     assert_eq!(s.token_client.balance(&s.client.address), 0);
 }
@@ -900,7 +900,7 @@ fn test_partial_dispute_80_20_split() {
     assert_eq!(s.token_client.balance(&s.client.address), 20);
 
     // Arbiter refunds the disputed portion to buyer
-    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
     assert_eq!(s.token_client.balance(&buyer), 920); // 1000 - 100 deposited + 20 refunded
     assert_eq!(s.token_client.balance(&s.client.address), 0);
 }
@@ -1020,7 +1020,7 @@ fn test_resolve_dispute_to_seller() {
         &String::from_str(&s.env, "Item not received"),
         &250,
     );
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     let escrow = s.client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Released);
@@ -1051,7 +1051,7 @@ fn test_resolve_dispute_to_buyer() {
         &String::from_str(&s.env, "Payment not received"),
         &250,
     );
-    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     let escrow = s.client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Refunded);
@@ -1079,7 +1079,7 @@ fn test_resolve_dispute_by_buyer_panics() {
         &String::from_str(&s.env, "Item not received"),
         &250,
     );
-    let __typed_err_result = s.client.try_resolve_dispute(&buyer, &escrow_id, &0u32);
+    let __typed_err_result = s.client.try_resolve_dispute(&buyer, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
     assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::OnlyArbiterCanResolveDispute.into());
 }
 
@@ -1107,7 +1107,7 @@ fn test_resolve_dispute_50_50_split() {
         &1000,
     );
     // 50% to buyer, 50% to seller
-    s.client.resolve_dispute(&arbiter, &escrow_id, &50u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &50u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     assert_eq!(s.token_client.balance(&buyer), 500);  // 0 remaining + 500 refunded
     assert_eq!(s.token_client.balance(&seller), 500);
@@ -1141,7 +1141,7 @@ fn test_resolve_dispute_split_with_fee() {
         &1000,
     );
     // fee = 1000 * 100 / 10000 = 10; distributable = 990; 50% split → buyer=495, seller=495; fee accrued
-    s.client.resolve_dispute(&arbiter, &escrow_id, &50u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &50u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     assert_eq!(s.token_client.balance(&fee_recipient), 0);
     assert_eq!(s.token_client.balance(&buyer), 495);
@@ -1163,7 +1163,7 @@ fn test_resolve_dispute_100_0_is_full_buyer_win() {
             .create_escrow(&buyer, &seller, &arbiter, &500, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
 
     s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "d"), &500);
-    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     let escrow = s.client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Refunded);
@@ -1185,7 +1185,7 @@ fn test_resolve_dispute_0_100_is_full_seller_win() {
             .create_escrow(&buyer, &seller, &arbiter, &500, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
 
     s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "d"), &500);
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     let escrow = s.client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Released);
@@ -1207,7 +1207,7 @@ fn test_resolve_dispute_invalid_percent_panics() {
             .create_escrow(&buyer, &seller, &arbiter, &500, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
 
     s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "d"), &500);
-    let __typed_err_result = s.client.try_resolve_dispute(&arbiter, &escrow_id, &101u32);
+    let __typed_err_result = s.client.try_resolve_dispute(&arbiter, &escrow_id, &101u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
     assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::BuyerPercentMustBeBetween0And100.into());
 }
 
@@ -1238,7 +1238,7 @@ fn test_protocol_fee_deducted_on_resolve_to_seller() {
         &String::from_str(&s.env, "Dispute"),
         &1000,
     );
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     // fee = 1000 * 100 / 10000 = 10; seller gets 990; fee is accrued in contract
     assert_eq!(s.token_client.balance(&seller), 990);
@@ -1269,7 +1269,7 @@ fn test_protocol_fee_deducted_on_resolve_to_buyer() {
         &String::from_str(&s.env, "Dispute"),
         &500,
     );
-    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     // fee = 500 * 200 / 10000 = 10; buyer gets 490; fee is accrued in contract
     assert_eq!(s.token_client.balance(&buyer), 990); // 1000 - 500 deposited + 490 refunded
@@ -1300,7 +1300,7 @@ fn test_zero_protocol_fee_skips_fee_transfer() {
         &String::from_str(&s.env, "Dispute"),
         &250,
     );
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     assert_eq!(s.token_client.balance(&seller), 250);
     assert_eq!(s.token_client.balance(&fee_recipient), 0);
@@ -1358,7 +1358,7 @@ fn test_protocol_fee_emits_event() {
         &String::from_str(&s.env, "Dispute"),
         &1000,
     );
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     let events = s.env.events().all();
     let fee_event = events
@@ -3341,7 +3341,7 @@ fn test_insurance_no_double_payment_claimant_wins() {
     assert_eq!(bal_after_insurance, 500, "insurance payout should be 500");
 
     // Arbiter resolves 100% in buyer's favour (no cooling-off configured)
-    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     let bal_after_verdict = s.token_client.balance(&buyer);
     // Total received = insurance (500) + verdict payout
@@ -3399,7 +3399,7 @@ fn test_insurance_no_double_payment_claimant_loses() {
     let seller_bal_before = s.token_client.balance(&seller);
 
     // Arbiter rules 0% for buyer → seller wins outright
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     let buyer_bal_final  = s.token_client.balance(&buyer);
     let seller_bal_final = s.token_client.balance(&seller);
@@ -3461,7 +3461,7 @@ fn test_insurance_no_double_payment_split_verdict() {
     // 50/50 split verdict — buyer_percent == seller_percent == 50
     // buyer's raw share = 500, insurance_paid = 500 → buyer verdict payout = 0
     // seller's raw share = 500, untouched
-    s.client.resolve_dispute(&arbiter, &escrow_id, &50u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &50u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     let buyer_bal_final  = s.token_client.balance(&buyer);
     let seller_bal_final = s.token_client.balance(&seller);
@@ -3525,7 +3525,7 @@ fn test_arbiter_fee_deducted_from_loser_seller_wins() {
 
     s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
     // Seller wins
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     // fee = 1000 * 500 / 10000 = 50; seller gets 950
     assert_eq!(s.token_client.balance(&arbiter), 50);
@@ -3568,7 +3568,7 @@ fn test_arbiter_fee_deducted_from_loser_buyer_wins() {
 
     s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
     // Buyer wins
-    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     // fee = 50; buyer gets 950
     assert_eq!(s.token_client.balance(&arbiter), 50);
@@ -3610,7 +3610,7 @@ fn test_arbiter_fee_zero_is_valid() {
     let escrow_id = s.client.create_escrow_v2(&buyer, &request);
 
     s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     assert_eq!(s.token_client.balance(&arbiter), 0);
     assert_eq!(s.token_client.balance(&seller), 1000);
@@ -3670,7 +3670,7 @@ fn test_default_arbiter_fee_applies_when_escrow_fee_not_set() {
     );
 
     s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     // fee = 1000 * 200 / 10000 = 20
     assert_eq!(s.token_client.balance(&arbiter), 20);
@@ -3711,7 +3711,7 @@ fn test_arbiter_fee_emits_event() {
     let escrow_id = s.client.create_escrow_v2(&buyer, &request);
 
     s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     let events = s.env.events().all();
     let topic = (Symbol::new(&s.env, "arbiter_fee_paid"),).into_val(&s.env);
@@ -5080,7 +5080,7 @@ fn test_withdraw_fees_happy_path() {
 
     // Dispute and resolve to generate fees
     s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "d"), &500);
-    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     // fee = 500 * 200 / 10000 = 10 accrued
     let destination = Address::generate(&s.env);
@@ -5119,7 +5119,7 @@ fn test_withdraw_fees_exceeds_accrued_rejected() {
     );
 
     s.client.dispute_escrow(&seller, &escrow_id, &String::from_str(&s.env, "d"), &100);
-    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&s.client.env, &[0u8; 32]));
 
     // fee = 100 * 100 / 10000 = 1; try withdrawing 2
     let result = s.client.try_withdraw_fees(

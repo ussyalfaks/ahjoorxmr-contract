@@ -260,14 +260,14 @@ fn test_unpaid_reduced_round_returns_shortfall_to_reserve() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #160)")]
+#[should_panic(expected = "Error(Contract, #182)")]
 fn test_request_fails_when_reserve_cannot_cover_shortfall() {
     let s = setup(SHORTFALL - 1);
     s.request(&s.member(1), 0);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #160)")]
+#[should_panic(expected = "Error(Contract, #182)")]
 fn test_request_fails_when_reserve_disabled() {
     let s = setup(1_000);
     s.env.as_contract(&s.client.address, || {

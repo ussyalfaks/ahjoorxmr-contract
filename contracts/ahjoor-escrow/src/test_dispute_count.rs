@@ -97,11 +97,11 @@ fn test_active_dispute_count() {
     assert_eq!(client.get_active_dispute_count(), 2);
 
     // Resolve first dispute (buyer wins 100%)
-    client.resolve_dispute(&arbiter, &escrow1, &100);
+    client.resolve_dispute(&arbiter, &escrow1, &100, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
     assert_eq!(client.get_active_dispute_count(), 1);
 
     // Resolve second dispute (50/50 split)
-    client.resolve_dispute(&arbiter, &escrow2, &50);
+    client.resolve_dispute(&arbiter, &escrow2, &50, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
     assert_eq!(client.get_active_dispute_count(), 0);
 }
 

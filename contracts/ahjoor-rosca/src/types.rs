@@ -1297,7 +1297,9 @@ pub struct GroupMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupDirectoryEntry {
     pub group_id: Address,
-    pub metadata: Option<GroupMetadata>,
+    /// Zero or one entry. A `Vec` rather than `Option<GroupMetadata>` because
+    /// soroban-sdk's XDR conversion can't nest contract structs in `Option<T>`.
+    pub metadata: Vec<GroupMetadata>,
     pub status: GroupStatus,
     pub token: Address,
     pub contribution_amount: i128,

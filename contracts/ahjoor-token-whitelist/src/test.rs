@@ -279,7 +279,7 @@ fn test_remove_token_clears_quota_tier_override_metadata() {
     client.add_token(&admin, &token);
 
     // Set a quota
-    client.set_token_quota(&admin, &token, &1_000_000i128, &100u32);
+    client.set_token_quota(&admin, &token, &1_000_000i128, &100u32, &None);
     assert!(client.get_token_quota(&token).is_some());
 
     // Set a risk tier + a per-token override
@@ -502,7 +502,7 @@ fn test_set_token_quota_rejects_oversized_period() {
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
 
-    client.set_token_quota(&admin, &token, &1_000i128, &(MAX_QUOTA_PERIOD_LEDGERS + 1));
+    client.set_token_quota(&admin, &token, &1_000i128, &(MAX_QUOTA_PERIOD_LEDGERS + 1), &None);
 }
 
 #[test]
@@ -511,7 +511,7 @@ fn test_set_token_quota_accepts_max_period() {
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
 
-    client.set_token_quota(&admin, &token, &1_000i128, &MAX_QUOTA_PERIOD_LEDGERS);
+    client.set_token_quota(&admin, &token, &1_000i128, &MAX_QUOTA_PERIOD_LEDGERS, &None);
     let quota = client.get_token_quota(&token).unwrap();
     assert_eq!(quota.period_ledgers, MAX_QUOTA_PERIOD_LEDGERS);
 }
@@ -522,9 +522,9 @@ fn test_update_token_quota_rejects_oversized_period() {
     let (env, admin, client) = setup_test();
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
-    client.set_token_quota(&admin, &token, &1_000i128, &100u32);
+    client.set_token_quota(&admin, &token, &1_000i128, &100u32, &None);
 
-    client.update_token_quota(&admin, &token, &1_000i128, &(MAX_QUOTA_PERIOD_LEDGERS + 1));
+    client.update_token_quota(&admin, &token, &1_000i128, &(MAX_QUOTA_PERIOD_LEDGERS + 1), &None);
 }
 
 // ── Companion: get_token_volume bounded range ────────────────────────────────
@@ -566,7 +566,7 @@ fn test_record_token_volume_within_quota_accumulates() {
     let (env, admin, client) = setup_test();
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
-    client.set_token_quota(&admin, &token, &100i128, &50u32);
+    client.set_token_quota(&admin, &token, &100i128, &50u32, &None);
     env.ledger().set_sequence_number(1_000);
 
     client.record_token_volume(&token, &40);
@@ -579,7 +579,7 @@ fn test_record_token_volume_rejects_when_quota_exceeded() {
     let (env, admin, client) = setup_test();
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
-    client.set_token_quota(&admin, &token, &100i128, &50u32);
+    client.set_token_quota(&admin, &token, &100i128, &50u32, &None);
     env.ledger().set_sequence_number(1_000);
 
     client.record_token_volume(&token, &60);
@@ -592,7 +592,7 @@ fn test_record_token_volume_window_rolls_over_after_period_elapses() {
     let (env, admin, client) = setup_test();
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
-    client.set_token_quota(&admin, &token, &100i128, &48u32);
+    client.set_token_quota(&admin, &token, &100i128, &48u32, &None);
     env.ledger().set_sequence_number(1_000);
 
     client.record_token_volume(&token, &90);
@@ -613,7 +613,7 @@ fn test_record_token_volume_cost_bounded_at_max_period() {
 
     let small_period_token = Address::generate(&env);
     client.add_token(&admin, &small_period_token);
-    client.set_token_quota(&admin, &small_period_token, &1_000_000_000i128, &100u32);
+    client.set_token_quota(&admin, &small_period_token, &1_000_000_000i128, &100u32, &None);
     env.ledger().set_sequence_number(1_000);
 
     env.cost_estimate().budget().reset_default();
@@ -622,7 +622,7 @@ fn test_record_token_volume_cost_bounded_at_max_period() {
 
     let max_period_token = Address::generate(&env);
     client.add_token(&admin, &max_period_token);
-    client.set_token_quota(&admin, &max_period_token, &1_000_000_000i128, &MAX_QUOTA_PERIOD_LEDGERS);
+    client.set_token_quota(&admin, &max_period_token, &1_000_000_000i128, &MAX_QUOTA_PERIOD_LEDGERS, &None);
     env.ledger().set_sequence_number(MAX_QUOTA_PERIOD_LEDGERS + 1_000);
 
     env.cost_estimate().budget().reset_default();
@@ -811,7 +811,7 @@ fn test_get_current_period_volume_matches_recorded_and_resets_after_rollover() {
     let token = Address::generate(&env);
     let unmetered_token = Address::generate(&env);
     client.add_token(&admin, &token);
-    client.set_token_quota(&admin, &token, &100i128, &48u32);
+    client.set_token_quota(&admin, &token, &100i128, &48u32, &None);
     env.ledger().set_sequence_number(1_000);
 
     // No quota configured → 0, not a panic.
@@ -1016,7 +1016,7 @@ fn test_fuzz_like_whitelist_inputs_100_cases() {
                     client.add_token(&admin, &token);
                 }
                 if has_quota {
-                    client.set_token_quota(&admin, &token, &1_000i128, &100u32);
+                    client.set_token_quota(&admin, &token, &1_000i128, &100u32, &None);
                 }
                 let volume = rng.pick(&volumes);
                 let period = rng.pick(&periods);
@@ -1033,15 +1033,15 @@ fn test_fuzz_like_whitelist_inputs_100_cases() {
                 match expected {
                     Some(msg) => {
                         assert_panics_with(case, msg, || {
-                            client.set_token_quota(&caller, &token, &volume, &period)
+                            client.set_token_quota(&caller, &token, &volume, &period, &None)
                         });
                         assert_eq!(client.get_token_quota(&token), before, "case {}", case);
                     }
                     None => {
-                        client.set_token_quota(&caller, &token, &volume, &period);
+                        client.set_token_quota(&caller, &token, &volume, &period, &None);
                         assert_eq!(
                             client.get_token_quota(&token),
-                            Some(TokenQuota { max_volume_per_period: volume, period_ledgers: period }),
+                            Some(TokenQuota { max_volume_per_period: volume, period_ledgers: period, max_per_transaction: None }),
                             "case {}",
                             case
                         );
@@ -1054,7 +1054,7 @@ fn test_fuzz_like_whitelist_inputs_100_cases() {
                 let has_quota = !rng.one_in(4);
                 client.add_token(&admin, &token);
                 if has_quota {
-                    client.set_token_quota(&admin, &token, &1_000i128, &100u32);
+                    client.set_token_quota(&admin, &token, &1_000i128, &100u32, &None);
                 }
                 let volume = rng.pick(&volumes);
                 let period = rng.pick(&periods);
@@ -1071,15 +1071,15 @@ fn test_fuzz_like_whitelist_inputs_100_cases() {
                 match expected {
                     Some(msg) => {
                         assert_panics_with(case, msg, || {
-                            client.update_token_quota(&caller, &token, &volume, &period)
+                            client.update_token_quota(&caller, &token, &volume, &period, &None)
                         });
                         assert_eq!(client.get_token_quota(&token), before, "case {}", case);
                     }
                     None => {
-                        client.update_token_quota(&caller, &token, &volume, &period);
+                        client.update_token_quota(&caller, &token, &volume, &period, &None);
                         assert_eq!(
                             client.get_token_quota(&token),
-                            Some(TokenQuota { max_volume_per_period: volume, period_ledgers: period }),
+                            Some(TokenQuota { max_volume_per_period: volume, period_ledgers: period, max_per_transaction: None }),
                             "case {}",
                             case
                         );

@@ -53,7 +53,7 @@ fn test_normal_finalization_after_cooling_off() {
     // Arbiter resolves — should enter CoolingOff, NOT transfer funds
     let buyer_bal_before = token_client.balance(&buyer);
     let seller_bal_before = token_client.balance(&seller);
-    client.resolve_dispute(&arbiter, &escrow_id, &100u32); // full buyer win
+    client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32])); // full buyer win
 
     let escrow = client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::CoolingOff);
@@ -82,7 +82,7 @@ fn test_flagged_then_reviewed() {
     let cooling_off = 3600u64;
 
     client.set_resolution_cooloff_secs(&admin, &cooling_off);
-    client.resolve_dispute(&arbiter, &escrow_id, &0u32); // full seller win
+    client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32])); // full seller win
 
     // Buyer (losing party) flags the resolution
     client.flag_resolution_error(&buyer, &escrow_id, &make_reason_hash(&env));
@@ -109,7 +109,7 @@ fn test_flag_after_window_expired() {
     let cooling_off = 3600u64;
 
     client.set_resolution_cooloff_secs(&admin, &cooling_off);
-    client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     // Advance past cooling-off
     env.ledger().with_mut(|l| l.timestamp += cooling_off + 1);
@@ -129,7 +129,7 @@ fn test_finalize_before_window_elapsed() {
     let cooling_off = 3600u64;
 
     client.set_resolution_cooloff_secs(&admin, &cooling_off);
-    client.resolve_dispute(&arbiter, &escrow_id, &50u32);
+    client.resolve_dispute(&arbiter, &escrow_id, &50u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     // Try to finalize immediately — should panic
     let __typed_err_result = client.try_finalize_resolution(&escrow_id);
@@ -146,7 +146,7 @@ fn test_no_cooling_off_immediate_release() {
 
     // cooling_off = 0 (default) → immediate execution
     let buyer_bal_before = token_client.balance(&buyer);
-    client.resolve_dispute(&arbiter, &escrow_id, &100u32);
+    client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     let escrow = client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Refunded);
@@ -190,7 +190,7 @@ fn test_flag_resolution_error_winner_buyer_cannot_flag() {
     );
     client.set_resolution_cooloff_secs(&admin, &3_600u64);
     // Arbiter rules 100% in buyer's favour → buyer is the WINNER
-    client.resolve_dispute(&arbiter, &escrow_id, &100u32);
+    client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     let reason = BytesN::from_array(&env, &[2u8; 32]);
 
@@ -245,7 +245,7 @@ fn test_flag_resolution_error_winner_seller_cannot_flag() {
     );
     client.set_resolution_cooloff_secs(&admin, &3_600u64);
     // Arbiter rules 0% for buyer → seller is the WINNER
-    client.resolve_dispute(&arbiter, &escrow_id, &0u32);
+    client.resolve_dispute(&arbiter, &escrow_id, &0u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     let reason = BytesN::from_array(&env, &[3u8; 32]);
 
@@ -301,7 +301,7 @@ fn test_flag_resolution_error_split_verdict_both_parties_may_flag() {
     );
     client.set_resolution_cooloff_secs(&admin, &3_600u64);
     // Split verdict — neither side is an outright winner
-    client.resolve_dispute(&arbiter, &escrow_id, &50u32);
+    client.resolve_dispute(&arbiter, &escrow_id, &50u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
 
     let reason = BytesN::from_array(&env, &[4u8; 32]);
 
