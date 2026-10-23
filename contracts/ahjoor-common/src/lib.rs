@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::Vec;
+use soroban_sdk::{Env, IntoVal, TryFromVal, Val, Vec};
 
 /// Shared pagination helper used by all contracts.
 ///
@@ -18,7 +18,10 @@ use soroban_sdk::Vec;
 /// # Returns
 /// A new `Vec<T>` containing at most `min(limit, max_limit)` elements starting
 /// at `start`, or an empty vector when `start` is out of range.
-pub fn paginate<T: Clone>(vec: &Vec<T>, start: u32, limit: u32, max_limit: u32) -> Vec<T> {
+pub fn paginate<T>(vec: &Vec<T>, start: u32, limit: u32, max_limit: u32) -> Vec<T>
+where
+    T: IntoVal<Env, Val> + TryFromVal<Env, Val>,
+{
     let len = vec.len();
     let mut out = Vec::new(vec.env());
 
@@ -45,7 +48,6 @@ pub fn paginate<T: Clone>(vec: &Vec<T>, start: u32, limit: u32, max_limit: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{Env, Vec};
 
     fn sample(env: &Env, n: u32) -> Vec<u32> {
         let mut v = Vec::new(env);

@@ -361,6 +361,30 @@ pub enum EscrowErrorExt5 {
     NotAuthorizedToAttachDocument = 22,
     /// #586: the per-escrow document cap has been reached.
     DocumentsCapReached = 23,
+    /// Revision request feature: only buyer can request revisions.
+    OnlyBuyerCanRequestRevision = 24,
+    /// Revision request feature: only active escrows can have revision requests.
+    RevisionRequestOnlyAllowedActiveEscrow = 25,
+    /// Revision request feature: maximum revision requests reached.
+    MaximumRevisionRequestsReached = 26,
+    /// Revision request feature: no pending revision request exists.
+    NoPendingRevisionRequest = 27,
+    /// Revision request feature: only seller can acknowledge revision.
+    OnlySellerCanAcknowledgeRevision = 28,
+    /// Revision request feature: invalid revision request ID.
+    InvalidRevisionRequestID = 29,
+    /// Revision request feature: revision response deadline not yet passed.
+    RevisionResponseDeadlineNotPassed = 30,
+    /// Keeper batch input exceeds the configured maximum.
+    ReminderBatchTooLarge = 31,
+    /// extend_deadline: caller must be the buyer.
+    OnlyBuyerCanExtendDeadline = 32,
+    /// extend_deadline: the new deadline must be strictly after the current one.
+    NewDeadlineMustBeInFuture = 33,
+    /// extend_deadline: the extension amount exceeds the configured cap.
+    DeadlineExtensionExceedsCap = 34,
+    /// extend_deadline: cannot extend deadline while a dispute is active.
+    CannotExtendDeadlineDuringDispute = 35,
 }
 
 /// #977: Mutual settlement offer for a disputed escrow.
@@ -613,8 +637,6 @@ pub struct Dispute {
     pub resolved: bool,
     pub dispute_amount: i128,
     pub timeout_seconds: Option<u64>,
-    pub filing_fee: i128,
-    pub filing_party: Address,
 }
 
 /// #571: Insurance claim details recorded for an escrow.
@@ -780,8 +802,6 @@ pub enum DataKey {
     DisputeDeadlineStart(u32),
     /// Counter tracking arbiter timeout occurrences per arbiter
     ArbiterTimeoutCount(Address),
-    /// Per-arbiter concurrent active dispute count
-    ArbiterActiveDisputeCount(Address),
     /// Token whitelist contract address
     TokenWhitelistContract,
     /// #215: time-lock metadata per escrow
@@ -942,6 +962,32 @@ pub enum DataKey3 {
     SettlementOffer(u32),
     /// #586: ordered append-only document history per escrow (escrow_id → Vec<Document>).
     EscrowDocuments(u32),
+    /// Revision request feature: pending revision request per escrow
+    PendingRevisionRequest(u32),
+    /// Revision request feature: revision request counter per escrow
+    RevisionRequestCounter(u32),
+    /// Revision request feature: maximum allowed revision requests per escrow
+    MaxRevisionRequests(u32),
+    /// Revision request feature: default response deadline for revision requests (seconds)
+    RevisionResponseDeadline,
+    /// Keeper reminder: records the request_id for which a MerchantResponseDue
+    /// reminder has already been emitted (escrow_id → request_id).
+    /// Cleared when the pending request is resolved/removed.
+    ReminderSent(u32),
+    /// Admin-configurable window (seconds) before `response_deadline` during
+    /// which the keeper may emit a MerchantResponseDue reminder.
+    /// Default: 3 600 (1 hour).
+    ReminderWindowSeconds,
+    /// Admin-configurable upper bound on how far (seconds) the buyer may push
+    /// the deadline in a single `extend_deadline` call.
+    /// Default: 30 * 24 * 60 * 60 (30 days).
+    MaxDeadlineExtensionSeconds,
+    /// #1067: finalized arbiter ruling (escrow_id → EscrowRuling)
+    EscrowRuling(u32),
+    /// #1062: set to true once a deadline reminder has been emitted for this escrow
+    DeadlineReminderSent(u32),
+    /// #1062: admin-configurable deadline reminder window in seconds (default: 48 h)
+    DeadlineReminderWindowSeconds,
 }
 
 /// A third party's pre-funded protocol fee for a specific escrow.
@@ -1183,6 +1229,18 @@ pub struct EscrowRuling {
     pub arbiter: Address,
     pub rationale_hash: BytesN<32>,
     pub recorded_at: u64,
+}
+
+/// #1097: Deployment manifest returned by `get_manifest`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowManifest {
+    pub version: u32,
+    pub admin: Option<Address>,
+    pub paused: bool,
+    pub token_whitelist_contract: Option<Address>,
+    pub oracle_contract: Option<Address>,
+    pub insurance_token: Option<Address>,
 }
 
 mod oracle {
@@ -2808,9 +2866,9 @@ impl AhjoorEscrowContract {
         }
 
         docs.push_back(Document {
-            doc_hash,
+            doc_hash: doc_hash.clone(),
             party: party.clone(),
-            kind,
+            kind: kind.clone(),
             attached_at: env.ledger().timestamp(),
         });
 
@@ -6004,7 +6062,7 @@ impl AhjoorEscrowContract {
         Self::require_admin(&env, &admin);
 
         if deadline_seconds == 0 {
-            panic_with_error!(&env, EscrowErrorExt2::DeadlineMustBePositive);
+            panic_with_error!(&env, EscrowErrorExt::DeadlineMustBePositive);
         }
 
         env.storage()

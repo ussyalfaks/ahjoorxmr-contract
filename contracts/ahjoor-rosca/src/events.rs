@@ -2585,3 +2585,194 @@ pub fn emit_group_metadata_updated(
 ) {
     GroupMetadataUpdated { updated_by, name, category, description_hash }.publish(e);
 }
+
+// ── Payout Holdback ───────────────────────────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutHoldbackSet {
+    pub holdback_bps: u32,
+}
+
+pub fn emit_payout_holdback_set(e: &Env, holdback_bps: u32) {
+    PayoutHoldbackSet { holdback_bps }.publish(e);
+}
+
+/// Event: Part of a round payout was withheld until the recipient makes
+/// their remaining contributions for `cycle` (through `last_round`).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutHeldBack {
+    pub round: u32,
+    pub member: Address,
+    pub cycle: u32,
+    pub amount: i128,
+    pub last_round: u32,
+}
+
+pub fn emit_payout_held_back(
+    e: &Env,
+    round: u32,
+    member: Address,
+    cycle: u32,
+    amount: i128,
+    last_round: u32,
+) {
+    PayoutHeldBack { round, member, cycle, amount, last_round }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct HoldbackReleased {
+    pub member: Address,
+    pub cycle: u32,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+pub fn emit_holdback_released(e: &Env, member: Address, cycle: u32, recipient: Address, amount: i128) {
+    HoldbackReleased { member, cycle, recipient, amount }.publish(e);
+}
+
+/// Event: A holdback was settled because the member missed a contribution
+/// for `round` (or left the group). `covered` went into the round pot and
+/// `forfeited` into the insurance pool.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct HoldbackForfeited {
+    pub member: Address,
+    pub cycle: u32,
+    pub round: u32,
+    pub covered: i128,
+    pub forfeited: i128,
+}
+
+pub fn emit_holdback_forfeited(
+    e: &Env,
+    member: Address,
+    cycle: u32,
+    round: u32,
+    covered: i128,
+    forfeited: i128,
+) {
+    HoldbackForfeited { member, cycle, round, covered, forfeited }.publish(e);
+}
+
+// ── Maximum Cycle Count ───────────────────────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MaxCyclesSet {
+    pub max_cycles: Option<u32>,
+}
+
+pub fn emit_max_cycles_set(e: &Env, max_cycles: Option<u32>) {
+    MaxCyclesSet { max_cycles }.publish(e);
+}
+
+/// Event: The group finished its final cycle. `distributed` is the reserve
+/// and insurance balance paid back to members.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct GroupCompleted {
+    pub cycles: u32,
+    pub distributed: i128,
+}
+
+pub fn emit_group_completed(e: &Env, cycles: u32, distributed: i128) {
+    GroupCompleted { cycles, distributed }.publish(e);
+}
+
+// ── Member Ban List ───────────────────────────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MemberBanned {
+    pub member: Address,
+    pub banned_by: Address,
+    pub reason_hash: BytesN<32>,
+}
+
+pub fn emit_member_banned(e: &Env, member: Address, banned_by: Address, reason_hash: BytesN<32>) {
+    MemberBanned { member, banned_by, reason_hash }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MemberUnbanned {
+    pub member: Address,
+    pub unbanned_by: Address,
+}
+
+pub fn emit_member_unbanned(e: &Env, member: Address, unbanned_by: Address) {
+    MemberUnbanned { member, unbanned_by }.publish(e);
+}
+
+// ── Hardship Contribution Reduction (#1030) ───────────────────────────────────
+
+/// Event: A member requested a one-round hardship contribution reduction.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct HardshipReductionRequested {
+    pub proposal_id: u32,
+    pub member: Address,
+    pub round: u32,
+    pub reduced_amount: i128,
+    pub shortfall: i128,
+}
+
+pub fn emit_hardship_reduction_requested(
+    e: &Env,
+    proposal_id: u32,
+    member: Address,
+    round: u32,
+    reduced_amount: i128,
+    shortfall: i128,
+) {
+    HardshipReductionRequested { proposal_id, member, round, reduced_amount, shortfall }.publish(e);
+}
+
+/// Event: A hardship reduction was approved and `shortfall` drawn from the
+/// emergency reserve.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct HardshipReductionApproved {
+    pub proposal_id: u32,
+    pub member: Address,
+    pub round: u32,
+    pub reduced_amount: i128,
+    pub shortfall: i128,
+}
+
+pub fn emit_hardship_reduction_approved(
+    e: &Env,
+    proposal_id: u32,
+    member: Address,
+    round: u32,
+    reduced_amount: i128,
+    shortfall: i128,
+) {
+    HardshipReductionApproved { proposal_id, member, round, reduced_amount, shortfall }.publish(e);
+}
+
+/// Event: A round with an approved hardship reduction ended. `added_to_pot`
+/// is true when the member contributed and the shortfall joined the round
+/// pot; false when it was returned to the emergency reserve.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct HardshipShortfallSettled {
+    pub member: Address,
+    pub round: u32,
+    pub shortfall: i128,
+    pub added_to_pot: bool,
+}
+
+pub fn emit_hardship_shortfall_settled(
+    e: &Env,
+    member: Address,
+    round: u32,
+    shortfall: i128,
+    added_to_pot: bool,
+) {
+    HardshipShortfallSettled { member, round, shortfall, added_to_pot }.publish(e);
+}

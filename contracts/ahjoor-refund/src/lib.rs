@@ -5715,6 +5715,7 @@ impl AhjoorRefundContract {
             reason: String::from_str(&env, "cross_contract"),
             reason_code,
             requested_at: now,
+            requested_ledger: env.ledger().sequence(),
             approved_at: Some(now),
             processed_at: Some(now),
             rejected_at: None,

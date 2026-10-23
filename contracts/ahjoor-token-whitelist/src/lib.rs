@@ -217,6 +217,9 @@ pub enum DataKey {
     CategoryTokenList(TokenCategory, u32),
     /// Count of tokens in each category
     CategoryTokenCount(TokenCategory),
+    /// Whitelist version counter incremented on any whitelist modification
+    /// for cache invalidation purposes.
+    WhitelistVersion,
 }
 
 #[contracttype]
@@ -480,6 +483,19 @@ impl TokenWhitelistContract {
             }
         }
         res
+    }
+
+    /// Returns the current whitelist version. The version is incremented
+    /// whenever the whitelist is modified (tokens added or removed), allowing
+    /// consumers to invalidate caches.
+    pub fn get_whitelist_version(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::WhitelistVersion).unwrap_or(0)
+    }
+
+    /// Increments the whitelist version counter for cache invalidation.
+    fn increment_whitelist_version(env: &Env) {
+        let current: u64 = env.storage().instance().get(&DataKey::WhitelistVersion).unwrap_or(0);
+        env.storage().instance().set(&DataKey::WhitelistVersion, &(current + 1));
     }
 
     /// Check if a token is in the global whitelist (ignores suspension).

@@ -5089,6 +5089,17 @@ impl AhjoorContract {
             ProposalType::PayoutVestingUpdate => {
                 vesting::execute_vesting_update(&env, proposal_id);
             }
+            ProposalType::MemberBan => {
+                bans::ban(
+                    &env,
+                    &proposal.target_member,
+                    &BytesN::from_array(&env, &[0u8; 32]),
+                    &env.current_contract_address(),
+                );
+            }
+            ProposalType::HardshipReduction => {
+                hardship::execute(&env, proposal_id);
+            }
             ProposalType::ExtendRound => {
                 round_extension::execute(&env, proposal_id, proposal.execution_data);
             }
@@ -13291,6 +13302,251 @@ impl AhjoorContract {
     pub fn get_directory_entry(env: Env) -> GroupDirectoryEntry {
         metadata::directory_entry(&env)
     }
+
+    // ── Payout Holdback ───────────────────────────────────────────────────────
+
+    /// Admin sets the share of each payout withheld until the recipient has
+    /// made their remaining contributions for the cycle, in bps (0 disables,
+    /// max 5_000). Only allowed before the group is activated.
+    pub fn set_payout_holdback_bps(env: Env, admin: Address, bps: u32) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        holdback::set_holdback_bps(&env, bps);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_payout_holdback_bps(env: Env) -> u32 {
+        holdback::holdback_bps(&env)
+    }
+
+    /// Pay `member`'s holdback for `cycle` to their payout beneficiary (or
+    /// themselves) once every contribution they owed after their payout in
+    /// that cycle has been made. Returns the amount paid.
+    pub fn release_holdback(env: Env, _group_id: u32, member: Address, cycle: u32) -> i128 {
+        internals::check_not_paused(&env);
+        member.require_auth();
+        let amount = holdback::release(&env, &member, cycle);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        amount
+    }
+
+    pub fn get_holdback(env: Env, member: Address, cycle: u32) -> Option<HoldbackRecord> {
+        holdback::get_record(&env, &member, cycle)
+    }
+
+    // ── Maximum Cycle Count ───────────────────────────────────────────────────
+
+    /// Admin sets the number of cycles after which the group completes
+    /// (`None` = unlimited, the default). Only allowed before the group is
+    /// activated.
+    pub fn set_max_cycles(env: Env, admin: Address, max_cycles: Option<u32>) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        cycle_limit::set_max_cycles(&env, max_cycles);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_max_cycles(env: Env) -> Option<u32> {
+        cycle_limit::max_cycles(&env)
+    }
+
+    // ── Member Ban List ───────────────────────────────────────────────────────
+
+    /// Admin bans `member` from joining or rejoining this group by any path.
+    /// An active member must be removed first. Members can also ban an
+    /// address through a `MemberBan` governance proposal.
+    pub fn ban_member(env: Env, _group_id: u32, member: Address, reason_hash: BytesN<32>) {
+        internals::check_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        bans::ban(&env, &member, &reason_hash, &admin);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin lifts a ban. The address must then join through the normal paths.
+    pub fn unban_member(env: Env, _group_id: u32, member: Address) {
+        internals::check_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        bans::unban(&env, &member, &admin);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn is_banned(env: Env, _group_id: u32, member: Address) -> bool {
+        bans::is_banned(&env, &member)
+    }
+
+    // ── Upcoming Payouts ──────────────────────────────────────────────────────
+
+    /// The next `count` payouts (capped at `MAX_UPCOMING_PAYOUTS`) as
+    /// `(recipient, round, expected_at)`, where `expected_at` is the round's
+    /// contribution deadline. Recipients are chosen exactly as the payout
+    /// logic does from the current payout order, so executed slot swaps,
+    /// auction results, skips and suspensions are reflected. Empty once the
+    /// group is no longer active; stops at the final round when `max_cycles`
+    /// is set.
+    pub fn get_upcoming_payouts(env: Env, _group_id: u32, count: u32) -> Vec<(Address, u32, u64)> {
+        let mut upcoming: Vec<(Address, u32, u64)> = Vec::new(&env);
+        if Self::get_group_status(env.clone()) != GroupStatus::Active {
+            return upcoming;
+        }
+        let payout_order: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PayoutOrder)
+            .unwrap_or(Vec::new(&env));
+        let suspended_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SuspendedMembers)
+            .unwrap_or(Vec::new(&env));
+        let exited_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExitedMembers)
+            .unwrap_or(Vec::new(&env));
+        let skip_requests: Map<(Address, u32), bool> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SkipRequests)
+            .unwrap_or(Map::new(&env));
+
+        let (current_round, current_deadline, round_duration) = internals::round_schedule(&env);
+        // Rounds from `end_round` on are never played.
+        let end_round: Option<u32> =
+            cycle_limit::max_cycles(&env).map(|m| m.saturating_mul(payout_order.len()));
+
+        for i in 0..count.min(MAX_UPCOMING_PAYOUTS) {
+            let round = current_round + i;
+            if end_round.map_or(false, |end| round >= end) {
+                break;
+            }
+            let idx = match internals::select_payout_slot(
+                &payout_order,
+                round,
+                &suspended_members,
+                &exited_members,
+                &skip_requests,
+            ) {
+                Some(idx) => idx,
+                None => break,
+            };
+            let expected_at = current_deadline + i as u64 * round_duration;
+            upcoming.push_back((payout_order.get(idx).unwrap(), round, expected_at));
+        }
+        upcoming
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Member Payout History (#1028) ─────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// View: every payout `member` has received, oldest first, across all of
+    /// the group's cycles. One entry is recorded per token transfer (or
+    /// vesting lock) made when a round is paid out to the member.
+    ///
+    /// Returns the slice `[start, start + limit)`; `limit` is capped at
+    /// `audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE`. An out-of-range `start`
+    /// or a `limit` of `0` returns an empty vec, as does a member who has
+    /// never been paid. Entries are append-only, so pages are stable.
+    ///
+    /// `group_id` is accepted for API consistency with other group-scoped
+    /// functions; this contract manages a single group per instance.
+    pub fn get_member_payout_history(
+        env: Env,
+        _group_id: u32,
+        member: Address,
+        start: u32,
+        limit: u32,
+    ) -> Vec<MemberPayoutEntry> {
+        let total: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey5::MemberPayoutCount(member.clone()))
+            .unwrap_or(0);
+        let mut page: Vec<MemberPayoutEntry> = Vec::new(&env);
+        if limit == 0 || start >= total {
+            return page;
+        }
+        let limit = limit.min(audit_trail::MAX_CONTRIBUTION_HISTORY_RANGE);
+        let end = start.saturating_add(limit).min(total);
+        for i in start..end {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get(&DataKey5::MemberPayoutEntry(member.clone(), i))
+            {
+                page.push_back(entry);
+            }
+        }
+        page
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ── Hardship Contribution Reduction (#1030) ───────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Request to contribute `reduced_amount` instead of the full contribution
+    /// for `round` only. Opens a `HardshipReduction` governance proposal and
+    /// returns its id; vote with `vote_on_proposal` and apply with
+    /// `execute_proposal`. On approval the shortfall is drawn from the
+    /// emergency reserve.
+    ///
+    /// Fails with `InvalidHardshipAmount` unless `0 < reduced_amount < full
+    /// contribution`, `HardshipRoundPassed` for a past round,
+    /// `HardshipAlreadyUsedThisCycle` when the member already has a pending or
+    /// approved request in the round's cycle, and
+    /// `InsufficientReserveForHardship` when the reserve cannot cover the
+    /// shortfall (checked again at execution).
+    ///
+    /// `group_id` is accepted for API consistency with other group-scoped
+    /// functions; this contract manages a single group per instance.
+    pub fn request_hardship_reduction(
+        env: Env,
+        _group_id: u32,
+        member: Address,
+        round: u32,
+        reduced_amount: i128,
+    ) -> u32 {
+        internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
+        member.require_auth();
+        let proposal_id = hardship::request(&env, &member, round, reduced_amount);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        proposal_id
+    }
+
+    /// View: the hardship request attached to `proposal_id`, if any.
+    pub fn get_hardship_request(env: Env, proposal_id: u32) -> Option<HardshipRequest> {
+        hardship::get_request(&env, proposal_id)
+    }
+
+    /// View: the approved hardship reduction for `member` in `round`, if any.
+    pub fn get_hardship_reduction(env: Env, member: Address, round: u32) -> Option<HardshipRequest> {
+        hardship::get_reduction(&env, &member, round)
+    }
 }
 
 mod test;
@@ -13326,4 +13582,10 @@ mod test_streak_bonus;
 mod test_payout_vesting;
 mod test_emergency_payout_treasury;
 mod test_clone_membership_cap;
+mod test_payout_holdback;
+mod test_max_cycles;
+mod test_ban_list;
+mod test_upcoming_payouts;
+mod test_member_payout_history;
+mod test_hardship_reduction;
 pub use events::*;

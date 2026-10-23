@@ -310,4 +310,38 @@ pub enum ExtError3 {
     GroupNameTooLong = 166,
     /// Group name must not be empty.
     EmptyGroupName = 167,
+    // ── Payout Holdback ───────────────────────────────────────────────────────
+    /// payout_holdback_bps must be between 0 and 5_000.
+    InvalidHoldbackBps = 168,
+    /// This setting can only be changed before the group is activated.
+    ConfigLockedAfterActivation = 169,
+    /// No holdback exists for this member and cycle.
+    NoHoldbackRecord = 170,
+    /// The holdback was already released or forfeited.
+    HoldbackSettled = 171,
+    /// The member still has contributions outstanding for the cycle.
+    HoldbackNotReleasable = 172,
+    // ── Maximum Cycle Count ───────────────────────────────────────────────────
+    /// max_cycles must be positive when set.
+    InvalidMaxCycles = 173,
+    /// The group has completed its final cycle.
+    GroupCompleted = 174,
+    // ── Member Ban List ───────────────────────────────────────────────────────
+    /// The address is banned from this group.
+    MemberBanned = 175,
+    /// An active member must be removed before they can be banned.
+    MemberStillActive = 176,
+    /// The address is already banned.
+    AlreadyBanned = 177,
+    /// The address is not banned.
+    NotBanned = 178,
+    // ── Hardship Contribution Reduction (#1030) ──────────────────────────────
+    /// reduced_amount must be positive and below the member's full contribution.
+    InvalidHardshipAmount = 179,
+    /// The round has already been paid out or closed.
+    HardshipRoundPassed = 180,
+    /// The member already has a pending or approved hardship request this cycle.
+    HardshipAlreadyUsedThisCycle = 181,
+    /// The emergency reserve cannot cover the requested shortfall.
+    InsufficientReserveForHardship = 182,
 }

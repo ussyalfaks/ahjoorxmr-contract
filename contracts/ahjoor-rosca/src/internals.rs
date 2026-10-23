@@ -1,4 +1,4 @@
-use crate::{errors::{Error, ExtError, ExtError2}, events, audit_trail, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
+use crate::{errors::{Error, ExtError, ExtError2}, events, audit_trail, cycle_limit, hardship, holdback, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, MemberPayoutEntry, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
 use soroban_sdk::{panic_with_error, token, Address, Bytes, BytesN, Env, Map, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -83,11 +83,19 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         .get(&DataKey::RewardPool)
         .unwrap_or(0);
     let base_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-    // Base-token funds held for vesting payouts, payout holdbacks and streak
-    // bonuses are not part of the round pot.
+    // Base-token funds held for vesting payouts, payout holdbacks, streak
+    // bonuses, the emergency reserve and unsettled hardship earmarks are not
+    // part of the round pot.
+    let emergency_reserve: i128 = env
+        .storage()
+        .persistent()
+        .get(&DataKey3::EmergencyReserveBalance)
+        .unwrap_or(0);
     let reserved_balance = vesting::locked_balance(env)
         + holdback::locked_balance(env)
-        + streak::reserved_balance(env);
+        + streak::reserved_balance(env)
+        + emergency_reserve
+        + hardship::earmarked(env);
 
     let approved_tokens: Vec<Address> = env
         .storage()
@@ -675,9 +683,43 @@ pub(crate) fn distribute_pro_rata(env: &Env, members: &Vec<Address>, amount: i12
     }
 }
 
+/// #1028: appends a payout entry to `member`'s payout history.
+pub(crate) fn record_member_payout(
+    env: &Env,
+    member: &Address,
+    round: u32,
+    token: &Address,
+    amount: i128,
+) {
+    let count_key = DataKey5::MemberPayoutCount(member.clone());
+    let index: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let entry_key = DataKey5::MemberPayoutEntry(member.clone(), index);
+    let entry = MemberPayoutEntry {
+        cycle: streak::cycle_of_round(env, round),
+        round,
+        amount,
+        token: token.clone(),
+        ledger: env.ledger().sequence(),
+    };
+    env.storage().persistent().set(&entry_key, &entry);
+    env.storage().persistent().extend_ttl(
+        &entry_key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+    env.storage().persistent().set(&count_key, &(index + 1));
+    env.storage().persistent().extend_ttl(
+        &count_key,
+        PERSISTENT_LIFETIME_THRESHOLD,
+        PERSISTENT_BUMP_AMOUNT,
+    );
+}
+
 /// Advances the round counter, clears paid-members and per-round contributions,
 /// and sets a new deadline.
 pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
+    // #1030: rounds closed without a payout still settle hardship earmarks.
+    hardship::settle_round(env, current_round);
     // Members who left without paying the closing round lose their holdback.
     holdback::forfeit_departed(env, current_round);
 

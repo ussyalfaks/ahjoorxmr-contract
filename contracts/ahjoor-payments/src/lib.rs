@@ -249,6 +249,14 @@ pub enum ExtError {
     InsufficientRollingReserve = 81,
     /// #1051: payment is not a completed, settled single-merchant payment.
     PaymentNotSettled = 82,
+    /// Reusable payment request does not exist.
+    PaymentRequestNotFound = 83,
+    /// Reusable payment request has expired.
+    PaymentRequestExpired = 84,
+    /// Reusable payment request is inactive.
+    PaymentRequestInactive = 85,
+    /// Reusable payment request has reached its use limit.
+    PaymentRequestExhausted = 86,
 }
 
 /// Per-merchant withdrawal rate limit config (#231).
@@ -1180,6 +1188,12 @@ pub enum DataKey3 {
     RollingReserveBuckets(Address),
     /// #1051: Persistent: refunds drawn from the merchant's reserve (Vec<ReserveDrawdown>)
     RollingReserveDrawdowns(Address),
+    /// Instance: counter for reusable merchant payment requests.
+    PaymentRequestCounter,
+    /// Persistent: reusable merchant payment request.
+    PaymentRequest(u32),
+    /// Persistent: payment ID to reusable payment request ID.
+    PaymentRequestPayment(u32),
 }
 
 /// #981: Pending time-locked payout address change.
