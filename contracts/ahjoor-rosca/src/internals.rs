@@ -1,4 +1,4 @@
-use crate::{errors::{Error, ExtError, ExtError2}, events, audit_trail, cycle_limit, hardship, holdback, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, MemberPayoutEntry, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
+use crate::{errors::{Error, ExtError, ExtError2}, events, audit_trail, bans, charter, cycle_limit, hardship, holdback, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, MemberPayoutEntry, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
 use soroban_sdk::{panic_with_error, token, Address, Bytes, BytesN, Env, Map, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -1068,6 +1068,58 @@ pub(crate) fn decrement_membership_count(env: &Env, member: &Address) {
         counts.set(member.clone(), count - 1);
     }
     save_membership_counts(env, &counts);
+}
+
+/// Shared body of `add_member` / `approve_join_request`: validates the
+/// group isn't mid-round, isn't full, the address isn't already a member,
+/// banned, or missing a required charter acknowledgement, then adds `new_member`
+/// to both the members list and the end of the payout order.
+pub(crate) fn add_member_internal(env: &Env, new_member: &Address) {
+    let paid_members: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::PaidMembers)
+        .unwrap_or(Vec::new(env));
+    if !paid_members.is_empty() {
+        panic_with_error!(env, Error::CannotChangeMidRound);
+    }
+
+    let mut members: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::Members)
+        .expect("Not initialized");
+
+    let max_members: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::MaxMembers)
+        .unwrap_or(50);
+
+    if (members.len() as u32) >= max_members {
+        panic_with_error!(env, Error::GroupFull);
+    }
+
+    if members.contains(new_member) {
+        panic_with_error!(env, Error::AlreadyAMember);
+    }
+    bans::require_not_banned(env, new_member);
+    charter::require_charter_acknowledged(env, new_member);
+    increment_membership_count(env, new_member);
+    members.push_back(new_member.clone());
+    env.storage().instance().set(&DataKey::Members, &members);
+
+    let mut payout_order: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::PayoutOrder)
+        .expect("Payout order not set");
+    payout_order.push_back(new_member.clone());
+    env.storage()
+        .instance()
+        .set(&DataKey::PayoutOrder, &payout_order);
+
+    events::emit_mem_add(env, new_member.clone(), members.len() as u32);
 }
 
 /// Removes a member from both the members list and the payout order.
