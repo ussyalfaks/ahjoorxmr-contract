@@ -2224,6 +2224,33 @@ pub fn emit_payout_beneficiary_cleared(e: &Env, member: Address) {
     PayoutBeneficiaryCleared { member }.publish(e);
 }
 
+/// Event: A member configured payout splits across multiple recipients.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutSplitsSet {
+    pub member: Address,
+    pub split_count: u32,
+}
+
+pub fn emit_payout_splits_set(e: &Env, member: Address, split_count: u32) {
+    PayoutSplitsSet {
+        member,
+        split_count,
+    }
+    .publish(e);
+}
+
+/// Event: A member cleared their payout splits.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutSplitsCleared {
+    pub member: Address,
+}
+
+pub fn emit_payout_splits_cleared(e: &Env, member: Address) {
+    PayoutSplitsCleared { member }.publish(e);
+}
+
 /// Event: A round payout was delivered. `beneficiary` is the address that
 /// actually received the funds (equal to `member` when none is nominated).
 #[contractevent]
