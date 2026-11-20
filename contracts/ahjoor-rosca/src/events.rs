@@ -2224,6 +2224,117 @@ pub fn emit_payout_beneficiary_cleared(e: &Env, member: Address) {
     PayoutBeneficiaryCleared { member }.publish(e);
 }
 
+// ── Payout Escrow Routing ─────────────────────────────────────────────────────
+
+/// Event: The ahjoor-escrow contract used for payout routing was configured.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowContractSet {
+    pub escrow_contract: Address,
+}
+
+pub fn emit_escrow_contract_set(e: &Env, escrow_contract: Address) {
+    EscrowContractSet { escrow_contract }.publish(e);
+}
+
+/// Event: A member configured an escrow target for their upcoming payout.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutEscrowTargetSet {
+    pub member: Address,
+    pub seller: Address,
+    pub arbiter: Address,
+    pub deadline: u64,
+}
+
+pub fn emit_payout_escrow_target_set(
+    e: &Env,
+    member: Address,
+    seller: Address,
+    arbiter: Address,
+    deadline: u64,
+) {
+    PayoutEscrowTargetSet {
+        member,
+        seller,
+        arbiter,
+        deadline,
+    }
+    .publish(e);
+}
+
+/// Event: A member cleared their escrow target.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutEscrowTargetCleared {
+    pub member: Address,
+}
+
+pub fn emit_payout_escrow_target_cleared(e: &Env, member: Address) {
+    PayoutEscrowTargetCleared { member }.publish(e);
+}
+
+/// Event: A payout was routed into an escrow agreement.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutEscrowCreated {
+    pub round: u32,
+    pub member: Address,
+    pub escrow_id: u32,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+pub fn emit_payout_escrow_created(
+    e: &Env,
+    round: u32,
+    member: Address,
+    escrow_id: u32,
+    seller: Address,
+    token: Address,
+    amount: i128,
+) {
+    PayoutEscrowCreated {
+        round,
+        member,
+        escrow_id,
+        seller,
+        token,
+        amount,
+    }
+    .publish(e);
+}
+
+/// Event: The escrow call failed and the payout was transferred directly.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutEscrowFallback {
+    pub round: u32,
+    pub member: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+pub fn emit_payout_escrow_fallback(
+    e: &Env,
+    round: u32,
+    member: Address,
+    seller: Address,
+    token: Address,
+    amount: i128,
+) {
+    PayoutEscrowFallback {
+        round,
+        member,
+        seller,
+        token,
+        amount,
+    }
+    .publish(e);
+}
+
 /// Event: A round payout was delivered. `beneficiary` is the address that
 /// actually received the funds (equal to `member` when none is nominated).
 #[contractevent]

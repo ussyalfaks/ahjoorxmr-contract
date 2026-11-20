@@ -40,11 +40,13 @@ mod bans;
 mod charter;
 mod cycle_limit;
 mod errors;
+mod escrow_client;
 mod events;
 mod holdback;
 mod internals;
 mod metadata;
 mod obligations;
+mod payout_escrow;
 mod penalty_waiver;
 mod round_extension;
 pub mod savings_goal_tracking;
@@ -4770,6 +4772,87 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .get(&DataKey5::PayoutBeneficiary(member))
+    }
+
+    /// Admin: configure the ahjoor-escrow contract used to route payouts.
+    pub fn set_escrow_contract(env: Env, admin: Address, escrow_contract: Address) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey5::EscrowContract, &escrow_contract);
+        events::emit_escrow_contract_set(&env, escrow_contract);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Alias for `set_escrow_contract`.
+    pub fn set_payout_escrow_contract(env: Env, admin: Address, escrow_contract: Address) {
+        Self::set_escrow_contract(env, admin, escrow_contract);
+    }
+
+    /// View: the configured ahjoor-escrow contract, if any.
+    pub fn get_escrow_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey5::EscrowContract)
+    }
+
+    /// Route `member`'s upcoming payout into an ahjoor-escrow agreement with
+    /// `seller` and `arbiter`, expiring at `deadline`. The target applies to
+    /// the next payout only.
+    pub fn set_payout_escrow_target(
+        env: Env,
+        _group_id: u32,
+        member: Address,
+        seller: Address,
+        arbiter: Address,
+        deadline: u64,
+    ) {
+        internals::check_not_paused(&env);
+        member.require_auth();
+        Self::check_beneficiary_change_allowed(&env, &member);
+
+        let target = PayoutEscrowTarget {
+            seller: seller.clone(),
+            arbiter: arbiter.clone(),
+            deadline,
+        };
+        payout_escrow::set_target(&env, &member, &target);
+        events::emit_payout_escrow_target_set(&env, member, seller, arbiter, deadline);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Remove `member`'s pending payout escrow target.
+    pub fn clear_payout_escrow_target(env: Env, member: Address) {
+        internals::check_not_paused(&env);
+        member.require_auth();
+        Self::check_beneficiary_change_allowed(&env, &member);
+
+        payout_escrow::clear_target(&env, &member);
+        events::emit_payout_escrow_target_cleared(&env, member);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// View: `member`'s pending payout escrow target, if any.
+    pub fn get_payout_escrow_target(env: Env, member: Address) -> Option<PayoutEscrowTarget> {
+        payout_escrow::get_target(&env, &member)
     }
 
     fn check_beneficiary_change_allowed(env: &Env, member: &Address) {
@@ -13576,6 +13659,7 @@ mod test_waitlist;
 mod test_voluntary_exit;
 mod test_prepay;
 mod test_payout_beneficiary;
+mod test_payout_escrow;
 mod test_charter;
 mod test_succession;
 mod test_streak_bonus;
