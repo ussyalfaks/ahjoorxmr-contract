@@ -538,6 +538,10 @@ pub enum DataKey5 {
     HardshipRoundMembers(u32),
     /// i128 — reserve funds drawn for approved reductions, not yet settled.
     HardshipEarmarked,
+
+    // ── Payout Splits (#1123) ─────────────────────────────────────────────────
+    /// Vec<(Address, u32)> — member → payout recipients and basis points.
+    PayoutSplits(Address),
 }
 
 // ── Contribution Streak Bonus ─────────────────────────────────────────────────

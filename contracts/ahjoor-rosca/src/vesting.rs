@@ -10,8 +10,8 @@
 use crate::charter;
 use crate::errors::ExtError3;
 use crate::{
-    events, DataKey, DataKey2, DataKey5, ProposalType, VestingRecord, PERSISTENT_BUMP_AMOUNT,
-    PERSISTENT_LIFETIME_THRESHOLD,
+    events, payout_split, DataKey, DataKey2, DataKey5, ProposalType, VestingRecord,
+    PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD,
 };
 use soroban_sdk::{panic_with_error, token, Address, Env, Map, Vec};
 
@@ -107,16 +107,8 @@ pub(crate) fn claimable_amount(env: &Env, record: &VestingRecord) -> i128 {
     vested_amount(env, record) - record.released
 }
 
-/// Where released funds go: the member's nominated payout beneficiary, or
-/// the member themselves.
-fn payout_destination(env: &Env, member: &Address) -> Address {
-    env.storage()
-        .instance()
-        .get(&DataKey5::PayoutBeneficiary(member.clone()))
-        .unwrap_or(member.clone())
-}
-
-/// Releases everything vested so far. Returns the amount transferred.
+/// Releases everything vested so far, honouring payout splits or a nominated
+/// beneficiary. Returns the amount transferred.
 fn release(env: &Env, record: &mut VestingRecord) -> i128 {
     let amount = claimable_amount(env, record);
     if amount <= 0 {
@@ -125,13 +117,18 @@ fn release(env: &Env, record: &mut VestingRecord) -> i128 {
     record.released += amount;
     adjust_locked(env, -amount);
     let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-    let recipient = payout_destination(env, &record.member);
-    token::Client::new(env, &token_addr).transfer(
-        &env.current_contract_address(),
-        &recipient,
-        &amount,
-    );
-    events::emit_vested_claimed(env, record.member.clone(), recipient, amount);
+    let destinations = payout_split::resolve(env, &record.member, amount);
+    let client = token::Client::new(env, &token_addr);
+    for (recipient, share) in destinations.iter() {
+        if share > 0 {
+            client.transfer(
+                &env.current_contract_address(),
+                &recipient,
+                &share,
+            );
+            events::emit_vested_claimed(env, record.member.clone(), recipient, share);
+        }
+    }
     amount
 }
 

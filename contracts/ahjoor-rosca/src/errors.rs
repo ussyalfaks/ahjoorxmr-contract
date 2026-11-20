@@ -344,4 +344,10 @@ pub enum ExtError3 {
     HardshipAlreadyUsedThisCycle = 181,
     /// The emergency reserve cannot cover the requested shortfall.
     InsufficientReserveForHardship = 182,
+    // ── Payout Splits (#1123) ────────────────────────────────────────────────
+    /// Payout splits are invalid (empty, too many, duplicate/contract
+    /// recipient, zero bps, or total bps not equal to 10_000).
+    InvalidPayoutSplit = 185,
+    /// Payout splits and a single payout beneficiary cannot both be active.
+    PayoutSplitsBeneficiaryConflict = 186,
 }

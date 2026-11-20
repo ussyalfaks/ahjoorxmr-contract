@@ -1,4 +1,4 @@
-use crate::{errors::{Error, ExtError, ExtError2}, events, audit_trail, cycle_limit, hardship, holdback, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, MemberPayoutEntry, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
+use crate::{errors::{Error, ExtError, ExtError2}, events, audit_trail, cycle_limit, hardship, holdback, payout_split, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, MemberPayoutEntry, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
 use soroban_sdk::{panic_with_error, token, Address, Bytes, BytesN, Env, Map, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -319,23 +319,16 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
                 vesting::vest_payout(env, &payout_recipient, payout_amount, current_round);
                 record_member_payout(env, &payout_recipient, current_round, &token_addr, payout_amount);
             } else if payout_amount > 0 {
-                // Transfer payout to the nominated beneficiary, or the recipient
-                // themselves when no beneficiary is set.
-                let payout_destination: Address = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey5::PayoutBeneficiary(payout_recipient.clone()))
-                    .unwrap_or(payout_recipient.clone());
-                client.transfer(&env.current_contract_address(), &payout_destination, &payout_amount);
-                record_member_payout(env, &payout_recipient, current_round, &token_addr, payout_amount);
-                events::emit_payout_delivered(
+                // Honour payout splits, or route the whole payout to the
+                // nominated beneficiary (or the recipient themselves).
+                payout_split::deliver(
                     env,
                     current_round,
-                    payout_recipient.clone(),
-                    payout_destination,
-                    token_addr.clone(),
+                    &payout_recipient,
+                    &token_addr,
                     payout_amount,
                 );
+                record_member_payout(env, &payout_recipient, current_round, &token_addr, payout_amount);
             }
 
             // Transfer fee to fee recipient

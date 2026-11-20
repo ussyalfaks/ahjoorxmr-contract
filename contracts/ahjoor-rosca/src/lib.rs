@@ -45,6 +45,7 @@ mod holdback;
 mod internals;
 mod metadata;
 mod obligations;
+mod payout_split;
 mod penalty_waiver;
 mod round_extension;
 pub mod savings_goal_tracking;
@@ -68,7 +69,7 @@ mod migration_client;
 pub use migration_client::RoscaMigrationClient;
 pub use obligations::RoscaObligationClient;
 
-use crate::errors::{Error, ExtError, ExtError2};
+use crate::errors::{Error, ExtError, ExtError2, ExtError3};
 
 #[contract]
 pub struct AhjoorContract;
@@ -4739,6 +4740,10 @@ impl AhjoorContract {
             panic_with_error!(&env, ExtError2::InvalidBeneficiary);
         }
 
+        if payout_split::get(&env, &member).is_some() {
+            panic_with_error!(&env, ExtError3::PayoutSplitsBeneficiaryConflict);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey5::PayoutBeneficiary(member.clone()), &beneficiary);
@@ -4770,6 +4775,56 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .get(&DataKey5::PayoutBeneficiary(member))
+    }
+
+    /// Split `member`'s payouts across multiple addresses by basis points.
+    /// `splits` must be non-empty, contain at most 10 unique non-contract
+    /// recipients, and sum to exactly 10_000 bps. Any rounding dust is paid to
+    /// `member`. A member cannot have both splits and a single beneficiary.
+    pub fn set_payout_splits(
+        env: Env,
+        _group_id: u32,
+        member: Address,
+        splits: Vec<(Address, u32)>,
+    ) {
+        internals::check_not_paused(&env);
+        member.require_auth();
+        Self::check_beneficiary_change_allowed(&env, &member);
+
+        let existing_beneficiary: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey5::PayoutBeneficiary(member.clone()));
+        if existing_beneficiary.is_some() {
+            panic_with_error!(&env, ExtError3::PayoutSplitsBeneficiaryConflict);
+        }
+
+        payout_split::set(&env, &member, &splits);
+        events::emit_payout_splits_set(&env, member, splits.len());
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Remove `member`'s payout splits so payouts go to the beneficiary or the
+    /// member themselves.
+    pub fn clear_payout_splits(env: Env, member: Address) {
+        internals::check_not_paused(&env);
+        member.require_auth();
+        Self::check_beneficiary_change_allowed(&env, &member);
+
+        payout_split::clear(&env, &member);
+        events::emit_payout_splits_cleared(&env, member);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// View: the payout splits configured by `member`, if any.
+    pub fn get_payout_splits(env: Env, member: Address) -> Option<Vec<(Address, u32)>> {
+        payout_split::get(&env, &member)
     }
 
     fn check_beneficiary_change_allowed(env: &Env, member: &Address) {
@@ -13576,6 +13631,7 @@ mod test_waitlist;
 mod test_voluntary_exit;
 mod test_prepay;
 mod test_payout_beneficiary;
+mod test_payout_splits;
 mod test_charter;
 mod test_succession;
 mod test_streak_bonus;
