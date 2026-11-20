@@ -345,3 +345,45 @@ pub enum ExtError3 {
     /// The emergency reserve cannot cover the requested shortfall.
     InsufficientReserveForHardship = 182,
 }
+
+/// Extension error codes 191+ — overflow from ExtError3 (50-variant limit).
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtError4 {
+    // ── Per-Member Collateral Deposit ─────────────────────────────────────────
+    /// collateral_amount must be positive when set, 0 to disable.
+    InvalidCollateralAmount = 191,
+    /// collateral_slash_bps must be between 0 and 10_000.
+    InvalidCollateralSlashBps = 192,
+    /// Collateral requirement cannot be changed after the group is activated.
+    CollateralLockedAfterActivation = 193,
+    /// Collateral deposits are not enabled for this group.
+    CollateralNotRequired = 194,
+    /// The member has already deposited the full collateral requirement.
+    CollateralAlreadyDeposited = 195,
+    /// The member has no collateral balance to withdraw.
+    NoCollateralBalance = 196,
+    /// Collateral can only be withdrawn once the member has left the group
+    /// or the group has completed.
+    CollateralWithdrawalNotAllowed = 197,
+
+    // ── Payout Token Swap ──────────────────────────────────────────────────────
+    /// max_slippage_bps must be between 0 and 10_000.
+    InvalidSlippageBps = 198,
+    /// The requested preferred payout token is not an approved token.
+    PreferredTokenNotApproved = 199,
+
+    // ── Admin-Attested Offline (Cash) Contributions ───────────────────────────
+    /// amount must be positive and not exceed the member's remaining
+    /// requirement for the round.
+    InvalidOfflineAmount = 200,
+    /// An offline contribution attestation is already pending for this
+    /// (member, round).
+    OfflineAttestationAlreadyPending = 201,
+    /// No offline contribution attestation found for this (member, round).
+    OfflineAttestationNotFound = 202,
+    /// The attestation has already been confirmed or rejected.
+    OfflineAttestationAlreadySettled = 203,
+    /// The attestation window has not yet elapsed; only the member can act.
+    OfflineAttestationWindowOpen = 204,
+}
