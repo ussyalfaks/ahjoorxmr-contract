@@ -1245,6 +1245,37 @@ pub enum DataKey6 {
     // ── Group Metadata ────────────────────────────────────────────────────────
     /// GroupMetadata — display name, category and description hash.
     GroupMetadata,
+
+    // ── Per-Member Collateral Deposit ─────────────────────────────────────────
+    /// i128 — amount each member must deposit before being exposed to
+    /// slashing on default. 0 (default) disables the feature.
+    CollateralAmount,
+    /// u32 — bps of a member's remaining collateral balance slashed each time
+    /// they default (e.g. 10_000 = slash the full remaining balance).
+    CollateralSlashBps,
+    /// Map<Address, i128> — each member's currently-deposited collateral
+    /// balance, net of any slashing already applied.
+    CollateralBalances,
+
+    // ── Payout Token Swap ──────────────────────────────────────────────────────
+    /// Address — DEX router contract used to convert a round payout into a
+    /// recipient's preferred token. Absent = swapping disabled.
+    SwapRouter,
+    /// u32 — max acceptable slippage (bps) for a payout swap; the swap is
+    /// skipped (member is paid in the base token instead) if it would exceed
+    /// this.
+    PayoutSwapSlippageBps,
+    /// Address — the token `member` prefers to receive their payout in,
+    /// instead of the group's base token. Must be an approved token. Absent
+    /// = paid in the base token (default).
+    PreferredPayoutToken(Address),
+
+    // ── Admin-Attested Offline (Cash) Contributions ───────────────────────────
+    /// u32 — ledgers a member has to confirm or reject an attested offline
+    /// contribution before it can be reclaimed by the admin. 0 = no expiry.
+    OfflineAttestationWindowLedgers,
+    /// OfflineContribution — (member, round) → pending/settled attestation.
+    OfflineContribution(Address, u32),
 }
 
 // ── Cross-Group Member Obligations ────────────────────────────────────────────
@@ -1340,4 +1371,34 @@ pub struct HardshipRequest {
     pub reduced_amount: i128,
     pub shortfall: i128,
     pub approved: bool,
+}
+
+// ── Admin-Attested Offline (Cash) Contributions ───────────────────────────────
+
+/// Status of an admin-attested offline contribution, pending the member's
+/// on-chain confirmation before it counts toward their round requirement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum OfflineContributionStatus {
+    /// Admin attested; awaiting the member's confirmation or rejection.
+    Pending = 0,
+    /// Member confirmed; amount credited toward their contribution.
+    Confirmed = 1,
+    /// Member rejected; escrowed funds returned to the attesting admin.
+    Rejected = 2,
+}
+
+/// An admin's claim that `member` paid `amount` in cash (off-chain) for
+/// `round`. The admin escrows the equivalent on-chain amount at attestation
+/// time so the round pot stays solvent; the member's confirmation (or
+/// rejection) settles that escrow.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineContribution {
+    pub member: Address,
+    pub round: u32,
+    pub amount: i128,
+    pub attested_by: Address,
+    pub attested_at_ledger: u32,
+    pub status: OfflineContributionStatus,
 }
