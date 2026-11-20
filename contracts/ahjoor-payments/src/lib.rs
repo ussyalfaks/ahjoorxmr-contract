@@ -259,6 +259,62 @@ pub enum ExtError {
     PaymentRequestExhausted = 86,
 }
 
+/// Domain errors for settlement batches (#1163), price-lock quotes (#1165)
+/// and security deposits (#1167). Split out because `ExtError` is bounded
+/// to 50 variants.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtError2 {
+    /// #1163: no settlement batch exists with the given ID.
+    SettlementBatchNotFound = 100,
+    /// #1163: page `limit` is zero or above `MAX_SETTLEMENT_BATCH_PAGE_SIZE`.
+    InvalidPageLimit = 101,
+    /// #1165: no oracle-priced payment exists with the given ID.
+    OraclePricedPaymentNotFound = 102,
+    /// #1165: caller is not the oracle-priced payment's merchant.
+    NotPaymentMerchant = 103,
+    /// #1165: the oracle-priced payment has already been paid.
+    PaymentAlreadyPaid = 104,
+    /// #1165: quoted rate must be positive.
+    InvalidQuoteRate = 105,
+    /// #1165: quote expiry ledger must be after the current ledger.
+    InvalidQuoteExpiry = 106,
+    /// #1165: quoted rate deviates from the oracle by more than the configured slippage.
+    QuoteOutsideSlippage = 107,
+    /// #1165: the price-lock quote expired before the payment was made.
+    QuoteExpired = 108,
+    /// #1165: oracle / USDC token has not been configured.
+    OracleNotConfigured = 109,
+    /// #1165: oracle returned no price, or a non-positive price.
+    OraclePriceUnavailable = 110,
+    /// #1165: oracle price is older than `MaxOracleAge`.
+    OraclePriceStale = 111,
+    /// #1167: no security deposit exists with the given ID.
+    SecurityDepositNotFound = 112,
+    /// #1167: deposit amount must be positive.
+    InvalidDepositAmount = 113,
+    /// #1167: `return_by` must be after the current ledger.
+    InvalidReturnBy = 114,
+    /// #1167: merchant and customer must be different addresses.
+    InvalidDepositParties = 115,
+    /// #1167: caller is not the deposit's merchant.
+    NotDepositMerchant = 116,
+    /// #1167: caller is not the deposit's customer.
+    NotDepositCustomer = 117,
+    /// #1167: the deposit is not in a status that allows this action.
+    InvalidDepositStatus = 118,
+    /// #1167: the merchant can no longer claim deductions after `return_by`.
+    ReturnDeadlinePassed = 119,
+    /// #1167: the customer cannot reclaim the deposit before `return_by` has passed.
+    ReturnDeadlineNotReached = 120,
+    /// #1167: deductions list is empty, too long, or contains a non-positive amount.
+    InvalidDeduction = 121,
+    /// #1167: total deductions exceed the deposit amount.
+    DeductionsExceedDeposit = 122,
+    /// #1167: caller is not the contract admin.
+    NotAdmin = 123,
+}
+
 /// Per-merchant withdrawal rate limit config (#231).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1195,6 +1251,34 @@ pub enum DataKey3 {
     /// Persistent: payment ID to reusable payment request ID.
     PaymentRequestPayment(u32),
 }
+
+/// Overflow DataKey4 — storage for settlement batches (#1163), price-lock
+/// quotes (#1165) and security deposits (#1167).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey4 {
+    /// #1163: Instance: last issued settlement batch ID
+    SettlementBatchCounter,
+    /// #1163: Persistent: settlement batch record keyed by batch ID
+    SettlementBatch(u32),
+    /// #1163: Persistent: merchant → Vec<u32> of settlement batch IDs, oldest first
+    MerchantSettlementBatches(Address),
+    /// #1165: Persistent: oracle-priced payment awaiting customer payment
+    OraclePricedPayment(u32),
+    /// #1165: Persistent: active price-lock quote for an oracle-priced payment
+    PriceQuote(u32),
+    /// #1167: Instance: last issued security deposit ID
+    SecurityDepositCounter,
+    /// #1167: Persistent: security deposit record keyed by deposit ID
+    SecurityDeposit(u32),
+}
+
+mod price_quotes;
+mod security_deposits;
+mod settlement_batches;
+pub use price_quotes::{OraclePricedPayment, PriceQuote};
+pub use security_deposits::{SecurityDeposit, SecurityDepositStatus};
+pub use settlement_batches::{PaymentSettlementBatch, MAX_SETTLEMENT_BATCH_PAGE_SIZE};
 
 /// #981: Pending time-locked payout address change.
 #[contracttype]
@@ -2155,12 +2239,14 @@ impl AhjoorPaymentsContract {
 
     /// Settle a merchant batch in one transfer.
     /// Validates all payment IDs first, then executes settlement atomically.
+    /// Records a `PaymentSettlementBatch` for reconciliation (#1163) and
+    /// returns its batch ID.
     pub fn settle_merchant_payments(
         env: Env,
         admin: Address,
         merchant: Address,
         payment_ids: Vec<u32>,
-    ) {
+    ) -> u32 {
         Self::require_not_paused(&env);
         admin.require_auth();
         let stored_admin: Address = env
@@ -2296,6 +2382,18 @@ impl AhjoorPaymentsContract {
             projected_volume,
         );
 
+        // #1163: persist the batch so merchants can reconcile against it.
+        let batch_id = Self::record_settlement_batch(
+            &env,
+            &merchant,
+            &settlement_token,
+            &payment_ids,
+            total_amount,
+            fee_collected,
+            net_amount,
+            reserve_hold,
+        );
+
         events::emit_batch_settlement_processed(
             &env,
             merchant,
@@ -2307,6 +2405,8 @@ impl AhjoorPaymentsContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        batch_id
     }
 
     // --- Dispute Methods ---
@@ -12459,6 +12559,15 @@ impl AhjoorPaymentsContract {
 
 #[cfg(test)]
 mod test_disputes_by_merchant;
+
+#[cfg(test)]
+mod test_settlement_batches;
+
+#[cfg(test)]
+mod test_price_quotes;
+
+#[cfg(test)]
+mod test_security_deposits;
 
 #[cfg(test)]
 mod test_tip;
