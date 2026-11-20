@@ -538,6 +538,24 @@ pub enum DataKey5 {
     HardshipRoundMembers(u32),
     /// i128 — reserve funds drawn for approved reductions, not yet settled.
     HardshipEarmarked,
+
+    // ── Payout Escrow Routing (#1124) ─────────────────────────────────────────
+    /// Address — the ahjoor-escrow contract used for payout escrow routing.
+    EscrowContract,
+    /// PayoutEscrowTarget — member → pending escrow target for their payout.
+    PayoutEscrowTarget(Address),
+}
+
+// ── Payout Escrow Routing ─────────────────────────────────────────────────────
+
+/// A member's request to route their next ROSCA payout into an escrow
+/// agreement with `seller` and `arbiter` by `deadline`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayoutEscrowTarget {
+    pub seller: Address,
+    pub arbiter: Address,
+    pub deadline: u64,
 }
 
 // ── Contribution Streak Bonus ─────────────────────────────────────────────────

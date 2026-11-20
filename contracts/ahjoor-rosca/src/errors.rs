@@ -344,4 +344,8 @@ pub enum ExtError3 {
     HardshipAlreadyUsedThisCycle = 181,
     /// The emergency reserve cannot cover the requested shortfall.
     InsufficientReserveForHardship = 182,
+    // ── Payout Escrow Routing (#1124) ────────────────────────────────────────
+    /// The escrow target is invalid (deadline not in the future or the
+    /// contract itself was used as seller/arbiter).
+    InvalidPayoutEscrowTarget = 187,
 }
