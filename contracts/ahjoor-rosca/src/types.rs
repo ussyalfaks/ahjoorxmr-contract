@@ -154,6 +154,8 @@ pub enum ProposalType {
     WaivePenalty = 9,
     MemberBan = 10,          // Ban target_member from rejoining the group
     HardshipReduction = 11,  // One-round contribution reduction covered by the emergency reserve
+    /// Change the group's contribution amount from the next cycle onward.
+    ChangeContributionAmount = 13,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -538,6 +540,21 @@ pub enum DataKey5 {
     HardshipRoundMembers(u32),
     /// i128 — reserve funds drawn for approved reductions, not yet settled.
     HardshipEarmarked,
+
+    // ── Contribution Amount Governance (#1127) ────────────────────────────────
+    /// PendingContributionChange — amount scheduled for a future cycle.
+    PendingContributionChange,
+}
+
+// ── Contribution Amount Governance ───────────────────────────────────────────
+
+/// A governance-approved contribution amount waiting for its target cycle.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingContributionChange {
+    pub amount: i128,
+    pub effective_cycle: u32,
+    pub proposal_id: u32,
 }
 
 // ── Contribution Streak Bonus ─────────────────────────────────────────────────

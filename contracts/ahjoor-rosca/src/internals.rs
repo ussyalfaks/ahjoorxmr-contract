@@ -1,4 +1,4 @@
-use crate::{errors::{Error, ExtError, ExtError2}, events, audit_trail, cycle_limit, hardship, holdback, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, MemberPayoutEntry, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
+use crate::{errors::{Error, ExtError, ExtError2}, events, audit_trail, contribution_amount, cycle_limit, hardship, holdback, streak, vesting, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, DataKey5, MemberPayoutEntry, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
 use soroban_sdk::{panic_with_error, token, Address, Bytes, BytesN, Env, Map, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -792,6 +792,8 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
             events::emit_reset(env, current_round);
             return;
         }
+        // Apply any governance-approved contribution amount for this cycle.
+        contribution_amount::apply_pending(env, cycle_number, new_round);
         let members: Vec<Address> = env
             .storage()
             .instance()

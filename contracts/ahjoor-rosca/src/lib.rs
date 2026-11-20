@@ -38,6 +38,7 @@ pub use types::*;
 mod audit_trail;
 mod bans;
 mod charter;
+mod contribution_amount;
 mod cycle_limit;
 mod errors;
 mod events;
@@ -68,7 +69,7 @@ mod migration_client;
 pub use migration_client::RoscaMigrationClient;
 pub use obligations::RoscaObligationClient;
 
-use crate::errors::{Error, ExtError, ExtError2};
+use crate::errors::{Error, ExtError, ExtError2, ExtError3};
 
 #[contract]
 pub struct AhjoorContract;
@@ -4508,6 +4509,37 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Open a `ChangeContributionAmount` proposal. If passed, `new_amount`
+    /// takes effect from the next cycle only.
+    pub fn propose_contribution_change(
+        env: Env,
+        proposer: Address,
+        new_amount: i128,
+        voting_duration: u64,
+    ) -> u32 {
+        internals::check_not_paused(&env);
+        proposer.require_auth();
+        Self::create_proposal_internal(
+            &env,
+            proposer.clone(),
+            ProposalType::ChangeContributionAmount,
+            String::from_str(&env, "Change contribution amount"),
+            proposer,
+            voting_duration,
+            Some(new_amount),
+        )
+    }
+
+    /// Alias for `propose_contribution_change`.
+    pub fn propose_amount_change(
+        env: Env,
+        proposer: Address,
+        new_amount: i128,
+        voting_duration: u64,
+    ) -> u32 {
+        Self::propose_contribution_change(env, proposer, new_amount, voting_duration)
+    }
+
     pub fn create_proposal(
         env: Env,
         creator: Address,
@@ -4560,6 +4592,10 @@ impl AhjoorContract {
             ProposalType::WaivePenalty => {
                 penalty_waiver::require_penalty_exists(&env, &target_member, execution_data);
             }
+            ProposalType::ChangeContributionAmount => match execution_data {
+                Some(amount) => contribution_amount::validate(&env, amount),
+                None => panic_with_error!(&env, ExtError3::InvalidContributionAmount),
+            },
             _ => {}
         }
 
@@ -5110,6 +5146,13 @@ impl AhjoorContract {
                     &proposal.target_member,
                     proposal.execution_data,
                 );
+            }
+            ProposalType::ChangeContributionAmount => {
+                let amount = match proposal.execution_data {
+                    Some(amount) => amount,
+                    None => panic_with_error!(&env, ExtError3::InvalidContributionAmount),
+                };
+                contribution_amount::schedule(&env, proposal_id, amount);
             }
             ProposalType::MemberFreeze => {
                 let mut reasons: Map<u32, BytesN<32>> = env
@@ -6642,6 +6685,19 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::QuorumPercentage)
             .unwrap_or(51)
+    }
+
+    /// View: the current per-member contribution amount.
+    pub fn get_contribution_amount(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContributionAmt)
+            .unwrap_or(0)
+    }
+
+    /// View: the contribution amount change waiting for a future cycle, if any.
+    pub fn get_pending_contribution_change(env: Env) -> Option<PendingContributionChange> {
+        contribution_amount::get_pending(&env)
     }
 
     /// #751: Read the per-ProposalType quorum override set via `set_quorum_per_type`,
@@ -13552,6 +13608,7 @@ impl AhjoorContract {
 mod test;
 mod test_audit_trail;
 mod test_contrib_delegation;
+mod test_contribution_amount_governance;
 mod test_cosigner_guarantee;
 mod test_dissolution;
 mod test_emergency_loan;
