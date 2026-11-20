@@ -344,4 +344,11 @@ pub enum ExtError3 {
     HardshipAlreadyUsedThisCycle = 181,
     /// The emergency reserve cannot cover the requested shortfall.
     InsufficientReserveForHardship = 182,
+    // ── Contribution Amount Governance (#1127) ───────────────────────────────
+    /// The proposed contribution amount must be positive.
+    InvalidContributionAmount = 189,
+    /// `amount * member_count` overflows i128.
+    ContributionAmountOverflow = 190,
+    /// A contribution amount change is already scheduled for the next cycle.
+    ContributionAmountChangePending = 191,
 }
