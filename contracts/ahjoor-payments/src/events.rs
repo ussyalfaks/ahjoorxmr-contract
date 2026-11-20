@@ -2271,3 +2271,53 @@ pub fn emit_settled_payment_refunded(
 ) {
     SettledPaymentRefunded { payment_id, merchant, amount, from_reserve }.publish(e);
 }
+
+// --- Sales-tax events ---
+
+/// Event: Tax withheld at settlement and forwarded to the merchant's tax address.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TaxCollected {
+    pub payment_id: u32,
+    pub merchant: Address,
+    /// Amount forwarded to tax_address.
+    pub amount: i128,
+    /// Destination address for the withheld tax.
+    pub tax_address: Address,
+    pub token: Address,
+}
+
+pub fn emit_tax_collected(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    amount: i128,
+    tax_address: Address,
+    token: Address,
+) {
+    TaxCollected { payment_id, merchant, amount, tax_address, token }.publish(e);
+}
+
+/// Event: Tax portion reversed back to the customer as part of a refund.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TaxRefunded {
+    pub payment_id: u32,
+    pub merchant: Address,
+    /// Tax amount returned to the customer.
+    pub amount: i128,
+    /// The tax_address that originally received the tax (informational).
+    pub tax_address: Address,
+    pub token: Address,
+}
+
+pub fn emit_tax_refunded(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    amount: i128,
+    tax_address: Address,
+    token: Address,
+) {
+    TaxRefunded { payment_id, merchant, amount, tax_address, token }.publish(e);
+}
