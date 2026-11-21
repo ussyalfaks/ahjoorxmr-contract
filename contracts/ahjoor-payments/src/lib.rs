@@ -10,6 +10,10 @@ pub mod multi_token_invoice;
 pub mod multi_token_invoice_impl;
 pub mod pre_approved_spending;
 pub mod pre_approved_spending_impl;
+pub mod customer_spend;
+pub mod fulfilment;
+pub mod security_deposit;
+pub mod withdrawal_policy;
 
 /// Maximum length (bytes) for the optional payment reference string.
 const MAX_REFERENCE_LEN: u32 = 64;
@@ -2781,6 +2785,13 @@ impl AhjoorPaymentsContract {
 
         payment.status = PaymentStatus::CancelledInCoolingOff;
         payment.refunded_amount = payment.amount;
+        // #1166: customer spend aggregate
+        customer_spend::record_customer_refund(
+            &env,
+            &payment.customer,
+            &payment.category,
+            payment.amount,
+        );
 
         env.storage()
             .persistent()
@@ -5345,6 +5356,9 @@ impl AhjoorPaymentsContract {
             panic!("Withdrawal would drop collateral below minimum required");
         }
 
+        // #1169: above the merchant's policy threshold, withdrawals need signer approval.
+        withdrawal_policy::enforce_single_key_withdrawal(&env, &merchant, amount);
+
         let usdc_token: Address = env
             .storage()
             .instance()
@@ -6174,6 +6188,8 @@ impl AhjoorPaymentsContract {
         Self::reverse_points_for_refund(&env, &payment.customer, amount, payment.amount);
         Self::inc_global_refunded(&env, &payment.token, amount);
         Self::inc_merchant_refunded(&env, &merchant, &payment.token, amount);
+        // #1166: customer spend aggregate
+        customer_spend::record_customer_refund(&env, &payment.customer, &payment.category, amount);
 
         env.storage()
             .persistent()
@@ -8172,6 +8188,13 @@ impl AhjoorPaymentsContract {
 
         Self::inc_global_completed(env, &payment.token, net_amount);
         Self::inc_merchant_completed(env, &payment.merchant, &payment.token, net_amount);
+        // #1166: customer spend aggregate (gross amount the customer paid).
+        customer_spend::record_customer_spend(
+            env,
+            &payment.customer,
+            &payment.category,
+            original_amount,
+        );
         Self::inc_volume_bucket(env, &payment.token, net_amount);
         Self::inc_merchant_volume_bucket(env, &payment.merchant, original_amount);
 
@@ -12540,5 +12563,17 @@ mod test_get_payment_expiry_bounds;
 mod test_merchant_tokens_swap_router;
 #[cfg(test)]
 mod test_unblock_evidence_dispute;
+
+#[cfg(test)]
+mod test_customer_spend;
+
+#[cfg(test)]
+mod test_fulfilment;
+
+#[cfg(test)]
+mod test_security_deposit;
+
+#[cfg(test)]
+mod test_withdrawal_policy;
 
 pub use events::*;
