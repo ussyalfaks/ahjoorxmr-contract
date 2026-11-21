@@ -43,6 +43,8 @@ mod errors;
 mod events;
 mod holdback;
 mod internals;
+mod join_requests;
+mod keeper_bounty;
 mod metadata;
 mod obligations;
 mod penalty_waiver;
@@ -1342,7 +1344,25 @@ impl AhjoorContract {
             .get(&DataKey::Admin)
             .expect("Admin not set");
         admin.require_auth();
+        Self::do_close_round(env.clone());
+    }
 
+    /// Permissionless equivalent of `close_round`: `caller` need not be the
+    /// admin. Still requires the round deadline to have passed (same check
+    /// as `close_round`). If a keeper bounty is configured and funded,
+    /// `caller` is paid out of the bounty pool for triggering the upkeep.
+    pub fn keeper_close_round(env: Env, caller: Address) {
+        internals::check_not_paused(&env);
+        cycle_limit::check_not_completed(&env);
+        internals::check_not_frozen(&env);
+        caller.require_auth();
+        let round = Self::do_close_round(env.clone());
+        keeper_bounty::pay(&env, &caller, round);
+    }
+
+    /// Shared body of `close_round` / `keeper_close_round`. Returns the round
+    /// that was closed.
+    fn do_close_round(env: Env) -> u32 {
         // Guard against an admin calling close_round repeatedly instead of
         // finalize_round: close_round never pays out the pot, never records
         // audit trail (CycleRecord/CycleSnapshotData), and never mints
@@ -1442,6 +1462,7 @@ impl AhjoorContract {
             .set(&DataKey4::UnfinalizedRoundStreak, &(unfinalized_streak + 1));
 
         internals::reset_round_state(&env, current_round);
+        current_round
     }
 
     /// Finalize a round once its deadline has passed.
@@ -4022,53 +4043,86 @@ impl AhjoorContract {
             .expect("Admin not set");
         admin.require_auth();
 
-        // Reject mid-round: paid_members must be empty
-        let paid_members: Vec<Address> = env
+        internals::add_member_internal(&env, &new_member);
+    }
+
+    // ── Private Groups / Join Requests ────────────────────────────────────────
+
+    /// Admin toggles whether the group requires `request_to_join` + approval
+    /// (private) instead of allowing a direct `add_member` call to onboard
+    /// outsiders. `add_member` itself keeps working for the admin either way.
+    pub fn set_group_private(env: Env, is_private: bool) {
+        internals::check_not_paused(&env);
+        let admin: Address = env
             .storage()
             .instance()
-            .get(&DataKey::PaidMembers)
-            .unwrap_or(Vec::new(&env));
-        if !paid_members.is_empty() {
-            panic_with_error!(&env, Error::CannotChangeMidRound);
-        }
-
-        let mut members: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Members)
-            .expect("Not initialized");
-
-        let max_members: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxMembers)
-            .unwrap_or(50);
-
-        if (members.len() as u32) >= max_members {
-            panic_with_error!(&env, Error::GroupFull);
-        }
-
-        if members.contains(&new_member) {
-            panic_with_error!(&env, Error::AlreadyAMember);
-        }
-        bans::require_not_banned(&env, &new_member);
-        charter::require_charter_acknowledged(&env, &new_member);
-        internals::increment_membership_count(&env, &new_member);
-        members.push_back(new_member.clone());
-        env.storage().instance().set(&DataKey::Members, &members);
-
-        // Recalculate payout order: append new member to the end
-        let mut payout_order: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::PayoutOrder)
-            .expect("Payout order not set");
-        payout_order.push_back(new_member.clone());
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        join_requests::set_private(&env, is_private);
         env.storage()
             .instance()
-            .set(&DataKey::PayoutOrder, &payout_order);
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
 
-        events::emit_mem_add(&env, new_member, members.len() as u32);
+    pub fn is_group_private(env: Env) -> bool {
+        join_requests::is_private(&env)
+    }
+
+    /// Requests to join a private group. Fails with `GroupNotPrivate` if the
+    /// group isn't private, `MemberBanned` if the requester is banned, and
+    /// `JoinRequestAlreadyPending` if they already have a pending request.
+    pub fn request_to_join(env: Env, requester: Address) {
+        internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
+        requester.require_auth();
+        join_requests::request(&env, &requester);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Withdraws the caller's own pending join request.
+    pub fn cancel_join_request(env: Env, requester: Address) {
+        internals::check_not_paused(&env);
+        requester.require_auth();
+        join_requests::cancel(&env, &requester);
+    }
+
+    /// Admin approves a pending join request, adding `requester` as a member
+    /// through the same path as `add_member`.
+    pub fn approve_join_request(env: Env, requester: Address) {
+        internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        join_requests::approve(&env, &requester);
+        internals::add_member_internal(&env, &requester);
+    }
+
+    /// Admin rejects a pending join request without adding the requester.
+    pub fn reject_join_request(env: Env, requester: Address) {
+        internals::check_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        join_requests::reject(&env, &requester);
+    }
+
+    /// View: pending join requests as (requester, requested_at) pairs.
+    pub fn get_pending_join_requests(env: Env) -> Map<Address, u64> {
+        join_requests::pending_requests(&env)
+    }
+
+    pub fn has_pending_join_request(env: Env, requester: Address) -> bool {
+        join_requests::is_pending(&env, &requester)
     }
 
     pub fn remove_member(env: Env, member: Address) {

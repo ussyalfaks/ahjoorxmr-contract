@@ -1245,6 +1245,26 @@ pub enum DataKey6 {
     // ── Group Metadata ────────────────────────────────────────────────────────
     /// GroupMetadata — display name, category and description hash.
     GroupMetadata,
+
+    // ── Private Groups / Join Requests ────────────────────────────────────────
+    /// bool — when true, `request_to_join` is required instead of a direct
+    /// admin `add_member` call. Absent = false (open group).
+    IsPrivate,
+    /// Map<Address, u64> — pending join requests: requester → requested_at timestamp.
+    JoinRequests,
+
+    // ── Keeper Bounty ────────────────────────────────────────────────────────
+    /// i128 — flat bounty paid (in the group's base token) to whoever calls
+    /// `keeper_close_round` / `keeper_finalize_round` after the deadline.
+    /// 0 (default) disables the bounty.
+    KeeperBountyAmount,
+    /// i128 — funded balance available to pay keeper bounties from.
+    KeeperBountyPool,
+
+    // ── Contribution Memo ────────────────────────────────────────────────────
+    /// BytesN<32> — (member, round) → optional memo hash attached to that
+    /// round's contribution (persistent; absent = no memo).
+    ContributionMemo(Address, u32),
 }
 
 // ── Cross-Group Member Obligations ────────────────────────────────────────────
