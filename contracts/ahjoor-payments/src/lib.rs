@@ -7782,7 +7782,33 @@ impl AhjoorPaymentsContract {
 
         // Get slippage config
         let slippage_cfg = Self::get_slippage_config_internal(env);
-        let max_slippage_bps = slippage_cfg.max_bps;
+        let mut max_slippage_bps = slippage_cfg.max_bps;
+
+        // #1183: When a token whitelist is configured, only allowlisted swap
+        // pairs may be routed, and the pair's slippage cap tightens the global one.
+        if let Some(whitelist_contract) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::TokenWhitelistContract)
+        {
+            let wl = TokenWhitelistClient::new(env, &whitelist_contract);
+            if !wl.is_swap_pair_allowed(input_token, output_token) {
+                events::emit_payment_swap_failed(
+                    env,
+                    payment_id,
+                    customer.clone(),
+                    input_token.clone(),
+                    input_amount,
+                    Symbol::new(env, "SwapPairNotAllowed"),
+                );
+                return Err(Symbol::new(env, "SwapPairNotAllowed"));
+            }
+            if let Some(pair_max) = wl.get_swap_pair_max_slippage(input_token, output_token) {
+                if pair_max < max_slippage_bps {
+                    max_slippage_bps = pair_max;
+                }
+            }
+        }
 
         // Calculate minimum output amount based on slippage tolerance
         // min_output = input_amount * (10000 - max_slippage_bps) / 10000
@@ -12538,6 +12564,8 @@ mod test_get_default_withdrawal_limits;
 mod test_get_payment_expiry_bounds;
 #[cfg(test)]
 mod test_merchant_tokens_swap_router;
+#[cfg(test)]
+mod test_swap_pair_routing;
 #[cfg(test)]
 mod test_unblock_evidence_dispute;
 
