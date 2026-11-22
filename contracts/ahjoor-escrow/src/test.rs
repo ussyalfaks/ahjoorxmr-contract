@@ -1395,12 +1395,15 @@ fn test_auto_release_expired() {
     // Advance time past deadline
     s.env.ledger().set_timestamp(deadline + 1);
 
-    s.client.auto_release_expired(&escrow_id);
+    let keeper = Address::generate(&s.env);
+    s.client.auto_release_expired(&escrow_id, &keeper);
 
     let escrow = s.client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Refunded);
     assert_eq!(s.token_client.balance(&buyer), 1000);
     assert_eq!(s.token_client.balance(&s.client.address), 0);
+    // No keeper reward configured by default.
+    assert_eq!(s.token_client.balance(&keeper), 0);
 }
 
 #[test]
@@ -1416,7 +1419,8 @@ fn test_auto_release_not_expired_panics() {
     let escrow_id =
         s.client
             .create_escrow(&buyer, &seller, &arbiter, &250, &s.token_addr, &deadline, &None, &Vec::new(&s.env), &false, &0u32);
-    let __typed_err_result = s.client.try_auto_release_expired(&escrow_id);
+    let keeper = Address::generate(&s.env);
+    let __typed_err_result = s.client.try_auto_release_expired(&escrow_id, &keeper);
     assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::EscrowHasNotExpiredYet.into());
 }
 
@@ -1443,7 +1447,8 @@ fn test_auto_release_disputed_panics() {
 
     // Advance time past deadline
     s.env.ledger().set_timestamp(deadline + 1);
-    let __typed_err_result = s.client.try_auto_release_expired(&escrow_id);
+    let keeper = Address::generate(&s.env);
+    let __typed_err_result = s.client.try_auto_release_expired(&escrow_id, &keeper);
     assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowError::EscrowIsNotActive.into());
 }
 
