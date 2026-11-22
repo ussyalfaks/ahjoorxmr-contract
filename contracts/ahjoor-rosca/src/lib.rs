@@ -40,6 +40,7 @@ mod bans;
 mod charter;
 mod cycle_limit;
 mod errors;
+mod escrow_client;
 mod events;
 mod holdback;
 mod internals;
