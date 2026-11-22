@@ -235,6 +235,25 @@ pub struct QuorumConfigUpdated {
     pub quorum_bps: u32,
 }
 
+/// Event: A contribution amount change was approved and scheduled.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContributionAmountScheduled {
+    pub proposal_id: u32,
+    pub amount: i128,
+    pub effective_cycle: u32,
+    pub effective_round: u32,
+}
+
+/// Event: The scheduled contribution amount took effect at a cycle boundary.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContributionAmountChanged {
+    pub amount: i128,
+    pub cycle: u32,
+    pub round: u32,
+}
+
 /// Event: Member removed via proposal execution
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -710,6 +729,31 @@ pub fn emit_quorum_config_updated(e: &Env, proposal_type: crate::ProposalType, q
     QuorumConfigUpdated {
         proposal_type,
         quorum_bps,
+    }
+    .publish(e);
+}
+
+pub fn emit_contribution_amount_change_scheduled(
+    e: &Env,
+    proposal_id: u32,
+    amount: i128,
+    effective_cycle: u32,
+    effective_round: u32,
+) {
+    ContributionAmountScheduled {
+        proposal_id,
+        amount,
+        effective_cycle,
+        effective_round,
+    }
+    .publish(e);
+}
+
+pub fn emit_contribution_amount_changed(e: &Env, amount: i128, cycle: u32, round: u32) {
+    ContributionAmountChanged {
+        amount,
+        cycle,
+        round,
     }
     .publish(e);
 }

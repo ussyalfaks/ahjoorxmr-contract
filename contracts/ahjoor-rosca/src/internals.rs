@@ -785,6 +785,8 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
             events::emit_reset(env, current_round);
             return;
         }
+        // Apply any governance-approved contribution amount for this cycle.
+        contribution_amount::apply_pending(env, cycle_number, new_round);
         let members: Vec<Address> = env
             .storage()
             .instance()
