@@ -154,6 +154,8 @@ pub enum ProposalType {
     WaivePenalty = 9,
     MemberBan = 10,          // Ban target_member from rejoining the group
     HardshipReduction = 11,  // One-round contribution reduction covered by the emergency reserve
+    /// Vote of no confidence: when passed, `target_member` replaces the admin.
+    NoConfidence = 12,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

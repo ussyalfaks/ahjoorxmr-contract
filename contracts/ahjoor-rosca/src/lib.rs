@@ -70,7 +70,7 @@ mod migration_client;
 pub use migration_client::RoscaMigrationClient;
 pub use obligations::RoscaObligationClient;
 
-use crate::errors::{Error, ExtError, ExtError2};
+use crate::errors::{Error, ExtError, ExtError2, ExtError3};
 
 #[contract]
 pub struct AhjoorContract;
@@ -381,6 +381,8 @@ impl AhjoorContract {
             .set(&DataKey::QuorumPercentage, &51u32);
         let mut quorum_config = Map::<ProposalType, u32>::new(&env);
         quorum_config.set(ProposalType::MemberFreeze, 6_700);
+        // A vote of no confidence requires a supermajority by default.
+        quorum_config.set(ProposalType::NoConfidence, 6_700);
         env.storage()
             .instance()
             .set(&DataKey2::QuorumConfig, &quorum_config);
@@ -4562,6 +4564,33 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Member-initiated vote of no confidence against the current admin.
+    /// If the proposal passes, `nominee` becomes the new admin. Uses the
+    /// per-type quorum configured for `ProposalType::NoConfidence`
+    /// (default: 67% supermajority). The outgoing admin cannot vote.
+    pub fn propose_no_confidence(
+        env: Env,
+        proposer: Address,
+        nominee: Address,
+        voting_duration: u64,
+    ) -> u32 {
+        internals::check_not_paused(&env);
+        proposer.require_auth();
+
+        let proposal_id = Self::create_proposal_internal(
+            &env,
+            proposer.clone(),
+            ProposalType::NoConfidence,
+            String::from_str(&env, "Vote of no confidence"),
+            nominee.clone(),
+            voting_duration,
+            None,
+        );
+
+        events::emit_no_confidence_proposed(&env, proposal_id, proposer, nominee);
+        proposal_id
+    }
+
     pub fn create_proposal(
         env: Env,
         creator: Address,
@@ -4614,6 +4643,16 @@ impl AhjoorContract {
             ProposalType::WaivePenalty => {
                 penalty_waiver::require_penalty_exists(&env, &target_member, execution_data);
             }
+            ProposalType::NoConfidence => {
+                let admin: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Admin)
+                    .expect("Not initialized");
+                if target_member == admin || !members.contains(&target_member) {
+                    panic_with_error!(&env, ExtError3::InvalidNoConfidenceNominee);
+                }
+            }
             _ => {}
         }
 
@@ -4636,6 +4675,8 @@ impl AhjoorContract {
 
         let required_quorum = if let Some(q) = quorum_config.get(proposal_type) {
             q
+        } else if proposal_type == ProposalType::NoConfidence {
+            6_700
         } else {
             let global_q: u32 = env
                 .storage()
@@ -4908,6 +4949,19 @@ impl AhjoorContract {
         }
 
         let mut proposal = proposals.get(proposal_id).unwrap();
+
+        // The admin being challenged cannot vote on their own no-confidence
+        // proposal, directly or through a delegation.
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        let is_no_confidence = proposal.proposal_type == ProposalType::NoConfidence;
+        if is_no_confidence && voter == current_admin {
+            panic_with_error!(&env, ExtError3::AdminCannotVoteOnNoConfidence);
+        }
+
         let current_time = env.ledger().timestamp();
         if current_time > proposal.deadline {
             panic_with_error!(&env, Error::VotingDeadlinePassed);
@@ -4952,6 +5006,9 @@ impl AhjoorContract {
         let mut delegator_votes_for = 0i128;
         let mut delegator_votes_against = 0i128;
         for (delegator, delegate) in delegations.iter() {
+            if is_no_confidence && delegator == current_admin {
+                continue;
+            }
             if delegate == voter {
                 // This voter is a delegate; check if delegator hasn't voted yet
                 let delegator_voted = votes.contains_key(delegator.clone());
@@ -4971,6 +5028,9 @@ impl AhjoorContract {
 
         // #398: Also count votes delegated via ContribDelegations (contribution-weight path).
         for (delegator, record) in contrib_delegations.iter() {
+            if is_no_confidence && delegator == current_admin {
+                continue;
+            }
             if record.proxy == voter {
                 let active = match record.expiry_mode {
                     ExpiryMode::Timestamp => env.ledger().timestamp() < record.expiry,
@@ -5009,6 +5069,10 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey2::VotingMode)
             .unwrap_or(VotingMode::Equal);
+
+        if is_no_confidence {
+            events::emit_no_confidence_vote_cast(&env, proposal_id, voter.clone(), vote_for);
+        }
 
         if voting_mode == VotingMode::WeightedByContributions {
             events::emit_weighted_vote_cast(&env, voter, proposal_id, voter_weight);
@@ -5203,6 +5267,36 @@ impl AhjoorContract {
                 );
 
                 events::emit_group_frozen(&env, 0, reason_hash, env.ledger().sequence());
+            }
+            ProposalType::NoConfidence => {
+                let old_admin: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Admin)
+                    .expect("Not initialized");
+                if proposal.target_member == old_admin || !members.contains(&proposal.target_member)
+                {
+                    panic_with_error!(&env, ExtError3::InvalidNoConfidenceNominee);
+                }
+
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Admin, &proposal.target_member);
+                // Discard any pending admin-transfer acceptance; the vote
+                // supersedes it.
+                env.storage().instance().remove(&DataKey2::ProposedAdmin);
+
+                events::emit_admin_transferred(
+                    &env,
+                    old_admin.clone(),
+                    proposal.target_member.clone(),
+                );
+                events::emit_no_confidence_executed(
+                    &env,
+                    proposal_id,
+                    old_admin,
+                    proposal.target_member.clone(),
+                );
             }
         }
 
@@ -6708,6 +6802,8 @@ impl AhjoorContract {
             .unwrap_or(Map::new(&env));
         if let Some(q) = quorum_config.get(proposal_type) {
             q
+        } else if proposal_type == ProposalType::NoConfidence {
+            6_700
         } else {
             let global_q: u32 = env
                 .storage()
@@ -13613,6 +13709,7 @@ mod test_emergency_reserve;
 mod test_group_freeze;
 mod test_group_split;
 mod test_new_features;
+mod test_no_confidence;
 mod test_proxy;
 mod test_quorum;
 #[cfg(test)]

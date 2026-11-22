@@ -433,6 +433,33 @@ pub struct AdminTransferred {
     pub new_admin: Address,
 }
 
+/// Event: A vote of no confidence was opened against the current admin
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NoConfidenceProposed {
+    pub proposal_id: u32,
+    pub proposer: Address,
+    pub nominee: Address,
+}
+
+/// Event: A vote was cast on a vote of no confidence
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NoConfidenceVoteCast {
+    pub proposal_id: u32,
+    pub voter: Address,
+    pub vote_for: bool,
+}
+
+/// Event: A vote of no confidence passed and the admin was replaced
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NoConfidenceExecuted {
+    pub proposal_id: u32,
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
 /// Event: Contract WASM upgraded
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -767,6 +794,43 @@ pub fn emit_admin_transfer_proposed(e: &Env, current_admin: Address, proposed_ad
 
 pub fn emit_admin_transferred(e: &Env, old_admin: Address, new_admin: Address) {
     AdminTransferred {
+        old_admin,
+        new_admin,
+    }
+    .publish(e);
+}
+
+pub fn emit_no_confidence_proposed(
+    e: &Env,
+    proposal_id: u32,
+    proposer: Address,
+    nominee: Address,
+) {
+    NoConfidenceProposed {
+        proposal_id,
+        proposer,
+        nominee,
+    }
+    .publish(e);
+}
+
+pub fn emit_no_confidence_vote_cast(e: &Env, proposal_id: u32, voter: Address, vote_for: bool) {
+    NoConfidenceVoteCast {
+        proposal_id,
+        voter,
+        vote_for,
+    }
+    .publish(e);
+}
+
+pub fn emit_no_confidence_executed(
+    e: &Env,
+    proposal_id: u32,
+    old_admin: Address,
+    new_admin: Address,
+) {
+    NoConfidenceExecuted {
+        proposal_id,
         old_admin,
         new_admin,
     }
