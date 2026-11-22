@@ -1246,36 +1246,25 @@ pub enum DataKey6 {
     /// GroupMetadata — display name, category and description hash.
     GroupMetadata,
 
-    // ── Per-Member Collateral Deposit ─────────────────────────────────────────
-    /// i128 — amount each member must deposit before being exposed to
-    /// slashing on default. 0 (default) disables the feature.
-    CollateralAmount,
-    /// u32 — bps of a member's remaining collateral balance slashed each time
-    /// they default (e.g. 10_000 = slash the full remaining balance).
-    CollateralSlashBps,
-    /// Map<Address, i128> — each member's currently-deposited collateral
-    /// balance, net of any slashing already applied.
-    CollateralBalances,
+    // ── Private Groups / Join Requests ────────────────────────────────────────
+    /// bool — when true, `request_to_join` is required instead of a direct
+    /// admin `add_member` call. Absent = false (open group).
+    IsPrivate,
+    /// Map<Address, u64> — pending join requests: requester → requested_at timestamp.
+    JoinRequests,
 
-    // ── Payout Token Swap ──────────────────────────────────────────────────────
-    /// Address — DEX router contract used to convert a round payout into a
-    /// recipient's preferred token. Absent = swapping disabled.
-    SwapRouter,
-    /// u32 — max acceptable slippage (bps) for a payout swap; the swap is
-    /// skipped (member is paid in the base token instead) if it would exceed
-    /// this.
-    PayoutSwapSlippageBps,
-    /// Address — the token `member` prefers to receive their payout in,
-    /// instead of the group's base token. Must be an approved token. Absent
-    /// = paid in the base token (default).
-    PreferredPayoutToken(Address),
+    // ── Keeper Bounty ────────────────────────────────────────────────────────
+    /// i128 — flat bounty paid (in the group's base token) to whoever calls
+    /// `keeper_close_round` / `keeper_finalize_round` after the deadline.
+    /// 0 (default) disables the bounty.
+    KeeperBountyAmount,
+    /// i128 — funded balance available to pay keeper bounties from.
+    KeeperBountyPool,
 
-    // ── Admin-Attested Offline (Cash) Contributions ───────────────────────────
-    /// u32 — ledgers a member has to confirm or reject an attested offline
-    /// contribution before it can be reclaimed by the admin. 0 = no expiry.
-    OfflineAttestationWindowLedgers,
-    /// OfflineContribution — (member, round) → pending/settled attestation.
-    OfflineContribution(Address, u32),
+    // ── Contribution Memo ────────────────────────────────────────────────────
+    /// BytesN<32> — (member, round) → optional memo hash attached to that
+    /// round's contribution (persistent; absent = no memo).
+    ContributionMemo(Address, u32),
 }
 
 // ── Cross-Group Member Obligations ────────────────────────────────────────────

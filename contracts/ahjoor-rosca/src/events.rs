@@ -2777,196 +2777,95 @@ pub fn emit_hardship_shortfall_settled(
     HardshipShortfallSettled { member, round, shortfall, added_to_pot }.publish(e);
 }
 
-// ── Per-Member Collateral Deposit ─────────────────────────────────────────────
+// ── Keeper Bounty ────────────────────────────────────────────────────────────
 
+/// Event: admin configured the flat keeper bounty amount.
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct CollateralRequirementSet {
-    pub amount: i128,
-    pub slash_bps: u32,
-}
-
-pub fn emit_collateral_requirement_set(e: &Env, amount: i128, slash_bps: u32) {
-    CollateralRequirementSet { amount, slash_bps }.publish(e);
-}
-
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct CollateralDeposited {
-    pub member: Address,
-    pub amount: i128,
-    pub balance: i128,
-}
-
-pub fn emit_collateral_deposited(e: &Env, member: Address, amount: i128, balance: i128) {
-    CollateralDeposited { member, amount, balance }.publish(e);
-}
-
-/// Event: Part (or all) of a member's collateral was forfeited to the
-/// insurance pool after they defaulted on `round`.
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct CollateralSlashed {
-    pub member: Address,
-    pub round: u32,
-    pub amount: i128,
-    pub remaining_balance: i128,
-}
-
-pub fn emit_collateral_slashed(
-    e: &Env,
-    member: Address,
-    round: u32,
-    amount: i128,
-    remaining_balance: i128,
-) {
-    CollateralSlashed { member, round, amount, remaining_balance }.publish(e);
-}
-
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct CollateralWithdrawn {
-    pub member: Address,
+pub struct KeeperBountyAmountSet {
     pub amount: i128,
 }
 
-pub fn emit_collateral_withdrawn(e: &Env, member: Address, amount: i128) {
-    CollateralWithdrawn { member, amount }.publish(e);
+pub fn emit_keeper_bounty_amount_set(e: &Env, amount: i128) {
+    KeeperBountyAmountSet { amount }.publish(e);
 }
 
-// ── Payout Token Swap ───────────────────────────────────────────────────────────
-
+/// Event: the keeper bounty pool was topped up.
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct SwapRouterSet {
-    pub router: Address,
-}
-
-pub fn emit_swap_router_set(e: &Env, router: Address) {
-    SwapRouterSet { router }.publish(e);
-}
-
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct PreferredPayoutTokenSet {
-    pub member: Address,
-    pub token: Address,
-}
-
-pub fn emit_preferred_payout_token_set(e: &Env, member: Address, token: Address) {
-    PreferredPayoutTokenSet { member, token }.publish(e);
-}
-
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct PreferredPayoutTokenCleared {
-    pub member: Address,
-}
-
-pub fn emit_preferred_payout_token_cleared(e: &Env, member: Address) {
-    PreferredPayoutTokenCleared { member }.publish(e);
-}
-
-/// Event: A round payout was swapped from the base token into the
-/// recipient's preferred token via the configured swap router.
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct PayoutSwapped {
-    pub round: u32,
-    pub member: Address,
-    pub destination: Address,
-    pub from_token: Address,
-    pub to_token: Address,
-    pub input_amount: i128,
-    pub output_amount: i128,
-}
-
-pub fn emit_payout_swapped(
-    e: &Env,
-    round: u32,
-    member: Address,
-    destination: Address,
-    from_token: Address,
-    to_token: Address,
-    input_amount: i128,
-    output_amount: i128,
-) {
-    PayoutSwapped { round, member, destination, from_token, to_token, input_amount, output_amount }
-        .publish(e);
-}
-
-/// Event: A payout swap into the recipient's preferred token was skipped
-/// (no router configured, or slippage exceeded); the recipient was paid in
-/// the base token instead.
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct PayoutSwapFallback {
-    pub round: u32,
-    pub member: Address,
-    pub token: Address,
+pub struct KeeperBountyFunded {
+    pub funder: Address,
     pub amount: i128,
-    pub reason: Symbol,
+    pub pool_total: i128,
 }
 
-pub fn emit_payout_swap_fallback(
-    e: &Env,
-    round: u32,
-    member: Address,
-    token: Address,
-    amount: i128,
-    reason: Symbol,
-) {
-    PayoutSwapFallback { round, member, token, amount, reason }.publish(e);
+pub fn emit_keeper_bounty_funded(e: &Env, funder: Address, amount: i128, pool_total: i128) {
+    KeeperBountyFunded { funder, amount, pool_total }.publish(e);
 }
 
-// ── Admin-Attested Offline (Cash) Contributions ───────────────────────────────
-
+/// Event: a keeper bounty was paid out to whoever triggered
+/// `keeper_close_round` / `keeper_finalize_round` after the deadline.
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct OfflineContributionAttested {
-    pub member: Address,
-    pub round: u32,
-    pub amount: i128,
-    pub attested_by: Address,
-}
-
-pub fn emit_offline_contribution_attested(
-    e: &Env,
-    member: Address,
-    round: u32,
-    amount: i128,
-    attested_by: Address,
-) {
-    OfflineContributionAttested { member, round, amount, attested_by }.publish(e);
-}
-
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct OfflineContributionConfirmed {
-    pub member: Address,
+pub struct KeeperBountyPaid {
+    pub caller: Address,
     pub round: u32,
     pub amount: i128,
 }
 
-pub fn emit_offline_contribution_confirmed(e: &Env, member: Address, round: u32, amount: i128) {
-    OfflineContributionConfirmed { member, round, amount }.publish(e);
+pub fn emit_keeper_bounty_paid(e: &Env, caller: Address, round: u32, amount: i128) {
+    KeeperBountyPaid { caller, round, amount }.publish(e);
 }
 
+// ── Private Groups / Join Requests ────────────────────────────────────────────
+
+/// Event: admin toggled the group's privacy setting.
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct OfflineContributionRejected {
-    pub member: Address,
-    pub round: u32,
-    pub amount: i128,
-    pub attested_by: Address,
+pub struct GroupPrivacySet {
+    pub is_private: bool,
 }
 
-pub fn emit_offline_contribution_rejected(
-    e: &Env,
-    member: Address,
-    round: u32,
-    amount: i128,
-    attested_by: Address,
-) {
-    OfflineContributionRejected { member, round, amount, attested_by }.publish(e);
+pub fn emit_group_privacy_set(e: &Env, is_private: bool) {
+    GroupPrivacySet { is_private }.publish(e);
+}
+
+/// Event: an address requested to join a private group.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct JoinRequested {
+    pub requester: Address,
+    pub requested_at: u64,
+}
+
+pub fn emit_join_requested(e: &Env, requester: Address, requested_at: u64) {
+    JoinRequested { requester, requested_at }.publish(e);
+}
+
+/// Event: a pending join request was withdrawn, approved or rejected.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct JoinRequestResolved {
+    pub requester: Address,
+    /// "cancelled", "approved" or "rejected".
+    pub resolution: Symbol,
+}
+
+pub fn emit_join_request_resolved(e: &Env, requester: Address, resolution: Symbol) {
+    JoinRequestResolved { requester, resolution }.publish(e);
+}
+
+// ── Contribution Memo ─────────────────────────────────────────────────────────
+
+/// Event: a memo hash was attached to a member's round contribution.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContributionMemoSet {
+    pub member: Address,
+    pub round: u32,
+    pub memo_hash: BytesN<32>,
+}
+
+pub fn emit_contribution_memo_set(e: &Env, member: Address, round: u32, memo_hash: BytesN<32>) {
+    ContributionMemoSet { member, round, memo_hash }.publish(e);
 }
