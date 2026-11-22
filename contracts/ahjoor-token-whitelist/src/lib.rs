@@ -220,6 +220,14 @@ pub enum DataKey {
     /// Whitelist version counter incremented on any whitelist modification
     /// for cache invalidation purposes.
     WhitelistVersion,
+    /// #1182: M-of-N multisig config governing listing, removal and tier changes.
+    MultisigConfig,
+    /// #1182: Monotonic counter for multisig proposals.
+    MultisigProposalCounter,
+    /// #1182: Multisig proposal keyed by id.
+    MultisigProposal(u32),
+    /// #1183: Allowed swap pair (canonical lower address, higher address) -> max slippage bps.
+    SwapPair(Address, Address),
 }
 
 #[contracttype]
@@ -246,6 +254,39 @@ pub struct ListingProposal {
     pub enactment_deadline_ledger: u32,
 }
 
+/// #1182: Maximum number of multisig signers.
+#[cfg(feature = "contract")]
+const MAX_MULTISIG_SIGNERS: u32 = 20;
+
+/// #1182: Signer set and approval threshold for whitelist changes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultisigConfig {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+}
+
+/// #1182: A whitelist change that requires `threshold` signer approvals.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MultisigAction {
+    AddToken(Address),
+    RemoveToken(Address),
+    AssignTier(Address, u32),
+}
+
+/// #1182: Pending or executed multisig proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultisigProposal {
+    pub id: u32,
+    pub proposer: Address,
+    pub action: MultisigAction,
+    pub approvals: Vec<Address>,
+    pub executed: bool,
+    pub created_ledger: u32,
+}
+
 const DEFAULT_VOTING_WINDOW_LEDGERS: u32 = 120_960;
 const DEFAULT_ENACTMENT_DELAY_LEDGERS: u32 = 34_560;
 const DEFAULT_QUORUM_BPS: u32 = 5_000;
@@ -266,6 +307,10 @@ mod test_suspension;
 mod test_deprecation;
 #[cfg(test)]
 mod test_guardian;
+#[cfg(test)]
+mod test_multisig;
+#[cfg(test)]
+mod test_swap_pair;
 
 pub use client::TokenWhitelistClient;
 
@@ -297,6 +342,12 @@ impl TokenWhitelistContract {
     pub fn add_token(env: Env, admin: Address, token: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::require_no_multisig(&env);
+        Self::do_add_token(&env, token, admin);
+    }
+
+    fn do_add_token(env: &Env, token: Address, admin: Address) {
+        let env = env.clone();
         let membership_key = DataKey::WhitelistMembership(token.clone());
         if env.storage().persistent().has(&membership_key) {
             panic!("Token already whitelisted");
@@ -329,6 +380,7 @@ impl TokenWhitelistContract {
     pub fn batch_add_tokens(env: Env, admin: Address, tokens: Vec<Address>) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::require_no_multisig(&env);
         if tokens.is_empty() {
             panic!("Batch cannot be empty");
         }
@@ -370,6 +422,12 @@ impl TokenWhitelistContract {
     pub fn remove_token(env: Env, admin: Address, token: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::require_no_multisig(&env);
+        Self::do_remove_token(&env, token, admin);
+    }
+
+    fn do_remove_token(env: &Env, token: Address, admin: Address) {
+        let env = env.clone();
         let membership_key = DataKey::WhitelistMembership(token.clone());
         if !env.storage().persistent().has(&membership_key) {
             panic!("Token not whitelisted");
@@ -392,6 +450,12 @@ impl TokenWhitelistContract {
     pub fn assign_token_tier(env: Env, admin: Address, token: Address, tier_id: u32) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::require_no_multisig(&env);
+        Self::do_assign_tier(&env, token, tier_id);
+    }
+
+    fn do_assign_tier(env: &Env, token: Address, tier_id: u32) {
+        let env = env.clone();
         if env.storage().instance().get::<_, TierLimits>(&DataKey::RiskTier(tier_id)).is_none() {
             panic!("RiskTierNotDefined");
         }
@@ -752,6 +816,11 @@ impl TokenWhitelistContract {
     pub fn set_guardian(env: Env, admin: Address, guardian: Option<Address>) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        if let Some(g) = &guardian {
+            if Self::is_multisig_signer(&env, g) {
+                panic!("GuardianCannotBeMultisigSigner");
+            }
+        }
         match &guardian {
             Some(g) => env.storage().instance().set(&DataKey::Guardian, g),
             None => env.storage().instance().remove(&DataKey::Guardian),
@@ -1274,6 +1343,206 @@ impl TokenWhitelistContract {
         true
     }
 
+    // ==================== #1182: M-OF-N MULTISIG ADMIN ====================
+
+    /// One-time setup of an M-of-N signer set. Once set, `add_token`,
+    /// `batch_add_tokens`, `remove_token`, `schedule_token_removal` and
+    /// `assign_token_tier` are disabled for the single admin key; those
+    /// changes must go through `propose_whitelist_change` /
+    /// `approve_whitelist_change`. The guardian keeps its suspend-only power
+    /// and may not be a signer.
+    pub fn init_multisig(env: Env, admin: Address, signers: Vec<Address>, threshold: u32) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        if env.storage().instance().has(&DataKey::MultisigConfig) {
+            panic!("MultisigAlreadyInitialized");
+        }
+        if signers.is_empty() {
+            panic!("MultisigSignersEmpty");
+        }
+        if signers.len() > MAX_MULTISIG_SIGNERS {
+            panic!("TooManyMultisigSigners");
+        }
+        if threshold == 0 || threshold > signers.len() {
+            panic!("InvalidMultisigThreshold");
+        }
+        let guardian: Option<Address> = env.storage().instance().get(&DataKey::Guardian);
+        for i in 0..signers.len() {
+            let a = signers.get(i).unwrap();
+            if guardian.as_ref() == Some(&a) {
+                panic!("GuardianCannotBeMultisigSigner");
+            }
+            for j in (i + 1)..signers.len() {
+                if signers.get(j).unwrap() == a {
+                    panic!("DuplicateMultisigSigner");
+                }
+            }
+        }
+        let config = MultisigConfig { signers: signers.clone(), threshold };
+        env.storage().instance().set(&DataKey::MultisigConfig, &config);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        events::emit_multisig_initialized(&env, signers, threshold);
+    }
+
+    pub fn get_multisig_config(env: Env) -> Option<MultisigConfig> {
+        env.storage().instance().get(&DataKey::MultisigConfig)
+    }
+
+    /// A signer proposes a listing, removal or tier change. The proposer's
+    /// approval is counted immediately; the change executes as soon as
+    /// `threshold` distinct signers have approved.
+    pub fn propose_whitelist_change(env: Env, signer: Address, action: MultisigAction) -> u32 {
+        signer.require_auth();
+        Self::require_multisig_signer(&env, &signer);
+        let id: u32 = env
+            .storage().instance()
+            .get(&DataKey::MultisigProposalCounter)
+            .unwrap_or(0u32)
+            + 1;
+        env.storage().instance().set(&DataKey::MultisigProposalCounter, &id);
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(signer.clone());
+        let proposal = MultisigProposal {
+            id,
+            proposer: signer.clone(),
+            action,
+            approvals,
+            executed: false,
+            created_ledger: env.ledger().sequence(),
+        };
+        events::emit_multisig_change_proposed(&env, id, signer);
+        Self::store_or_execute_proposal(&env, proposal);
+        id
+    }
+
+    /// A signer approves a pending proposal; executes once threshold is met.
+    pub fn approve_whitelist_change(env: Env, signer: Address, proposal_id: u32) {
+        signer.require_auth();
+        Self::require_multisig_signer(&env, &signer);
+        let mut proposal: MultisigProposal = env
+            .storage().persistent()
+            .get(&DataKey::MultisigProposal(proposal_id))
+            .unwrap_or_else(|| panic!("MultisigProposalNotFound"));
+        if proposal.executed {
+            panic!("MultisigProposalAlreadyExecuted");
+        }
+        if proposal.approvals.contains(&signer) {
+            panic!("MultisigAlreadyApproved");
+        }
+        proposal.approvals.push_back(signer.clone());
+        events::emit_multisig_change_approved(&env, proposal_id, signer);
+        Self::store_or_execute_proposal(&env, proposal);
+    }
+
+    pub fn get_multisig_proposal(env: Env, proposal_id: u32) -> Option<MultisigProposal> {
+        env.storage().persistent().get(&DataKey::MultisigProposal(proposal_id))
+    }
+
+    fn store_or_execute_proposal(env: &Env, mut proposal: MultisigProposal) {
+        let config: MultisigConfig = env
+            .storage().instance()
+            .get(&DataKey::MultisigConfig)
+            .unwrap_or_else(|| panic!("MultisigNotInitialized"));
+        if proposal.approvals.len() >= config.threshold {
+            let executor = env.current_contract_address();
+            match proposal.action.clone() {
+                MultisigAction::AddToken(token) => Self::do_add_token(env, token, executor),
+                MultisigAction::RemoveToken(token) => Self::do_remove_token(env, token, executor),
+                MultisigAction::AssignTier(token, tier_id) => Self::do_assign_tier(env, token, tier_id),
+            }
+            proposal.executed = true;
+            events::emit_multisig_change_executed(env, proposal.id);
+        }
+        let key = DataKey::MultisigProposal(proposal.id);
+        env.storage().persistent().set(&key, &proposal);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    fn require_no_multisig(env: &Env) {
+        if env.storage().instance().has(&DataKey::MultisigConfig) {
+            panic!("MultisigRequired");
+        }
+    }
+
+    fn is_multisig_signer(env: &Env, who: &Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, MultisigConfig>(&DataKey::MultisigConfig)
+            .map(|c| c.signers.contains(who))
+            .unwrap_or(false)
+    }
+
+    fn require_multisig_signer(env: &Env, who: &Address) {
+        if !env.storage().instance().has(&DataKey::MultisigConfig) {
+            panic!("MultisigNotInitialized");
+        }
+        if !Self::is_multisig_signer(env, who) {
+            panic!("NotMultisigSigner");
+        }
+    }
+
+    // ==================== #1183: SWAP PAIR ALLOWLIST ====================
+
+    /// Allow swaps between whitelisted tokens `a` and `b` (order-independent)
+    /// with at most `max_slippage_bps` slippage. Admin-gated; re-calling
+    /// updates the slippage cap.
+    pub fn allow_swap_pair(env: Env, admin: Address, a: Address, b: Address, max_slippage_bps: u32) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        if a == b {
+            panic!("SwapPairTokensIdentical");
+        }
+        if max_slippage_bps > 10_000 {
+            panic!("InvalidMaxSlippageBps");
+        }
+        if !env.storage().persistent().has(&DataKey::WhitelistMembership(a.clone()))
+            || !env.storage().persistent().has(&DataKey::WhitelistMembership(b.clone()))
+        {
+            panic!("Token not whitelisted");
+        }
+        let key = Self::swap_pair_key(&a, &b);
+        env.storage().persistent().set(&key, &max_slippage_bps);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        events::emit_swap_pair_allowed(&env, a, b, max_slippage_bps);
+    }
+
+    /// Remove a pair from the swap allowlist. Admin-gated.
+    pub fn disallow_swap_pair(env: Env, admin: Address, a: Address, b: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        let key = Self::swap_pair_key(&a, &b);
+        if !env.storage().persistent().has(&key) {
+            panic!("SwapPairNotAllowed");
+        }
+        env.storage().persistent().remove(&key);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        events::emit_swap_pair_disallowed(&env, a, b);
+    }
+
+    /// True when the pair is allowlisted and both tokens are currently allowed
+    /// (whitelisted, not suspended, not past sunset). Order-independent.
+    pub fn is_swap_pair_allowed(env: Env, a: Address, b: Address) -> bool {
+        if a == b || !env.storage().persistent().has(&Self::swap_pair_key(&a, &b)) {
+            return false;
+        }
+        Self::is_token_allowed(env.clone(), a) && Self::is_token_allowed(env, b)
+    }
+
+    /// Max slippage configured for the pair, or `None` if not allowlisted.
+    pub fn get_swap_pair_max_slippage(env: Env, a: Address, b: Address) -> Option<u32> {
+        env.storage().persistent().get(&Self::swap_pair_key(&a, &b))
+    }
+
+    fn swap_pair_key(a: &Address, b: &Address) -> DataKey {
+        if a < b {
+            DataKey::SwapPair(a.clone(), b.clone())
+        } else {
+            DataKey::SwapPair(b.clone(), a.clone())
+        }
+    }
+
     fn require_admin(env: &Env, caller: &Address) {
         let admin: Address = env
             .storage().instance()
@@ -1583,6 +1852,7 @@ impl TokenWhitelistContract {
     ) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::require_no_multisig(&env);
         
         if !env.storage().persistent().has(&DataKey::WhitelistMembership(token.clone())) {
             panic!("Token not whitelisted");

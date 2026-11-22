@@ -1,8 +1,8 @@
 #![no_std]
 use ahjoor_token_whitelist::TokenWhitelistClient;
 use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, token, Address, BytesN, Env, Map,
-    String, Symbol, Vec,
+    contract, contractevent, contractimpl, contracttype, token, xdr::ToXdr, Address, Bytes,
+    BytesN, Env, Map, String, Symbol, Vec,
 };
 
 // --- Storage TTL Constants ---
@@ -71,6 +71,7 @@ mod payment_contract {
     #[contractclient(name = "PaymentContractClient")]
     pub trait PaymentContractInterface {
         fn get_payment(env: Env, payment_id: u32) -> Payment;
+        fn get_invoice_hash(env: Env, payment_id: u32) -> Option<BytesN<32>>;
     }
 }
 
@@ -437,6 +438,28 @@ pub struct Recall {
     pub closed: bool,
 }
 
+/// #1171: Upper bound for `sla_penalty_bps` (10% of the refund amount).
+pub const MAX_SLA_PENALTY_BPS: u32 = 1_000;
+
+/// #1180: Invoice line item, mirroring the payments contract's `LineItem`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceLineItem {
+    pub description: Symbol,
+    pub quantity: u32,
+    pub unit_price: i128,
+}
+
+/// #1180: Proof against the payment's committed invoice hash: the full invoice
+/// preimage, re-hashed exactly as the payments contract committed it.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceProof {
+    pub line_items: Vec<InvoiceLineItem>,
+    pub tax_bps: u32,
+    pub currency_label: Symbol,
+}
+
 /// Highest valid refund reason code (codes are 0-4).
 const MAX_REASON_CODE: u32 = 4;
 
@@ -703,7 +726,51 @@ impl AhjoorRefundContract {
         reason: String,
         reason_code: u32,
     ) -> u32 {
-        Self::request_refund_internal(env, customer, payment_id, amount, reason, reason_code, None)
+        Self::request_refund_internal(
+            env, customer, payment_id, amount, reason, reason_code, None, None,
+        )
+    }
+
+    /// #1180: Like `request_refund`, but scoped to specific invoice line items.
+    /// `proof` must hash to the invoice committed by the payments contract;
+    /// `amount` may not exceed the selected items' total (tax included), and
+    /// a line item can only ever be claimed by one refund.
+    pub fn request_refund_for_items(
+        env: Env,
+        customer: Address,
+        payment_id: u32,
+        amount: i128,
+        reason: String,
+        reason_code: u32,
+        line_item_indices: Vec<u32>,
+        proof: InvoiceProof,
+    ) -> u32 {
+        Self::request_refund_internal(
+            env,
+            customer,
+            payment_id,
+            amount,
+            reason,
+            reason_code,
+            None,
+            Some((line_item_indices, proof)),
+        )
+    }
+
+    /// #1180: Line-item indices already claimed for `payment_id`.
+    pub fn get_refunded_line_items(env: Env, payment_id: u32) -> Vec<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::RefundedLineItems(payment_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// #1180: Line-item indices covered by `refund_id` (empty for amount-only refunds).
+    pub fn get_refund_line_items(env: Env, refund_id: u32) -> Vec<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::RefundLineItems(refund_id))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Like `request_refund`, but the refund (and any store credit) goes to
@@ -729,6 +796,7 @@ impl AhjoorRefundContract {
             reason,
             reason_code,
             Some(destination),
+            None,
         )
     }
 
@@ -761,6 +829,7 @@ impl AhjoorRefundContract {
         reason: String,
         reason_code: u32,
         destination: Option<Address>,
+        line_items: Option<(Vec<u32>, InvoiceProof)>,
     ) -> u32 {
         Self::require_not_paused(&env);
         customer.require_auth();
@@ -846,6 +915,22 @@ impl AhjoorRefundContract {
                 } else {
                     Some(dest)
                 }
+            }
+            None => None,
+        };
+
+        // #1180: Validate requested line items against the committed invoice.
+        let line_item_indices: Option<Vec<u32>> = match &line_items {
+            Some((indices, proof)) => {
+                Self::validate_line_items(
+                    &env,
+                    &payment_client,
+                    payment_id,
+                    indices,
+                    proof,
+                    amount,
+                );
+                Some(indices.clone())
             }
             None => None,
         };
@@ -1061,6 +1146,11 @@ impl AhjoorRefundContract {
         Self::append_index(&env, &DataKey::CustomerRefunds(customer.clone()), refund_id);
         Self::append_index(&env, &DataKey::MerchantRefunds(merchant.clone()), refund_id);
         Self::append_index(&env, &DataKey::PaymentRefunds(payment_id), refund_id);
+
+        // #1180: Claim the line items so they can never be refunded again.
+        if let Some(indices) = line_item_indices {
+            Self::record_line_items(&env, payment_id, refund_id, &indices);
+        }
 
         // #157: Update reason code index and count
         Self::append_index(
@@ -1916,6 +2006,8 @@ impl AhjoorRefundContract {
 
         // #583: Auto-approval after dispute window = merchant missed the deadline.
         Self::record_sla_auto_approved(&env, &refund.merchant, true);
+        // #1171: Compensate the customer from the merchant reserve.
+        Self::apply_sla_penalty(&env, &refund);
 
         events::emit_refund_auto_approved(&env, refund_id, refund.customer, refund.amount);
 
@@ -3389,6 +3481,187 @@ impl AhjoorRefundContract {
 
     /// Address that receives funds for `refund`: the customer-designated
     /// destination if one was set, otherwise the paying customer.
+    // --- #1171: SLA penalty on missed merchant response deadline ---
+
+    /// Admin sets the penalty, in bps of the refund amount, paid from the
+    /// merchant's reserve to the customer when a refund is auto-approved
+    /// because the merchant missed the response deadline. Capped at
+    /// `MAX_SLA_PENALTY_BPS`; 0 disables the penalty.
+    pub fn set_sla_penalty_bps(env: Env, admin: Address, sla_penalty_bps: u32) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+        if sla_penalty_bps > MAX_SLA_PENALTY_BPS {
+            panic!("SlaPenaltyBpsTooHigh");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey2::SlaPenaltyBps, &sla_penalty_bps);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        events::emit_sla_penalty_bps_set(&env, sla_penalty_bps);
+    }
+
+    pub fn get_sla_penalty_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::SlaPenaltyBps)
+            .unwrap_or(0)
+    }
+
+    /// Penalty paid to the customer for `refund_id` (0 if none).
+    pub fn get_sla_penalty_paid(env: Env, refund_id: u32) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::RefundSlaPenaltyPaid(refund_id))
+            .unwrap_or(0)
+    }
+
+    /// Pays `sla_penalty_bps` of the refund amount from the merchant reserve
+    /// (in the reserve token) to the refund recipient. Merchants exempt from
+    /// auto-approval are exempt from the penalty. If the reserve is short, the
+    /// remaining balance is paid. Returns the amount paid.
+    fn apply_sla_penalty(env: &Env, refund: &Refund) -> i128 {
+        let exempt: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::MerchantAutoApproveExempt(refund.merchant.clone()))
+            .unwrap_or(false);
+        if exempt {
+            return 0;
+        }
+        let bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SlaPenaltyBps)
+            .unwrap_or(0);
+        if bps == 0 {
+            return 0;
+        }
+        let token: Option<Address> = env.storage().instance().get(&DataKey2::ReserveToken);
+        let token = match token {
+            Some(t) => t,
+            None => return 0,
+        };
+        let reserve_key = DataKey2::MerchantReserveBalance(refund.merchant.clone());
+        let balance: i128 = env.storage().persistent().get(&reserve_key).unwrap_or(0);
+        let penalty = (refund.amount as u128 * bps as u128 / 10_000) as i128;
+        let paid = if penalty > balance { balance } else { penalty };
+        if paid <= 0 {
+            return 0;
+        }
+        env.storage()
+            .persistent()
+            .set(&reserve_key, &(balance - paid));
+        env.storage().persistent().extend_ttl(
+            &reserve_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let recipient = Self::refund_recipient(refund);
+        token::Client::new(env, &token).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &paid,
+        );
+        let paid_key = DataKey2::RefundSlaPenaltyPaid(refund.id);
+        env.storage().persistent().set(&paid_key, &paid);
+        env.storage().persistent().extend_ttl(
+            &paid_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_sla_penalty_paid(env, refund.id, refund.merchant.clone(), recipient, paid);
+        paid
+    }
+
+    // --- #1180: Line-item refunds ---
+
+    /// Same preimage layout as the payments contract's `compute_invoice_hash`.
+    fn compute_invoice_hash(env: &Env, proof: &InvoiceProof) -> BytesN<32> {
+        let mut preimage = Bytes::new(env);
+        preimage.extend_from_array(&(proof.line_items.len() as u32).to_be_bytes());
+        for item in proof.line_items.iter() {
+            preimage.append(&item.description.to_xdr(env));
+            preimage.extend_from_array(&item.quantity.to_be_bytes());
+            preimage.extend_from_array(&item.unit_price.to_be_bytes());
+        }
+        preimage.extend_from_array(&proof.tax_bps.to_be_bytes());
+        preimage.append(&proof.currency_label.clone().to_xdr(env));
+        env.crypto().sha256(&preimage).into()
+    }
+
+    fn validate_line_items(
+        env: &Env,
+        payment_client: &payment_contract::PaymentContractClient,
+        payment_id: u32,
+        indices: &Vec<u32>,
+        proof: &InvoiceProof,
+        amount: i128,
+    ) {
+        if indices.is_empty() {
+            panic!("LineItemIndicesEmpty");
+        }
+        let committed = payment_client
+            .get_invoice_hash(&payment_id)
+            .unwrap_or_else(|| panic!("PaymentHasNoInvoice"));
+        if Self::compute_invoice_hash(env, proof) != committed {
+            panic!("InvalidLineItemProof");
+        }
+        let claimed: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::RefundedLineItems(payment_id))
+            .unwrap_or_else(|| Vec::new(env));
+        let mut subtotal: i128 = 0;
+        for i in 0..indices.len() {
+            let idx = indices.get(i).unwrap();
+            if idx >= proof.line_items.len() {
+                panic!("LineItemIndexOutOfRange");
+            }
+            for j in (i + 1)..indices.len() {
+                if indices.get(j).unwrap() == idx {
+                    panic!("DuplicateLineItemIndex");
+                }
+            }
+            if claimed.contains(&idx) {
+                panic!("LineItemAlreadyRefunded");
+            }
+            let item = proof.line_items.get(idx).unwrap();
+            subtotal += (item.quantity as i128) * item.unit_price;
+        }
+        let total = subtotal + subtotal * proof.tax_bps as i128 / 10_000;
+        if amount > total {
+            panic!("AmountExceedsLineItemsTotal");
+        }
+    }
+
+    fn record_line_items(env: &Env, payment_id: u32, refund_id: u32, indices: &Vec<u32>) {
+        let claimed_key = DataKey2::RefundedLineItems(payment_id);
+        let mut claimed: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&claimed_key)
+            .unwrap_or_else(|| Vec::new(env));
+        for idx in indices.iter() {
+            claimed.push_back(idx);
+        }
+        env.storage().persistent().set(&claimed_key, &claimed);
+        env.storage().persistent().extend_ttl(
+            &claimed_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let refund_key = DataKey2::RefundLineItems(refund_id);
+        env.storage().persistent().set(&refund_key, indices);
+        env.storage().persistent().extend_ttl(
+            &refund_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_refund_line_items_recorded(env, refund_id, payment_id, indices.clone());
+    }
+
     fn refund_recipient(refund: &Refund) -> Address {
         refund.destination.clone().unwrap_or(refund.customer.clone())
     }
@@ -6322,6 +6595,8 @@ impl AhjoorRefundContract {
             .persistent()
             .set(&DataKey::Refund(refund_id), &refund);
         Self::process_refund_internal(&env, refund_id);
+        // #1171: Merchant missed the deadline; compensate the customer.
+        Self::apply_sla_penalty(&env, &refund);
         events::emit_refund_auto_approved(&env, refund_id, refund.customer, refund.amount);
         env.storage()
             .instance()

@@ -97,4 +97,10 @@ pub trait TokenWhitelistInterface {
     fn get_suspension_history(env: Env, token: Address) -> soroban_sdk::Vec<crate::SuspensionHistoryEntry>;
 
     fn get_vote_record(env: Env, proposal_id: u32, voter: Address) -> Option<bool>;
+
+    /// #1183: Whether swaps between `a` and `b` are allowlisted (order-independent).
+    fn is_swap_pair_allowed(env: Env, a: Address, b: Address) -> bool;
+
+    /// #1183: Max slippage for an allowlisted pair, `None` if not allowlisted.
+    fn get_swap_pair_max_slippage(env: Env, a: Address, b: Address) -> Option<u32>;
 }

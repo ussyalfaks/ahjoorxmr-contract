@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol, Vec};
 
 /// Event: Refund reason code recorded (#157)
 #[contractevent]
@@ -1343,4 +1343,43 @@ pub struct AlternateDestinationPolicySet {
 
 pub fn emit_alternate_destination_policy_set(e: &Env, merchant: Address, allow: bool) {
     AlternateDestinationPolicySet { merchant, allow }.publish(e);
+}
+
+// --- #1171: SLA penalty ---
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SlaPenaltyBpsSet {
+    pub sla_penalty_bps: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SlaPenaltyPaid {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+pub fn emit_sla_penalty_bps_set(e: &Env, sla_penalty_bps: u32) {
+    SlaPenaltyBpsSet { sla_penalty_bps }.publish(e);
+}
+
+pub fn emit_sla_penalty_paid(e: &Env, refund_id: u32, merchant: Address, recipient: Address, amount: i128) {
+    SlaPenaltyPaid { refund_id, merchant, recipient, amount }.publish(e);
+}
+
+// --- #1180: Line-item refunds ---
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundLineItemsRecorded {
+    pub refund_id: u32,
+    pub payment_id: u32,
+    pub line_item_indices: Vec<u32>,
+}
+
+pub fn emit_refund_line_items_recorded(e: &Env, refund_id: u32, payment_id: u32, line_item_indices: Vec<u32>) {
+    RefundLineItemsRecorded { refund_id, payment_id, line_item_indices }.publish(e);
 }
