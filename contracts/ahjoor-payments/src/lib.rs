@@ -257,6 +257,8 @@ pub enum ExtError {
     PaymentRequestInactive = 85,
     /// Reusable payment request has reached its use limit.
     PaymentRequestExhausted = 86,
+    /// tax_bps supplied to set_merchant_tax exceeds 10_000.
+    TaxBpsExceedsMax = 87,
 }
 
 /// Domain errors for settlement batches (#1163), price-lock quotes (#1165)
@@ -571,6 +573,9 @@ pub struct Payment {
     pub tipping_enabled: bool,
     /// Number of times this payment's expiry has been extended.
     pub extension_count: u32,
+    /// Tax amount withheld and forwarded to the merchant's tax_address at settlement.
+    /// Zero until the payment is settled; populated by finalize_payment.
+    pub tax_collected: i128,
 }
 
 #[contracttype]
@@ -1250,6 +1255,23 @@ pub enum DataKey3 {
     PaymentRequest(u32),
     /// Persistent: payment ID to reusable payment request ID.
     PaymentRequestPayment(u32),
+    /// Persistent: per-merchant sales-tax configuration (tax_bps + tax_address).
+    MerchantTax(Address),
+}
+
+/// Per-merchant sales-tax configuration.
+///
+/// When set, every payment settled via `complete_payment` deducts
+/// `amount * tax_bps / 10_000` and transfers it directly to `tax_address`
+/// before the net amount reaches the merchant.  Refunds reverse the tax
+/// portion proportionally.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantTaxConfig {
+    /// Basis points of the payment amount to withhold as tax (max 10_000).
+    pub tax_bps: u32,
+    /// Address that receives the withheld tax at settlement.
+    pub tax_address: Address,
 }
 
 /// Overflow DataKey4 — storage for settlement batches (#1163), price-lock
@@ -1926,6 +1948,7 @@ impl AhjoorPaymentsContract {
             external_id: None,
             tipping_enabled: false,
             extension_count: 0,
+            tax_collected: 0,
         };
 
         // Persistent: per-payment record with individual TTL
@@ -2128,6 +2151,7 @@ impl AhjoorPaymentsContract {
                 external_id: None,
                 tipping_enabled: false,
                 extension_count: 0,
+                tax_collected: 0,
             };
 
             // Persistent: per-payment record with individual TTL
@@ -3135,6 +3159,7 @@ impl AhjoorPaymentsContract {
                 external_id: None,
                 tipping_enabled: false,
                 extension_count: 0,
+                tax_collected: 0,
             };
 
             env.storage()
@@ -3257,6 +3282,7 @@ impl AhjoorPaymentsContract {
             external_id: None,
             tipping_enabled: false,
             extension_count: 0,
+            tax_collected: 0,
         };
 
         env.storage()
@@ -4556,6 +4582,7 @@ impl AhjoorPaymentsContract {
             external_id: external_id.clone(),
             tipping_enabled: false,
             extension_count: 0,
+            tax_collected: 0,
         };
 
         env.storage()
@@ -5127,6 +5154,33 @@ impl AhjoorPaymentsContract {
             payment.status = PaymentStatus::Refunded;
         }
 
+        // Reverse tax proportionally: tax_refund = tax_collected * refund / original_amount
+        if payment.tax_collected > 0 && payment.amount > 0 {
+            if let Some(tax_cfg) = env
+                .storage()
+                .persistent()
+                .get::<DataKey3, MerchantTaxConfig>(&DataKey3::MerchantTax(payment.merchant.clone()))
+            {
+                let tax_refund = payment.tax_collected * refund_amount / payment.amount;
+                if tax_refund > 0 {
+                    let token_client = token::Client::new(&env, &payment.token);
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &payment.customer,
+                        &tax_refund,
+                    );
+                    events::emit_tax_refunded(
+                        &env,
+                        payment_id,
+                        payment.merchant.clone(),
+                        tax_refund,
+                        tax_cfg.tax_address,
+                        payment.token.clone(),
+                    );
+                }
+            }
+        }
+
         // Reverse proportional loyalty points on refund (#411)
         Self::reverse_points_for_refund(&env, &payment.customer, refund_amount, payment.amount);
 
@@ -5351,6 +5405,61 @@ impl AhjoorPaymentsContract {
             .instance()
             .get(&DataKey::MerchantOpenMode)
             .unwrap_or(true)
+    }
+
+    // --- Merchant Sales-Tax Configuration ---
+
+    /// Merchant sets (or updates) their sales-tax configuration.
+    ///
+    /// `tax_bps` is the fraction of every settled payment amount that will be
+    /// forwarded to `tax_address` at settlement time.  Setting `tax_bps = 0`
+    /// is allowed and effectively disables tax withholding while keeping the
+    /// record present; call `remove_merchant_tax` to delete it entirely.
+    ///
+    /// Errors
+    /// - `TaxBpsExceedsMax` (87) if `tax_bps > 10_000`.
+    pub fn set_merchant_tax(env: Env, merchant: Address, tax_bps: u32, tax_address: Address) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        if tax_bps > 10_000 {
+            panic_with_error!(&env, ExtError::TaxBpsExceedsMax);
+        }
+
+        let config = MerchantTaxConfig { tax_bps, tax_address };
+        let key = DataKey3::MerchantTax(merchant);
+        env.storage().persistent().set(&key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the merchant's current tax configuration, or `None` if none is set.
+    pub fn get_merchant_tax(env: Env, merchant: Address) -> Option<MerchantTaxConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::MerchantTax(merchant))
+    }
+
+    /// Merchant removes their tax configuration entirely.
+    ///
+    /// After this call `get_merchant_tax` returns `None` and no tax is
+    /// withheld on future settlements for this merchant.
+    pub fn remove_merchant_tax(env: Env, merchant: Address) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::MerchantTax(merchant));
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     // --- Merchant Collateral (#129) ---
@@ -6269,6 +6378,33 @@ impl AhjoorPaymentsContract {
                 }
             }
             Self::set_withdrawal_queue(&env, &merchant, remaining_queue);
+        }
+
+        // Reverse tax proportionally: tax_refund = tax_collected * amount / original_amount
+        if payment.tax_collected > 0 && payment.amount > 0 {
+            if let Some(tax_cfg) = env
+                .storage()
+                .persistent()
+                .get::<DataKey3, MerchantTaxConfig>(&DataKey3::MerchantTax(merchant.clone()))
+            {
+                let tax_refund = payment.tax_collected * amount / payment.amount;
+                if tax_refund > 0 {
+                    let tax_token_client = token::Client::new(&env, &payment.token);
+                    tax_token_client.transfer(
+                        &merchant,
+                        &payment.customer,
+                        &tax_refund,
+                    );
+                    events::emit_tax_refunded(
+                        &env,
+                        payment_id,
+                        merchant.clone(),
+                        tax_refund,
+                        tax_cfg.tax_address,
+                        payment.token.clone(),
+                    );
+                }
+            }
         }
 
         Self::reverse_points_for_refund(&env, &payment.customer, amount, payment.amount);
@@ -7637,6 +7773,7 @@ impl AhjoorPaymentsContract {
             external_id: None,
             tipping_enabled: false,
             extension_count: 0,
+            tax_collected: 0,
         };
 
         env.storage()
@@ -8170,6 +8307,44 @@ impl AhjoorPaymentsContract {
             // #242: Accrue referral commission on the fee collected for referred merchants
             Self::accrue_referral_commission(env, &payment.merchant, payment_id, fee_amount);
         }
+
+        // --- Sales-tax withholding ---
+        // If the merchant has configured a tax_bps, deduct the tax portion from
+        // net_amount and forward it directly to the merchant's tax_address.
+        // This happens after the protocol fee so the tax base is the gross
+        // payment amount, not the amount net of protocol fees.
+        let tax_amount: i128 =
+            if let Some(tax_cfg) = env
+                .storage()
+                .persistent()
+                .get::<DataKey3, MerchantTaxConfig>(&DataKey3::MerchantTax(payment.merchant.clone()))
+            {
+                if tax_cfg.tax_bps > 0 {
+                    let amt = (final_amount * tax_cfg.tax_bps as i128) / 10_000;
+                    if amt > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &tax_cfg.tax_address,
+                            &amt,
+                        );
+                        events::emit_tax_collected(
+                            env,
+                            payment_id,
+                            payment.merchant.clone(),
+                            amt,
+                            tax_cfg.tax_address,
+                            final_token.clone(),
+                        );
+                    }
+                    amt
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+        payment.tax_collected = tax_amount;
+        let net_amount = net_amount - tax_amount;
 
         // #1051: hold the merchant's rolling reserve share back on contract.
         // Payments split across recipients are not the merchant's alone, so
@@ -12649,5 +12824,8 @@ mod test_get_payment_expiry_bounds;
 mod test_merchant_tokens_swap_router;
 #[cfg(test)]
 mod test_unblock_evidence_dispute;
+
+#[cfg(test)]
+mod test_merchant_tax;
 
 pub use events::*;
