@@ -12,7 +12,7 @@
 
 use crate::errors::ExtError3;
 use crate::{
-    charter, events, DataKey, DataKey2, DataKey5, HoldbackRecord, HoldbackStatus,
+    charter, events, payout_split, DataKey, DataKey2, DataKey5, HoldbackRecord, HoldbackStatus,
     PERSISTENT_BUMP_AMOUNT, PERSISTENT_LIFETIME_THRESHOLD,
 };
 use soroban_sdk::{panic_with_error, token, Address, Env, Map, Vec};
@@ -337,16 +337,17 @@ pub(crate) fn release(env: &Env, member: &Address, cycle: u32) -> i128 {
     }
 
     let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
-    let recipient: Address = env
-        .storage()
-        .instance()
-        .get(&DataKey5::PayoutBeneficiary(member.clone()))
-        .unwrap_or(member.clone());
-    token::Client::new(env, &token_addr).transfer(
-        &env.current_contract_address(),
-        &recipient,
-        &record.amount,
-    );
-    events::emit_holdback_released(env, member.clone(), cycle, recipient, record.amount);
+    let destinations = payout_split::resolve(env, member, record.amount);
+    let client = token::Client::new(env, &token_addr);
+    for (recipient, share) in destinations.iter() {
+        if share > 0 {
+            client.transfer(
+                &env.current_contract_address(),
+                &recipient,
+                &share,
+            );
+            events::emit_holdback_released(env, member.clone(), cycle, recipient, share);
+        }
+    }
     record.amount
 }

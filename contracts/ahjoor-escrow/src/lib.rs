@@ -24,6 +24,10 @@ const DEFAULT_REMINDER_WINDOW_SECONDS: u64 = 3_600;
 const DEFAULT_MAX_DEADLINE_EXTENSION_SECONDS: u64 = 30 * 24 * 60 * 60;
 /// Maximum number of escrow IDs accepted in one `emit_response_reminders` call.
 const MAX_REMINDER_BATCH_SIZE: u32 = 50;
+/// Upper bound on the keeper reward paid out of `auto_release_expired` (5%).
+const MAX_KEEPER_REWARD_BPS: u32 = 500;
+/// Keeper reward is disabled unless the admin opts in via `set_keeper_reward_bps`.
+const DEFAULT_KEEPER_REWARD_BPS: u32 = 0;
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -385,6 +389,8 @@ pub enum EscrowErrorExt5 {
     DeadlineExtensionExceedsCap = 34,
     /// extend_deadline: cannot extend deadline while a dispute is active.
     CannotExtendDeadlineDuringDispute = 35,
+    /// set_keeper_reward_bps: value exceeds the configured maximum.
+    KeeperRewardBpsExceedsMaximum = 36,
 }
 
 /// #977: Mutual settlement offer for a disputed escrow.
@@ -988,6 +994,10 @@ pub enum DataKey3 {
     DeadlineReminderSent(u32),
     /// #1062: admin-configurable deadline reminder window in seconds (default: 48 h)
     DeadlineReminderWindowSeconds,
+    /// Admin-configurable reward (bps of escrow.amount) paid to whichever
+    /// address calls `auto_release_expired` on an expired escrow.
+    /// 0 (default) disables the reward.
+    KeeperRewardBps,
 }
 
 /// A third party's pre-funded protocol fee for a specific escrow.
@@ -4386,6 +4396,30 @@ impl AhjoorEscrowContract {
             .unwrap_or(0)
     }
 
+    /// Admin sets the keeper reward (bps of escrow.amount) paid out of
+    /// `auto_release_expired` to whichever address triggers it. 0 disables
+    /// the reward (the full amount then goes to the buyer, as before).
+    pub fn set_keeper_reward_bps(env: Env, admin: Address, bps: u32) {
+        Self::require_admin(&env, &admin);
+        if bps > MAX_KEEPER_REWARD_BPS {
+            panic_with_error!(&env, EscrowErrorExt5::KeeperRewardBpsExceedsMaximum);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey3::KeeperRewardBps, &bps);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_keeper_reward_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::KeeperRewardBps)
+            .unwrap_or(DEFAULT_KEEPER_REWARD_BPS)
+    }
+
     /// Configure oracle address and max accepted price age (seconds). Admin only.
     pub fn set_oracle(env: Env, admin: Address, oracle: Address, max_oracle_age: u64) {
         Self::require_admin(&env, &admin);
@@ -4902,8 +4936,12 @@ impl AhjoorEscrowContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
-    /// Auto-release expired escrow (past deadline, undisputed). Can be called by buyer.
-    pub fn auto_release_expired(env: Env, escrow_id: u32) {
+    /// Auto-release expired escrow (past deadline, undisputed) back to the buyer(s).
+    /// Permissionless keeper function — callable by **anyone**, no auth required.
+    /// `caller` receives the configured keeper reward (bps of escrow.amount,
+    /// via `set_keeper_reward_bps`; 0 by default) carved out of the refund;
+    /// the remainder goes to the buyer(s) as before.
+    pub fn auto_release_expired(env: Env, escrow_id: u32, caller: Address) {
         Self::require_not_paused(&env);
         let mut escrow: Escrow = env
             .storage()
@@ -4921,9 +4959,21 @@ impl AhjoorEscrowContract {
 
         Self::require_unlocked(&env, &escrow);
 
-        escrow.buyer.require_auth();
+        let keeper_reward_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::KeeperRewardBps)
+            .unwrap_or(DEFAULT_KEEPER_REWARD_BPS);
+        let keeper_reward = (escrow.amount * keeper_reward_bps as i128) / 10_000;
+        let refund_amount = escrow.amount - keeper_reward;
 
-        Self::transfer_to_buyers(&env, &escrow, escrow.amount, escrow_id);
+        if keeper_reward > 0 {
+            let client = token::Client::new(&env, &escrow.token);
+            client.transfer(&env.current_contract_address(), &caller, &keeper_reward);
+            events::emit_keeper_reward_paid(&env, escrow_id, caller, keeper_reward);
+        }
+
+        Self::transfer_to_buyers(&env, &escrow, refund_amount, escrow_id);
         Self::refund_fee_sponsorship(&env, escrow_id, &escrow.token);
 
         escrow.status = EscrowStatus::Refunded;
@@ -4940,7 +4990,7 @@ impl AhjoorEscrowContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        events::emit_escrow_refunded(&env, escrow_id, escrow.buyer, escrow.amount);
+        events::emit_escrow_refunded(&env, escrow_id, escrow.buyer, refund_amount);
 
         env.storage()
             .instance()
