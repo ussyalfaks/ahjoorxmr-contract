@@ -378,6 +378,12 @@ pub enum DataKey2 {
     // --- Feature: Merchant Refund SLA Tracking (#583) ---
     /// Per-merchant refund SLA running sums.
     MerchantRefundSLA(Address),
+
+    // --- Feature: Per-Reason-Code Auto-Approve Rules (#1172) ---
+    /// Merchant auto-approve ceiling for a specific reason code:
+    /// (merchant, reason_code) → max_amount. Checked before the global
+    /// `AutoApproveThreshold`; 0 means "always review this reason".
+    ReasonAutoApprove(Address, u32),
 }
 
 mod events;
@@ -915,30 +921,40 @@ impl AhjoorRefundContract {
 
         let is_whitelisted = Self::is_merchant_auto_approved(&env, &merchant);
 
-        // #228: Check amount-based auto-approval threshold
-        let is_threshold_auto_approved = if !is_whitelisted {
+        // #1172: A per-reason-code rule, when the merchant has configured one,
+        // takes precedence over the global threshold. The fraud score cap
+        // still applies to rule-based approvals.
+        let reason_rule_max: Option<i128> = if !is_whitelisted {
+            Self::reason_auto_approve_rule(&env, &merchant, reason_code)
+        } else {
+            None
+        };
+        let is_reason_rule_auto_approved = match reason_rule_max {
+            Some(max_amount) => {
+                max_amount > 0
+                    && effective_amount <= max_amount
+                    && Self::is_below_auto_approve_fraud_cap(&env, &customer)
+            }
+            None => false,
+        };
+
+        // #228: Check amount-based auto-approval threshold (only when no
+        // reason-specific rule matched the request's reason code).
+        let is_threshold_auto_approved = if !is_whitelisted && reason_rule_max.is_none() {
             let threshold: i128 = env
                 .storage()
                 .instance()
                 .get(&DataKey::AutoApproveThreshold(merchant.clone()))
                 .unwrap_or(0);
-            if threshold > 0 && effective_amount <= threshold {
-                // Check fraud score cap
-                let fraud_cap: u32 = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::AutoApproveFraudScoreCap)
-                    .unwrap_or(u32::MAX);
-                let buyer_score = Self::get_fraud_score(env.clone(), customer.clone());
-                buyer_score < fraud_cap
-            } else {
-                false
-            }
+            threshold > 0
+                && effective_amount <= threshold
+                && Self::is_below_auto_approve_fraud_cap(&env, &customer)
         } else {
             false
         };
 
-        let is_auto_approved = is_whitelisted || is_threshold_auto_approved;
+        let is_auto_approved =
+            is_whitelisted || is_reason_rule_auto_approved || is_threshold_auto_approved;
 
         let initial_status = if is_auto_approved {
             RefundStatus::Approved
@@ -948,6 +964,8 @@ impl AhjoorRefundContract {
 
         let auto_source = if is_whitelisted {
             Some(String::from_str(&env, "whitelist"))
+        } else if is_reason_rule_auto_approved {
+            Some(String::from_str(&env, "reason_rule"))
         } else if is_threshold_auto_approved {
             Some(String::from_str(&env, "threshold"))
         } else {
@@ -1110,6 +1128,15 @@ impl AhjoorRefundContract {
                 &env,
                 refund_id,
                 merchant.clone(),
+                effective_amount,
+            );
+        }
+
+        if is_reason_rule_auto_approved {
+            events::emit_refund_auto_approved_by_reason_rule(
+                &env,
+                refund_id,
+                reason_code,
                 effective_amount,
             );
         }
@@ -2311,6 +2338,81 @@ impl AhjoorRefundContract {
             .instance()
             .get(&DataKey::AutoApproveThreshold(merchant))
             .unwrap_or(0)
+    }
+
+    // -------------------------------------------------------------------------
+    // #1172: Per-Reason-Code Auto-Approve Rules
+    // -------------------------------------------------------------------------
+
+    /// Merchant sets an auto-approve ceiling for one refund reason code.
+    ///
+    /// When a rule exists for a request's reason code it is evaluated *instead
+    /// of* the merchant's global `AutoApproveThreshold`: the request is
+    /// auto-approved only if `amount <= max_amount` and the buyer is below the
+    /// global fraud score cap. A `max_amount` of 0 means requests with this
+    /// reason are always sent for review, even if the global threshold would
+    /// have approved them.
+    pub fn set_reason_auto_approve(env: Env, merchant: Address, reason_code: u32, max_amount: i128) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        if reason_code > MAX_REASON_CODE {
+            panic!("Invalid reason code: must be 0-4");
+        }
+        if max_amount < 0 {
+            panic!("Reason auto-approve amount cannot be negative");
+        }
+
+        let key = DataKey2::ReasonAutoApprove(merchant.clone(), reason_code);
+        env.storage().persistent().set(&key, &max_amount);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_reason_auto_approve_set(&env, merchant, reason_code, max_amount);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Merchant removes the rule for a reason code, falling back to the
+    /// global threshold for that reason.
+    pub fn remove_reason_auto_approve(env: Env, merchant: Address, reason_code: u32) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        let key = DataKey2::ReasonAutoApprove(merchant.clone(), reason_code);
+        if !env.storage().persistent().has(&key) {
+            panic!("Reason auto-approve rule not found");
+        }
+        env.storage().persistent().remove(&key);
+
+        events::emit_reason_auto_approve_removed(&env, merchant, reason_code);
+    }
+
+    /// Returns the merchant's auto-approve ceiling for `reason_code`, if a
+    /// rule has been configured.
+    pub fn get_reason_auto_approve(env: Env, merchant: Address, reason_code: u32) -> Option<i128> {
+        Self::reason_auto_approve_rule(&env, &merchant, reason_code)
+    }
+
+    fn reason_auto_approve_rule(env: &Env, merchant: &Address, reason_code: u32) -> Option<i128> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::ReasonAutoApprove(merchant.clone(), reason_code))
+    }
+
+    /// True when the buyer's fraud score is below the global auto-approve cap.
+    fn is_below_auto_approve_fraud_cap(env: &Env, buyer: &Address) -> bool {
+        let fraud_cap: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AutoApproveFraudScoreCap)
+            .unwrap_or(u32::MAX);
+        Self::get_fraud_score(env.clone(), buyer.clone()) < fraud_cap
     }
 
     /// Admin sets the global fraud score cap for auto-approval.
@@ -6942,6 +7044,9 @@ mod test_auto_approve_whitelist;
 
 #[cfg(test)]
 mod test_fraud_score;
+
+#[cfg(test)]
+mod test_reason_auto_approve;
 /// Event: Customer appealed a rejected refund (#159)
 #[contractevent]
 #[derive(Clone, Debug)]
