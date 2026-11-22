@@ -344,8 +344,30 @@ pub enum ExtError3 {
     HardshipAlreadyUsedThisCycle = 181,
     /// The emergency reserve cannot cover the requested shortfall.
     InsufficientReserveForHardship = 182,
-    // ── Payout Escrow Routing (#1124) ────────────────────────────────────────
-    /// The escrow target is invalid (deadline not in the future or the
-    /// contract itself was used as seller/arbiter).
-    InvalidPayoutEscrowTarget = 187,
+    // ── Vote of No Confidence (#1122) ────────────────────────────────────────
+    /// The nominee must be an active member and must not be the current admin.
+    InvalidNoConfidenceNominee = 183,
+    /// The outgoing admin may not vote on a NoConfidence proposal.
+    AdminCannotVoteOnNoConfidence = 184,
+}
+
+/// Extension error codes 183+ — overflow from ExtError3 (50-variant limit).
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtError4 {
+    // ── Private Groups / Join Requests ────────────────────────────────────────
+    /// `request_to_join` / `approve_join_request` / `reject_join_request` were
+    /// called on a group that is not marked private.
+    GroupNotPrivate = 183,
+    /// The requester already has a pending join request.
+    JoinRequestAlreadyPending = 184,
+    /// No pending join request exists for this address.
+    JoinRequestNotFound = 185,
+    // ── Keeper Bounty ──────────────────────────────────────────────────────────
+    /// Keeper bounty amount must not be negative.
+    InvalidBountyAmount = 186,
+    // ── Contribution Memo ───────────────────────────────────────────────────────
+    /// The member has no contribution recorded for this round, so no memo can
+    /// be attached.
+    NoContributionForMemo = 187,
 }

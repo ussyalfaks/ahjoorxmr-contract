@@ -154,6 +154,8 @@ pub enum ProposalType {
     WaivePenalty = 9,
     MemberBan = 10,          // Ban target_member from rejoining the group
     HardshipReduction = 11,  // One-round contribution reduction covered by the emergency reserve
+    /// Vote of no confidence: when passed, `target_member` replaces the admin.
+    NoConfidence = 12,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -539,23 +541,9 @@ pub enum DataKey5 {
     /// i128 — reserve funds drawn for approved reductions, not yet settled.
     HardshipEarmarked,
 
-    // ── Payout Escrow Routing (#1124) ─────────────────────────────────────────
-    /// Address — the ahjoor-escrow contract used for payout escrow routing.
-    EscrowContract,
-    /// PayoutEscrowTarget — member → pending escrow target for their payout.
-    PayoutEscrowTarget(Address),
-}
-
-// ── Payout Escrow Routing ─────────────────────────────────────────────────────
-
-/// A member's request to route their next ROSCA payout into an escrow
-/// agreement with `seller` and `arbiter` by `deadline`.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PayoutEscrowTarget {
-    pub seller: Address,
-    pub arbiter: Address,
-    pub deadline: u64,
+    // ── Payout Splits (#1123) ─────────────────────────────────────────────────
+    /// Vec<(Address, u32)> — member → payout recipients and basis points.
+    PayoutSplits(Address),
 }
 
 // ── Contribution Streak Bonus ─────────────────────────────────────────────────
@@ -1263,6 +1251,26 @@ pub enum DataKey6 {
     // ── Group Metadata ────────────────────────────────────────────────────────
     /// GroupMetadata — display name, category and description hash.
     GroupMetadata,
+
+    // ── Private Groups / Join Requests ────────────────────────────────────────
+    /// bool — when true, `request_to_join` is required instead of a direct
+    /// admin `add_member` call. Absent = false (open group).
+    IsPrivate,
+    /// Map<Address, u64> — pending join requests: requester → requested_at timestamp.
+    JoinRequests,
+
+    // ── Keeper Bounty ────────────────────────────────────────────────────────
+    /// i128 — flat bounty paid (in the group's base token) to whoever calls
+    /// `keeper_close_round` / `keeper_finalize_round` after the deadline.
+    /// 0 (default) disables the bounty.
+    KeeperBountyAmount,
+    /// i128 — funded balance available to pay keeper bounties from.
+    KeeperBountyPool,
+
+    // ── Contribution Memo ────────────────────────────────────────────────────
+    /// BytesN<32> — (member, round) → optional memo hash attached to that
+    /// round's contribution (persistent; absent = no memo).
+    ContributionMemo(Address, u32),
 }
 
 // ── Cross-Group Member Obligations ────────────────────────────────────────────
@@ -1358,4 +1366,34 @@ pub struct HardshipRequest {
     pub reduced_amount: i128,
     pub shortfall: i128,
     pub approved: bool,
+}
+
+// ── Admin-Attested Offline (Cash) Contributions ───────────────────────────────
+
+/// Status of an admin-attested offline contribution, pending the member's
+/// on-chain confirmation before it counts toward their round requirement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum OfflineContributionStatus {
+    /// Admin attested; awaiting the member's confirmation or rejection.
+    Pending = 0,
+    /// Member confirmed; amount credited toward their contribution.
+    Confirmed = 1,
+    /// Member rejected; escrowed funds returned to the attesting admin.
+    Rejected = 2,
+}
+
+/// An admin's claim that `member` paid `amount` in cash (off-chain) for
+/// `round`. The admin escrows the equivalent on-chain amount at attestation
+/// time so the round pot stays solvent; the member's confirmation (or
+/// rejection) settles that escrow.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineContribution {
+    pub member: Address,
+    pub round: u32,
+    pub amount: i128,
+    pub attested_by: Address,
+    pub attested_at_ledger: u32,
+    pub status: OfflineContributionStatus,
 }

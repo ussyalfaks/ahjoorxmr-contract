@@ -44,9 +44,11 @@ mod escrow_client;
 mod events;
 mod holdback;
 mod internals;
+mod join_requests;
+mod keeper_bounty;
 mod metadata;
 mod obligations;
-mod payout_escrow;
+mod payout_split;
 mod penalty_waiver;
 mod round_extension;
 pub mod savings_goal_tracking;
@@ -70,7 +72,7 @@ mod migration_client;
 pub use migration_client::RoscaMigrationClient;
 pub use obligations::RoscaObligationClient;
 
-use crate::errors::{Error, ExtError, ExtError2};
+use crate::errors::{Error, ExtError, ExtError2, ExtError3};
 
 #[contract]
 pub struct AhjoorContract;
@@ -381,6 +383,8 @@ impl AhjoorContract {
             .set(&DataKey::QuorumPercentage, &51u32);
         let mut quorum_config = Map::<ProposalType, u32>::new(&env);
         quorum_config.set(ProposalType::MemberFreeze, 6_700);
+        // A vote of no confidence requires a supermajority by default.
+        quorum_config.set(ProposalType::NoConfidence, 6_700);
         env.storage()
             .instance()
             .set(&DataKey2::QuorumConfig, &quorum_config);
@@ -1344,7 +1348,25 @@ impl AhjoorContract {
             .get(&DataKey::Admin)
             .expect("Admin not set");
         admin.require_auth();
+        Self::do_close_round(env.clone());
+    }
 
+    /// Permissionless equivalent of `close_round`: `caller` need not be the
+    /// admin. Still requires the round deadline to have passed (same check
+    /// as `close_round`). If a keeper bounty is configured and funded,
+    /// `caller` is paid out of the bounty pool for triggering the upkeep.
+    pub fn keeper_close_round(env: Env, caller: Address) {
+        internals::check_not_paused(&env);
+        cycle_limit::check_not_completed(&env);
+        internals::check_not_frozen(&env);
+        caller.require_auth();
+        let round = Self::do_close_round(env.clone());
+        keeper_bounty::pay(&env, &caller, round);
+    }
+
+    /// Shared body of `close_round` / `keeper_close_round`. Returns the round
+    /// that was closed.
+    fn do_close_round(env: Env) -> u32 {
         // Guard against an admin calling close_round repeatedly instead of
         // finalize_round: close_round never pays out the pot, never records
         // audit trail (CycleRecord/CycleSnapshotData), and never mints
@@ -1444,6 +1466,7 @@ impl AhjoorContract {
             .set(&DataKey4::UnfinalizedRoundStreak, &(unfinalized_streak + 1));
 
         internals::reset_round_state(&env, current_round);
+        current_round
     }
 
     /// Finalize a round once its deadline has passed.
@@ -4024,53 +4047,86 @@ impl AhjoorContract {
             .expect("Admin not set");
         admin.require_auth();
 
-        // Reject mid-round: paid_members must be empty
-        let paid_members: Vec<Address> = env
+        internals::add_member_internal(&env, &new_member);
+    }
+
+    // ── Private Groups / Join Requests ────────────────────────────────────────
+
+    /// Admin toggles whether the group requires `request_to_join` + approval
+    /// (private) instead of allowing a direct `add_member` call to onboard
+    /// outsiders. `add_member` itself keeps working for the admin either way.
+    pub fn set_group_private(env: Env, is_private: bool) {
+        internals::check_not_paused(&env);
+        let admin: Address = env
             .storage()
             .instance()
-            .get(&DataKey::PaidMembers)
-            .unwrap_or(Vec::new(&env));
-        if !paid_members.is_empty() {
-            panic_with_error!(&env, Error::CannotChangeMidRound);
-        }
-
-        let mut members: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::Members)
-            .expect("Not initialized");
-
-        let max_members: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MaxMembers)
-            .unwrap_or(50);
-
-        if (members.len() as u32) >= max_members {
-            panic_with_error!(&env, Error::GroupFull);
-        }
-
-        if members.contains(&new_member) {
-            panic_with_error!(&env, Error::AlreadyAMember);
-        }
-        bans::require_not_banned(&env, &new_member);
-        charter::require_charter_acknowledged(&env, &new_member);
-        internals::increment_membership_count(&env, &new_member);
-        members.push_back(new_member.clone());
-        env.storage().instance().set(&DataKey::Members, &members);
-
-        // Recalculate payout order: append new member to the end
-        let mut payout_order: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&DataKey::PayoutOrder)
-            .expect("Payout order not set");
-        payout_order.push_back(new_member.clone());
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        join_requests::set_private(&env, is_private);
         env.storage()
             .instance()
-            .set(&DataKey::PayoutOrder, &payout_order);
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
 
-        events::emit_mem_add(&env, new_member, members.len() as u32);
+    pub fn is_group_private(env: Env) -> bool {
+        join_requests::is_private(&env)
+    }
+
+    /// Requests to join a private group. Fails with `GroupNotPrivate` if the
+    /// group isn't private, `MemberBanned` if the requester is banned, and
+    /// `JoinRequestAlreadyPending` if they already have a pending request.
+    pub fn request_to_join(env: Env, requester: Address) {
+        internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
+        requester.require_auth();
+        join_requests::request(&env, &requester);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Withdraws the caller's own pending join request.
+    pub fn cancel_join_request(env: Env, requester: Address) {
+        internals::check_not_paused(&env);
+        requester.require_auth();
+        join_requests::cancel(&env, &requester);
+    }
+
+    /// Admin approves a pending join request, adding `requester` as a member
+    /// through the same path as `add_member`.
+    pub fn approve_join_request(env: Env, requester: Address) {
+        internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        join_requests::approve(&env, &requester);
+        internals::add_member_internal(&env, &requester);
+    }
+
+    /// Admin rejects a pending join request without adding the requester.
+    pub fn reject_join_request(env: Env, requester: Address) {
+        internals::check_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+        join_requests::reject(&env, &requester);
+    }
+
+    /// View: pending join requests as (requester, requested_at) pairs.
+    pub fn get_pending_join_requests(env: Env) -> Map<Address, u64> {
+        join_requests::pending_requests(&env)
+    }
+
+    pub fn has_pending_join_request(env: Env, requester: Address) -> bool {
+        join_requests::is_pending(&env, &requester)
     }
 
     pub fn remove_member(env: Env, member: Address) {
@@ -4510,6 +4566,33 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Member-initiated vote of no confidence against the current admin.
+    /// If the proposal passes, `nominee` becomes the new admin. Uses the
+    /// per-type quorum configured for `ProposalType::NoConfidence`
+    /// (default: 67% supermajority). The outgoing admin cannot vote.
+    pub fn propose_no_confidence(
+        env: Env,
+        proposer: Address,
+        nominee: Address,
+        voting_duration: u64,
+    ) -> u32 {
+        internals::check_not_paused(&env);
+        proposer.require_auth();
+
+        let proposal_id = Self::create_proposal_internal(
+            &env,
+            proposer.clone(),
+            ProposalType::NoConfidence,
+            String::from_str(&env, "Vote of no confidence"),
+            nominee.clone(),
+            voting_duration,
+            None,
+        );
+
+        events::emit_no_confidence_proposed(&env, proposal_id, proposer, nominee);
+        proposal_id
+    }
+
     pub fn create_proposal(
         env: Env,
         creator: Address,
@@ -4562,6 +4645,16 @@ impl AhjoorContract {
             ProposalType::WaivePenalty => {
                 penalty_waiver::require_penalty_exists(&env, &target_member, execution_data);
             }
+            ProposalType::NoConfidence => {
+                let admin: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Admin)
+                    .expect("Not initialized");
+                if target_member == admin || !members.contains(&target_member) {
+                    panic_with_error!(&env, ExtError3::InvalidNoConfidenceNominee);
+                }
+            }
             _ => {}
         }
 
@@ -4584,6 +4677,8 @@ impl AhjoorContract {
 
         let required_quorum = if let Some(q) = quorum_config.get(proposal_type) {
             q
+        } else if proposal_type == ProposalType::NoConfidence {
+            6_700
         } else {
             let global_q: u32 = env
                 .storage()
@@ -4741,6 +4836,10 @@ impl AhjoorContract {
             panic_with_error!(&env, ExtError2::InvalidBeneficiary);
         }
 
+        if payout_split::get(&env, &member).is_some() {
+            panic_with_error!(&env, ExtError3::PayoutSplitsBeneficiaryConflict);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey5::PayoutBeneficiary(member.clone()), &beneficiary);
@@ -4774,85 +4873,54 @@ impl AhjoorContract {
             .get(&DataKey5::PayoutBeneficiary(member))
     }
 
-    /// Admin: configure the ahjoor-escrow contract used to route payouts.
-    pub fn set_escrow_contract(env: Env, admin: Address, escrow_contract: Address) {
-        internals::check_not_paused(&env);
-        admin.require_auth();
-
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("Not initialized");
-        if admin != stored_admin {
-            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
-        }
-
-        env.storage()
-            .instance()
-            .set(&DataKey5::EscrowContract, &escrow_contract);
-        events::emit_escrow_contract_set(&env, escrow_contract);
-
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-    }
-
-    /// Alias for `set_escrow_contract`.
-    pub fn set_payout_escrow_contract(env: Env, admin: Address, escrow_contract: Address) {
-        Self::set_escrow_contract(env, admin, escrow_contract);
-    }
-
-    /// View: the configured ahjoor-escrow contract, if any.
-    pub fn get_escrow_contract(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey5::EscrowContract)
-    }
-
-    /// Route `member`'s upcoming payout into an ahjoor-escrow agreement with
-    /// `seller` and `arbiter`, expiring at `deadline`. The target applies to
-    /// the next payout only.
-    pub fn set_payout_escrow_target(
+    /// Split `member`'s payouts across multiple addresses by basis points.
+    /// `splits` must be non-empty, contain at most 10 unique non-contract
+    /// recipients, and sum to exactly 10_000 bps. Any rounding dust is paid to
+    /// `member`. A member cannot have both splits and a single beneficiary.
+    pub fn set_payout_splits(
         env: Env,
         _group_id: u32,
         member: Address,
-        seller: Address,
-        arbiter: Address,
-        deadline: u64,
+        splits: Vec<(Address, u32)>,
     ) {
         internals::check_not_paused(&env);
         member.require_auth();
         Self::check_beneficiary_change_allowed(&env, &member);
 
-        let target = PayoutEscrowTarget {
-            seller: seller.clone(),
-            arbiter: arbiter.clone(),
-            deadline,
-        };
-        payout_escrow::set_target(&env, &member, &target);
-        events::emit_payout_escrow_target_set(&env, member, seller, arbiter, deadline);
+        let existing_beneficiary: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey5::PayoutBeneficiary(member.clone()));
+        if existing_beneficiary.is_some() {
+            panic_with_error!(&env, ExtError3::PayoutSplitsBeneficiaryConflict);
+        }
+
+        payout_split::set(&env, &member, &splits);
+        events::emit_payout_splits_set(&env, member, splits.len());
 
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
-    /// Remove `member`'s pending payout escrow target.
-    pub fn clear_payout_escrow_target(env: Env, member: Address) {
+    /// Remove `member`'s payout splits so payouts go to the beneficiary or the
+    /// member themselves.
+    pub fn clear_payout_splits(env: Env, member: Address) {
         internals::check_not_paused(&env);
         member.require_auth();
         Self::check_beneficiary_change_allowed(&env, &member);
 
-        payout_escrow::clear_target(&env, &member);
-        events::emit_payout_escrow_target_cleared(&env, member);
+        payout_split::clear(&env, &member);
+        events::emit_payout_splits_cleared(&env, member);
 
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
-    /// View: `member`'s pending payout escrow target, if any.
-    pub fn get_payout_escrow_target(env: Env, member: Address) -> Option<PayoutEscrowTarget> {
-        payout_escrow::get_target(&env, &member)
+    /// View: the payout splits configured by `member`, if any.
+    pub fn get_payout_splits(env: Env, member: Address) -> Option<Vec<(Address, u32)>> {
+        payout_split::get(&env, &member)
     }
 
     fn check_beneficiary_change_allowed(env: &Env, member: &Address) {
@@ -4937,6 +5005,19 @@ impl AhjoorContract {
         }
 
         let mut proposal = proposals.get(proposal_id).unwrap();
+
+        // The admin being challenged cannot vote on their own no-confidence
+        // proposal, directly or through a delegation.
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        let is_no_confidence = proposal.proposal_type == ProposalType::NoConfidence;
+        if is_no_confidence && voter == current_admin {
+            panic_with_error!(&env, ExtError3::AdminCannotVoteOnNoConfidence);
+        }
+
         let current_time = env.ledger().timestamp();
         if current_time > proposal.deadline {
             panic_with_error!(&env, Error::VotingDeadlinePassed);
@@ -4981,6 +5062,9 @@ impl AhjoorContract {
         let mut delegator_votes_for = 0i128;
         let mut delegator_votes_against = 0i128;
         for (delegator, delegate) in delegations.iter() {
+            if is_no_confidence && delegator == current_admin {
+                continue;
+            }
             if delegate == voter {
                 // This voter is a delegate; check if delegator hasn't voted yet
                 let delegator_voted = votes.contains_key(delegator.clone());
@@ -5000,6 +5084,9 @@ impl AhjoorContract {
 
         // #398: Also count votes delegated via ContribDelegations (contribution-weight path).
         for (delegator, record) in contrib_delegations.iter() {
+            if is_no_confidence && delegator == current_admin {
+                continue;
+            }
             if record.proxy == voter {
                 let active = match record.expiry_mode {
                     ExpiryMode::Timestamp => env.ledger().timestamp() < record.expiry,
@@ -5038,6 +5125,10 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey2::VotingMode)
             .unwrap_or(VotingMode::Equal);
+
+        if is_no_confidence {
+            events::emit_no_confidence_vote_cast(&env, proposal_id, voter.clone(), vote_for);
+        }
 
         if voting_mode == VotingMode::WeightedByContributions {
             events::emit_weighted_vote_cast(&env, voter, proposal_id, voter_weight);
@@ -5232,6 +5323,36 @@ impl AhjoorContract {
                 );
 
                 events::emit_group_frozen(&env, 0, reason_hash, env.ledger().sequence());
+            }
+            ProposalType::NoConfidence => {
+                let old_admin: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Admin)
+                    .expect("Not initialized");
+                if proposal.target_member == old_admin || !members.contains(&proposal.target_member)
+                {
+                    panic_with_error!(&env, ExtError3::InvalidNoConfidenceNominee);
+                }
+
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Admin, &proposal.target_member);
+                // Discard any pending admin-transfer acceptance; the vote
+                // supersedes it.
+                env.storage().instance().remove(&DataKey2::ProposedAdmin);
+
+                events::emit_admin_transferred(
+                    &env,
+                    old_admin.clone(),
+                    proposal.target_member.clone(),
+                );
+                events::emit_no_confidence_executed(
+                    &env,
+                    proposal_id,
+                    old_admin,
+                    proposal.target_member.clone(),
+                );
             }
         }
 
@@ -6737,6 +6858,8 @@ impl AhjoorContract {
             .unwrap_or(Map::new(&env));
         if let Some(q) = quorum_config.get(proposal_type) {
             q
+        } else if proposal_type == ProposalType::NoConfidence {
+            6_700
         } else {
             let global_q: u32 = env
                 .storage()
@@ -13642,6 +13765,7 @@ mod test_emergency_reserve;
 mod test_group_freeze;
 mod test_group_split;
 mod test_new_features;
+mod test_no_confidence;
 mod test_proxy;
 mod test_quorum;
 #[cfg(test)]
@@ -13659,7 +13783,7 @@ mod test_waitlist;
 mod test_voluntary_exit;
 mod test_prepay;
 mod test_payout_beneficiary;
-mod test_payout_escrow;
+mod test_payout_splits;
 mod test_charter;
 mod test_succession;
 mod test_streak_bonus;
