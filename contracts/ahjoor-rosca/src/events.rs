@@ -433,6 +433,33 @@ pub struct AdminTransferred {
     pub new_admin: Address,
 }
 
+/// Event: A vote of no confidence was opened against the current admin
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NoConfidenceProposed {
+    pub proposal_id: u32,
+    pub proposer: Address,
+    pub nominee: Address,
+}
+
+/// Event: A vote was cast on a vote of no confidence
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NoConfidenceVoteCast {
+    pub proposal_id: u32,
+    pub voter: Address,
+    pub vote_for: bool,
+}
+
+/// Event: A vote of no confidence passed and the admin was replaced
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NoConfidenceExecuted {
+    pub proposal_id: u32,
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
 /// Event: Contract WASM upgraded
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -767,6 +794,43 @@ pub fn emit_admin_transfer_proposed(e: &Env, current_admin: Address, proposed_ad
 
 pub fn emit_admin_transferred(e: &Env, old_admin: Address, new_admin: Address) {
     AdminTransferred {
+        old_admin,
+        new_admin,
+    }
+    .publish(e);
+}
+
+pub fn emit_no_confidence_proposed(
+    e: &Env,
+    proposal_id: u32,
+    proposer: Address,
+    nominee: Address,
+) {
+    NoConfidenceProposed {
+        proposal_id,
+        proposer,
+        nominee,
+    }
+    .publish(e);
+}
+
+pub fn emit_no_confidence_vote_cast(e: &Env, proposal_id: u32, voter: Address, vote_for: bool) {
+    NoConfidenceVoteCast {
+        proposal_id,
+        voter,
+        vote_for,
+    }
+    .publish(e);
+}
+
+pub fn emit_no_confidence_executed(
+    e: &Env,
+    proposal_id: u32,
+    old_admin: Address,
+    new_admin: Address,
+) {
+    NoConfidenceExecuted {
+        proposal_id,
         old_admin,
         new_admin,
     }
@@ -2802,4 +2866,97 @@ pub fn emit_hardship_shortfall_settled(
     added_to_pot: bool,
 ) {
     HardshipShortfallSettled { member, round, shortfall, added_to_pot }.publish(e);
+}
+
+// ── Keeper Bounty ────────────────────────────────────────────────────────────
+
+/// Event: admin configured the flat keeper bounty amount.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct KeeperBountyAmountSet {
+    pub amount: i128,
+}
+
+pub fn emit_keeper_bounty_amount_set(e: &Env, amount: i128) {
+    KeeperBountyAmountSet { amount }.publish(e);
+}
+
+/// Event: the keeper bounty pool was topped up.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct KeeperBountyFunded {
+    pub funder: Address,
+    pub amount: i128,
+    pub pool_total: i128,
+}
+
+pub fn emit_keeper_bounty_funded(e: &Env, funder: Address, amount: i128, pool_total: i128) {
+    KeeperBountyFunded { funder, amount, pool_total }.publish(e);
+}
+
+/// Event: a keeper bounty was paid out to whoever triggered
+/// `keeper_close_round` / `keeper_finalize_round` after the deadline.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct KeeperBountyPaid {
+    pub caller: Address,
+    pub round: u32,
+    pub amount: i128,
+}
+
+pub fn emit_keeper_bounty_paid(e: &Env, caller: Address, round: u32, amount: i128) {
+    KeeperBountyPaid { caller, round, amount }.publish(e);
+}
+
+// ── Private Groups / Join Requests ────────────────────────────────────────────
+
+/// Event: admin toggled the group's privacy setting.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct GroupPrivacySet {
+    pub is_private: bool,
+}
+
+pub fn emit_group_privacy_set(e: &Env, is_private: bool) {
+    GroupPrivacySet { is_private }.publish(e);
+}
+
+/// Event: an address requested to join a private group.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct JoinRequested {
+    pub requester: Address,
+    pub requested_at: u64,
+}
+
+pub fn emit_join_requested(e: &Env, requester: Address, requested_at: u64) {
+    JoinRequested { requester, requested_at }.publish(e);
+}
+
+/// Event: a pending join request was withdrawn, approved or rejected.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct JoinRequestResolved {
+    pub requester: Address,
+    /// "cancelled", "approved" or "rejected".
+    pub resolution: Symbol,
+}
+
+pub fn emit_join_request_resolved(e: &Env, requester: Address, resolution: Symbol) {
+    JoinRequestResolved { requester, resolution }.publish(e);
+}
+
+// ── Contribution Memo ─────────────────────────────────────────────────────────
+
+/// Event: a memo hash was attached to a member's round contribution.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContributionMemoSet {
+    pub member: Address,
+    pub round: u32,
+    pub memo_hash: BytesN<32>,
+}
+
+pub fn emit_contribution_memo_set(e: &Env, member: Address, round: u32, memo_hash: BytesN<32>) {
+    ContributionMemoSet { member, round, memo_hash }.publish(e);
 }
