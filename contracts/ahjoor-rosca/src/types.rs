@@ -1361,3 +1361,33 @@ pub struct HardshipRequest {
     pub shortfall: i128,
     pub approved: bool,
 }
+
+// ── Admin-Attested Offline (Cash) Contributions ───────────────────────────────
+
+/// Status of an admin-attested offline contribution, pending the member's
+/// on-chain confirmation before it counts toward their round requirement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum OfflineContributionStatus {
+    /// Admin attested; awaiting the member's confirmation or rejection.
+    Pending = 0,
+    /// Member confirmed; amount credited toward their contribution.
+    Confirmed = 1,
+    /// Member rejected; escrowed funds returned to the attesting admin.
+    Rejected = 2,
+}
+
+/// An admin's claim that `member` paid `amount` in cash (off-chain) for
+/// `round`. The admin escrows the equivalent on-chain amount at attestation
+/// time so the round pot stays solvent; the member's confirmation (or
+/// rejection) settles that escrow.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineContribution {
+    pub member: Address,
+    pub round: u32,
+    pub amount: i128,
+    pub attested_by: Address,
+    pub attested_at_ledger: u32,
+    pub status: OfflineContributionStatus,
+}
