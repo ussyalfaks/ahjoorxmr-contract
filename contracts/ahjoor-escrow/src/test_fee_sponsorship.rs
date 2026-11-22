@@ -172,7 +172,8 @@ fn test_sponsor_refunded_on_expired_refund() {
     s.client.sponsor_escrow_fee(&s.sponsor, &escrow_id);
 
     s.env.ledger().with_mut(|li| li.timestamp += 1_001);
-    s.client.auto_release_expired(&escrow_id);
+    let keeper = Address::generate(&s.env);
+    s.client.auto_release_expired(&escrow_id, &keeper);
 
     assert_eq!(s.token_client.balance(&s.sponsor), 1_000);
     assert_eq!(s.token_client.balance(&s.buyer), 1_000);

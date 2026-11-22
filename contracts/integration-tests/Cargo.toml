@@ -15,6 +15,7 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 ahjoor-rosca = { path = "../ahjoor-rosca" }
 ahjoor-payments = { path = "../ahjoor-payments" }
 ahjoor-refund = { path = "../ahjoor-refund" }
+ahjoor-escrow = { path = "../ahjoor-escrow" }
 
 [features]
 testutils = []
