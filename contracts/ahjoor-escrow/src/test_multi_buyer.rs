@@ -94,7 +94,8 @@ fn test_multi_buyer_refund_proportional_on_expiry() {
 
     // Move past deadline and auto-refund.
     env.ledger().set_timestamp(deadline + 1);
-    client.auto_release_expired(&escrow_id);
+    let keeper = Address::generate(&env);
+    client.auto_release_expired(&escrow_id, &keeper);
 
     // Contributions are refunded in original proportions.
     assert_eq!(token_client.balance(&buyer1), 1_000);

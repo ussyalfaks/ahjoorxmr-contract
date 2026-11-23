@@ -152,6 +152,15 @@ pub struct EscrowRefunded {
     pub amount: i128,
 }
 
+/// Event: Keeper reward paid out of `auto_release_expired`
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct KeeperRewardPaid {
+    pub escrow_id: u32,
+    pub keeper: Address,
+    pub amount: i128,
+}
+
 /// Event: Multi-seller escrow released with distributions (#317)
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -522,6 +531,15 @@ pub fn emit_escrow_refunded(e: &Env, escrow_id: u32, buyer: Address, amount: i12
     EscrowRefunded {
         escrow_id,
         buyer,
+        amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_keeper_reward_paid(e: &Env, escrow_id: u32, keeper: Address, amount: i128) {
+    KeeperRewardPaid {
+        escrow_id,
+        keeper,
         amount,
     }
     .publish(e);

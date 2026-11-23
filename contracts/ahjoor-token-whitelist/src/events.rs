@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, BytesN, Env, Symbol};
+use soroban_sdk::{contractevent, Address, BytesN, Env, Symbol, Vec};
 
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -356,3 +356,71 @@ pub fn emit_token_category_removed(e: &Env, token: Address) {
 
 #[allow(dead_code)]
 fn _use_symbol(_: Symbol) {}
+
+// ==================== #1182 MULTISIG / #1183 SWAP PAIR EVENTS ====================
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MultisigInitialized {
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MultisigChangeProposed {
+    pub proposal_id: u32,
+    pub proposer: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MultisigChangeApproved {
+    pub proposal_id: u32,
+    pub signer: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MultisigChangeExecuted {
+    pub proposal_id: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SwapPairAllowed {
+    pub token_a: Address,
+    pub token_b: Address,
+    pub max_slippage_bps: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SwapPairDisallowed {
+    pub token_a: Address,
+    pub token_b: Address,
+}
+
+pub fn emit_multisig_initialized(e: &Env, signers: Vec<Address>, threshold: u32) {
+    MultisigInitialized { signers, threshold }.publish(e);
+}
+
+pub fn emit_multisig_change_proposed(e: &Env, proposal_id: u32, proposer: Address) {
+    MultisigChangeProposed { proposal_id, proposer }.publish(e);
+}
+
+pub fn emit_multisig_change_approved(e: &Env, proposal_id: u32, signer: Address) {
+    MultisigChangeApproved { proposal_id, signer }.publish(e);
+}
+
+pub fn emit_multisig_change_executed(e: &Env, proposal_id: u32) {
+    MultisigChangeExecuted { proposal_id }.publish(e);
+}
+
+pub fn emit_swap_pair_allowed(e: &Env, token_a: Address, token_b: Address, max_slippage_bps: u32) {
+    SwapPairAllowed { token_a, token_b, max_slippage_bps }.publish(e);
+}
+
+pub fn emit_swap_pair_disallowed(e: &Env, token_a: Address, token_b: Address) {
+    SwapPairDisallowed { token_a, token_b }.publish(e);
+}

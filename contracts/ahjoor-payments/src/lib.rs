@@ -257,6 +257,64 @@ pub enum ExtError {
     PaymentRequestInactive = 85,
     /// Reusable payment request has reached its use limit.
     PaymentRequestExhausted = 86,
+    /// tax_bps supplied to set_merchant_tax exceeds 10_000.
+    TaxBpsExceedsMax = 87,
+}
+
+/// Domain errors for settlement batches (#1163), price-lock quotes (#1165)
+/// and security deposits (#1167). Split out because `ExtError` is bounded
+/// to 50 variants.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtError2 {
+    /// #1163: no settlement batch exists with the given ID.
+    SettlementBatchNotFound = 100,
+    /// #1163: page `limit` is zero or above `MAX_SETTLEMENT_BATCH_PAGE_SIZE`.
+    InvalidPageLimit = 101,
+    /// #1165: no oracle-priced payment exists with the given ID.
+    OraclePricedPaymentNotFound = 102,
+    /// #1165: caller is not the oracle-priced payment's merchant.
+    NotPaymentMerchant = 103,
+    /// #1165: the oracle-priced payment has already been paid.
+    PaymentAlreadyPaid = 104,
+    /// #1165: quoted rate must be positive.
+    InvalidQuoteRate = 105,
+    /// #1165: quote expiry ledger must be after the current ledger.
+    InvalidQuoteExpiry = 106,
+    /// #1165: quoted rate deviates from the oracle by more than the configured slippage.
+    QuoteOutsideSlippage = 107,
+    /// #1165: the price-lock quote expired before the payment was made.
+    QuoteExpired = 108,
+    /// #1165: oracle / USDC token has not been configured.
+    OracleNotConfigured = 109,
+    /// #1165: oracle returned no price, or a non-positive price.
+    OraclePriceUnavailable = 110,
+    /// #1165: oracle price is older than `MaxOracleAge`.
+    OraclePriceStale = 111,
+    /// #1167: no security deposit exists with the given ID.
+    SecurityDepositNotFound = 112,
+    /// #1167: deposit amount must be positive.
+    InvalidDepositAmount = 113,
+    /// #1167: `return_by` must be after the current ledger.
+    InvalidReturnBy = 114,
+    /// #1167: merchant and customer must be different addresses.
+    InvalidDepositParties = 115,
+    /// #1167: caller is not the deposit's merchant.
+    NotDepositMerchant = 116,
+    /// #1167: caller is not the deposit's customer.
+    NotDepositCustomer = 117,
+    /// #1167: the deposit is not in a status that allows this action.
+    InvalidDepositStatus = 118,
+    /// #1167: the merchant can no longer claim deductions after `return_by`.
+    ReturnDeadlinePassed = 119,
+    /// #1167: the customer cannot reclaim the deposit before `return_by` has passed.
+    ReturnDeadlineNotReached = 120,
+    /// #1167: deductions list is empty, too long, or contains a non-positive amount.
+    InvalidDeduction = 121,
+    /// #1167: total deductions exceed the deposit amount.
+    DeductionsExceedDeposit = 122,
+    /// #1167: caller is not the contract admin.
+    NotAdmin = 123,
 }
 
 /// Per-merchant withdrawal rate limit config (#231).
@@ -515,6 +573,9 @@ pub struct Payment {
     pub tipping_enabled: bool,
     /// Number of times this payment's expiry has been extended.
     pub extension_count: u32,
+    /// Tax amount withheld and forwarded to the merchant's tax_address at settlement.
+    /// Zero until the payment is settled; populated by finalize_payment.
+    pub tax_collected: i128,
 }
 
 #[contracttype]
@@ -1194,7 +1255,52 @@ pub enum DataKey3 {
     PaymentRequest(u32),
     /// Persistent: payment ID to reusable payment request ID.
     PaymentRequestPayment(u32),
+    /// Persistent: per-merchant sales-tax configuration (tax_bps + tax_address).
+    MerchantTax(Address),
 }
+
+/// Per-merchant sales-tax configuration.
+///
+/// When set, every payment settled via `complete_payment` deducts
+/// `amount * tax_bps / 10_000` and transfers it directly to `tax_address`
+/// before the net amount reaches the merchant.  Refunds reverse the tax
+/// portion proportionally.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantTaxConfig {
+    /// Basis points of the payment amount to withhold as tax (max 10_000).
+    pub tax_bps: u32,
+    /// Address that receives the withheld tax at settlement.
+    pub tax_address: Address,
+}
+
+/// Overflow DataKey4 — storage for settlement batches (#1163), price-lock
+/// quotes (#1165) and security deposits (#1167).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey4 {
+    /// #1163: Instance: last issued settlement batch ID
+    SettlementBatchCounter,
+    /// #1163: Persistent: settlement batch record keyed by batch ID
+    SettlementBatch(u32),
+    /// #1163: Persistent: merchant → Vec<u32> of settlement batch IDs, oldest first
+    MerchantSettlementBatches(Address),
+    /// #1165: Persistent: oracle-priced payment awaiting customer payment
+    OraclePricedPayment(u32),
+    /// #1165: Persistent: active price-lock quote for an oracle-priced payment
+    PriceQuote(u32),
+    /// #1167: Instance: last issued security deposit ID
+    SecurityDepositCounter,
+    /// #1167: Persistent: security deposit record keyed by deposit ID
+    SecurityDeposit(u32),
+}
+
+mod price_quotes;
+mod security_deposits;
+mod settlement_batches;
+pub use price_quotes::{OraclePricedPayment, PriceQuote};
+pub use security_deposits::{SecurityDeposit, SecurityDepositStatus};
+pub use settlement_batches::{PaymentSettlementBatch, MAX_SETTLEMENT_BATCH_PAGE_SIZE};
 
 /// #981: Pending time-locked payout address change.
 #[contracttype]
@@ -1842,6 +1948,7 @@ impl AhjoorPaymentsContract {
             external_id: None,
             tipping_enabled: false,
             extension_count: 0,
+            tax_collected: 0,
         };
 
         // Persistent: per-payment record with individual TTL
@@ -2044,6 +2151,7 @@ impl AhjoorPaymentsContract {
                 external_id: None,
                 tipping_enabled: false,
                 extension_count: 0,
+                tax_collected: 0,
             };
 
             // Persistent: per-payment record with individual TTL
@@ -2155,12 +2263,14 @@ impl AhjoorPaymentsContract {
 
     /// Settle a merchant batch in one transfer.
     /// Validates all payment IDs first, then executes settlement atomically.
+    /// Records a `PaymentSettlementBatch` for reconciliation (#1163) and
+    /// returns its batch ID.
     pub fn settle_merchant_payments(
         env: Env,
         admin: Address,
         merchant: Address,
         payment_ids: Vec<u32>,
-    ) {
+    ) -> u32 {
         Self::require_not_paused(&env);
         admin.require_auth();
         let stored_admin: Address = env
@@ -2296,6 +2406,18 @@ impl AhjoorPaymentsContract {
             projected_volume,
         );
 
+        // #1163: persist the batch so merchants can reconcile against it.
+        let batch_id = Self::record_settlement_batch(
+            &env,
+            &merchant,
+            &settlement_token,
+            &payment_ids,
+            total_amount,
+            fee_collected,
+            net_amount,
+            reserve_hold,
+        );
+
         events::emit_batch_settlement_processed(
             &env,
             merchant,
@@ -2307,6 +2429,8 @@ impl AhjoorPaymentsContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        batch_id
     }
 
     // --- Dispute Methods ---
@@ -3035,6 +3159,7 @@ impl AhjoorPaymentsContract {
                 external_id: None,
                 tipping_enabled: false,
                 extension_count: 0,
+                tax_collected: 0,
             };
 
             env.storage()
@@ -3157,6 +3282,7 @@ impl AhjoorPaymentsContract {
             external_id: None,
             tipping_enabled: false,
             extension_count: 0,
+            tax_collected: 0,
         };
 
         env.storage()
@@ -4456,6 +4582,7 @@ impl AhjoorPaymentsContract {
             external_id: external_id.clone(),
             tipping_enabled: false,
             extension_count: 0,
+            tax_collected: 0,
         };
 
         env.storage()
@@ -5027,6 +5154,33 @@ impl AhjoorPaymentsContract {
             payment.status = PaymentStatus::Refunded;
         }
 
+        // Reverse tax proportionally: tax_refund = tax_collected * refund / original_amount
+        if payment.tax_collected > 0 && payment.amount > 0 {
+            if let Some(tax_cfg) = env
+                .storage()
+                .persistent()
+                .get::<DataKey3, MerchantTaxConfig>(&DataKey3::MerchantTax(payment.merchant.clone()))
+            {
+                let tax_refund = payment.tax_collected * refund_amount / payment.amount;
+                if tax_refund > 0 {
+                    let token_client = token::Client::new(&env, &payment.token);
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &payment.customer,
+                        &tax_refund,
+                    );
+                    events::emit_tax_refunded(
+                        &env,
+                        payment_id,
+                        payment.merchant.clone(),
+                        tax_refund,
+                        tax_cfg.tax_address,
+                        payment.token.clone(),
+                    );
+                }
+            }
+        }
+
         // Reverse proportional loyalty points on refund (#411)
         Self::reverse_points_for_refund(&env, &payment.customer, refund_amount, payment.amount);
 
@@ -5251,6 +5405,61 @@ impl AhjoorPaymentsContract {
             .instance()
             .get(&DataKey::MerchantOpenMode)
             .unwrap_or(true)
+    }
+
+    // --- Merchant Sales-Tax Configuration ---
+
+    /// Merchant sets (or updates) their sales-tax configuration.
+    ///
+    /// `tax_bps` is the fraction of every settled payment amount that will be
+    /// forwarded to `tax_address` at settlement time.  Setting `tax_bps = 0`
+    /// is allowed and effectively disables tax withholding while keeping the
+    /// record present; call `remove_merchant_tax` to delete it entirely.
+    ///
+    /// Errors
+    /// - `TaxBpsExceedsMax` (87) if `tax_bps > 10_000`.
+    pub fn set_merchant_tax(env: Env, merchant: Address, tax_bps: u32, tax_address: Address) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        if tax_bps > 10_000 {
+            panic_with_error!(&env, ExtError::TaxBpsExceedsMax);
+        }
+
+        let config = MerchantTaxConfig { tax_bps, tax_address };
+        let key = DataKey3::MerchantTax(merchant);
+        env.storage().persistent().set(&key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the merchant's current tax configuration, or `None` if none is set.
+    pub fn get_merchant_tax(env: Env, merchant: Address) -> Option<MerchantTaxConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::MerchantTax(merchant))
+    }
+
+    /// Merchant removes their tax configuration entirely.
+    ///
+    /// After this call `get_merchant_tax` returns `None` and no tax is
+    /// withheld on future settlements for this merchant.
+    pub fn remove_merchant_tax(env: Env, merchant: Address) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::MerchantTax(merchant));
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     // --- Merchant Collateral (#129) ---
@@ -6169,6 +6378,33 @@ impl AhjoorPaymentsContract {
                 }
             }
             Self::set_withdrawal_queue(&env, &merchant, remaining_queue);
+        }
+
+        // Reverse tax proportionally: tax_refund = tax_collected * amount / original_amount
+        if payment.tax_collected > 0 && payment.amount > 0 {
+            if let Some(tax_cfg) = env
+                .storage()
+                .persistent()
+                .get::<DataKey3, MerchantTaxConfig>(&DataKey3::MerchantTax(merchant.clone()))
+            {
+                let tax_refund = payment.tax_collected * amount / payment.amount;
+                if tax_refund > 0 {
+                    let tax_token_client = token::Client::new(&env, &payment.token);
+                    tax_token_client.transfer(
+                        &merchant,
+                        &payment.customer,
+                        &tax_refund,
+                    );
+                    events::emit_tax_refunded(
+                        &env,
+                        payment_id,
+                        merchant.clone(),
+                        tax_refund,
+                        tax_cfg.tax_address,
+                        payment.token.clone(),
+                    );
+                }
+            }
         }
 
         Self::reverse_points_for_refund(&env, &payment.customer, amount, payment.amount);
@@ -7537,6 +7773,7 @@ impl AhjoorPaymentsContract {
             external_id: None,
             tipping_enabled: false,
             extension_count: 0,
+            tax_collected: 0,
         };
 
         env.storage()
@@ -7782,7 +8019,33 @@ impl AhjoorPaymentsContract {
 
         // Get slippage config
         let slippage_cfg = Self::get_slippage_config_internal(env);
-        let max_slippage_bps = slippage_cfg.max_bps;
+        let mut max_slippage_bps = slippage_cfg.max_bps;
+
+        // #1183: When a token whitelist is configured, only allowlisted swap
+        // pairs may be routed, and the pair's slippage cap tightens the global one.
+        if let Some(whitelist_contract) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::TokenWhitelistContract)
+        {
+            let wl = TokenWhitelistClient::new(env, &whitelist_contract);
+            if !wl.is_swap_pair_allowed(input_token, output_token) {
+                events::emit_payment_swap_failed(
+                    env,
+                    payment_id,
+                    customer.clone(),
+                    input_token.clone(),
+                    input_amount,
+                    Symbol::new(env, "SwapPairNotAllowed"),
+                );
+                return Err(Symbol::new(env, "SwapPairNotAllowed"));
+            }
+            if let Some(pair_max) = wl.get_swap_pair_max_slippage(input_token, output_token) {
+                if pair_max < max_slippage_bps {
+                    max_slippage_bps = pair_max;
+                }
+            }
+        }
 
         // Calculate minimum output amount based on slippage tolerance
         // min_output = input_amount * (10000 - max_slippage_bps) / 10000
@@ -8070,6 +8333,44 @@ impl AhjoorPaymentsContract {
             // #242: Accrue referral commission on the fee collected for referred merchants
             Self::accrue_referral_commission(env, &payment.merchant, payment_id, fee_amount);
         }
+
+        // --- Sales-tax withholding ---
+        // If the merchant has configured a tax_bps, deduct the tax portion from
+        // net_amount and forward it directly to the merchant's tax_address.
+        // This happens after the protocol fee so the tax base is the gross
+        // payment amount, not the amount net of protocol fees.
+        let tax_amount: i128 =
+            if let Some(tax_cfg) = env
+                .storage()
+                .persistent()
+                .get::<DataKey3, MerchantTaxConfig>(&DataKey3::MerchantTax(payment.merchant.clone()))
+            {
+                if tax_cfg.tax_bps > 0 {
+                    let amt = (final_amount * tax_cfg.tax_bps as i128) / 10_000;
+                    if amt > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &tax_cfg.tax_address,
+                            &amt,
+                        );
+                        events::emit_tax_collected(
+                            env,
+                            payment_id,
+                            payment.merchant.clone(),
+                            amt,
+                            tax_cfg.tax_address,
+                            final_token.clone(),
+                        );
+                    }
+                    amt
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+        payment.tax_collected = tax_amount;
+        let net_amount = net_amount - tax_amount;
 
         // #1051: hold the merchant's rolling reserve share back on contract.
         // Payments split across recipients are not the merchant's alone, so
@@ -12461,6 +12762,15 @@ impl AhjoorPaymentsContract {
 mod test_disputes_by_merchant;
 
 #[cfg(test)]
+mod test_settlement_batches;
+
+#[cfg(test)]
+mod test_price_quotes;
+
+#[cfg(test)]
+mod test_security_deposits;
+
+#[cfg(test)]
 mod test_tip;
 
 #[cfg(test)]
@@ -12539,6 +12849,11 @@ mod test_get_payment_expiry_bounds;
 #[cfg(test)]
 mod test_merchant_tokens_swap_router;
 #[cfg(test)]
+mod test_swap_pair_routing;
+#[cfg(test)]
 mod test_unblock_evidence_dispute;
+
+#[cfg(test)]
+mod test_merchant_tax;
 
 pub use events::*;
