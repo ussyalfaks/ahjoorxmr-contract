@@ -2482,3 +2482,61 @@ pub fn emit_security_deposit_closed(
     }
     .publish(e);
 }
+
+/// Event: tax withheld from a payment and sent to the tax authority address.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TaxCollected {
+    pub payment_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+    pub tax_address: Address,
+    pub token: Address,
+}
+
+pub fn emit_tax_collected(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    amount: i128,
+    tax_address: Address,
+    token: Address,
+) {
+    TaxCollected {
+        payment_id,
+        merchant,
+        amount,
+        tax_address,
+        token,
+    }
+    .publish(e);
+}
+
+/// Event: proportional tax returned to the customer on refund.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TaxRefunded {
+    pub payment_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+    pub tax_address: Address,
+    pub token: Address,
+}
+
+pub fn emit_tax_refunded(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    amount: i128,
+    tax_address: Address,
+    token: Address,
+) {
+    TaxRefunded {
+        payment_id,
+        merchant,
+        amount,
+        tax_address,
+        token,
+    }
+    .publish(e);
+}
