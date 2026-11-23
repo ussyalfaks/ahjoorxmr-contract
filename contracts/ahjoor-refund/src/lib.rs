@@ -412,6 +412,12 @@ pub enum DataKey2 {
     /// Merchant opt-in: largest refund amount the fast lane may auto-approve
     /// for this merchant (absent = merchant has not opted in).
     FastLaneMaxAmount(Address),
+
+    // --- Feature: Merchant Reserve Lock During Appeal ---
+    /// Total canonical reserve currently locked for pending appeals, per merchant.
+    MerchantReserveLocked(Address),
+    /// Reserve amount locked for one refund's pending appeal.
+    AppealLockedAmount(u32),
 }
 
 mod events;
@@ -3086,6 +3092,18 @@ impl AhjoorRefundContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        // Lock the disputed amount in the merchant's reserve so it cannot be
+        // withdrawn while the appeal is pending.
+        let locked = Self::lock_reserve_for_appeal(&env, &refund);
+        if locked > 0 {
+            events::emit_reserve_locked_for_appeal(
+                &env,
+                refund_id,
+                refund.merchant.clone(),
+                locked,
+            );
+        }
+
         events::emit_refund_appealed(&env, refund_id, customer);
 
         env.storage()
@@ -3172,6 +3190,18 @@ impl AhjoorRefundContract {
             };
 
             Self::update_stats_on_process(&env, &refund.merchant, refund.amount);
+
+            // Customer won: the funds locked in the merchant reserve are paid out.
+            let paid_out = Self::settle_appeal_lock(&env, &refund, true);
+            if paid_out > 0 {
+                events::emit_appeal_reserve_paid_out(
+                    &env,
+                    refund_id,
+                    refund.merchant.clone(),
+                    Self::refund_recipient(&refund),
+                    paid_out,
+                );
+            }
         } else {
             // Final rejection — return escrowed funds to customer
             client.transfer(
@@ -3184,6 +3214,17 @@ impl AhjoorRefundContract {
             refund.rejected_at = Some(now);
 
             Self::update_stats_on_reject(&env, &refund.merchant);
+
+            // Appeal failed: the merchant's locked reserve is released.
+            let released = Self::settle_appeal_lock(&env, &refund, false);
+            if released > 0 {
+                events::emit_appeal_reserve_released(
+                    &env,
+                    refund_id,
+                    refund.merchant.clone(),
+                    released,
+                );
+            }
         }
 
         env.storage()
@@ -3762,8 +3803,9 @@ impl AhjoorRefundContract {
         };
         let reserve_key = DataKey2::MerchantReserveBalance(refund.merchant.clone());
         let balance: i128 = env.storage().persistent().get(&reserve_key).unwrap_or(0);
+        let available = (balance - Self::reserve_locked(env, &refund.merchant)).max(0);
         let penalty = (refund.amount as u128 * bps as u128 / 10_000) as i128;
-        let paid = if penalty > balance { balance } else { penalty };
+        let paid = if penalty > available { available } else { penalty };
         if paid <= 0 {
             return 0;
         }
@@ -6544,6 +6586,11 @@ impl AhjoorRefundContract {
             panic!("Insufficient reserve balance");
         }
 
+        // Funds locked for pending appeals can't be withdrawn.
+        if balance - Self::reserve_locked(&env, &merchant) < amount {
+            panic!("ReserveFundsLockedForAppeal");
+        }
+
         // Check that withdrawal doesn't breach minimum
         let min_bps: u32 = env
             .storage()
@@ -6650,6 +6697,127 @@ impl AhjoorRefundContract {
             .get(&DataKey2::ReserveAlertThresholdBps)
             .unwrap_or(10_000);
         (token, min_bps, alert_bps)
+    }
+
+    /// Canonical reserve currently locked for pending appeals.
+    pub fn get_locked_reserve(env: Env, merchant: Address) -> i128 {
+        Self::reserve_locked(&env, &merchant)
+    }
+
+    /// Canonical reserve that is free to withdraw or draw on (balance minus
+    /// the amount locked for pending appeals).
+    pub fn get_available_reserve(env: Env, merchant: Address) -> i128 {
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::MerchantReserveBalance(merchant.clone()))
+            .unwrap_or(0);
+        (balance - Self::reserve_locked(&env, &merchant)).max(0)
+    }
+
+    /// Reserve amount locked for a refund's pending appeal (0 if none).
+    pub fn get_appeal_reserve_lock(env: Env, refund_id: u32) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::AppealLockedAmount(refund_id))
+            .unwrap_or(0)
+    }
+
+    fn reserve_locked(env: &Env, merchant: &Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::MerchantReserveLocked(merchant.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Locks up to the disputed amount from the merchant's available canonical
+    /// reserve. Nothing is locked when no reserve token is configured, when it
+    /// differs from the refund's token, or when the reserve is empty; a smaller
+    /// reserve is locked in full. Returns the amount locked.
+    fn lock_reserve_for_appeal(env: &Env, refund: &Refund) -> i128 {
+        let reserve_token: Address = match env.storage().instance().get(&DataKey2::ReserveToken) {
+            Some(t) => t,
+            None => return 0,
+        };
+        if reserve_token != refund.token {
+            return 0;
+        }
+
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::MerchantReserveBalance(refund.merchant.clone()))
+            .unwrap_or(0);
+        let locked_total = Self::reserve_locked(env, &refund.merchant);
+        let available = (balance - locked_total).max(0);
+        let to_lock = if refund.amount < available {
+            refund.amount
+        } else {
+            available
+        };
+        if to_lock <= 0 {
+            return 0;
+        }
+
+        let lock_key = DataKey2::AppealLockedAmount(refund.id);
+        env.storage().persistent().set(&lock_key, &to_lock);
+        env.storage().persistent().extend_ttl(
+            &lock_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let total_key = DataKey2::MerchantReserveLocked(refund.merchant.clone());
+        env.storage()
+            .persistent()
+            .set(&total_key, &(locked_total + to_lock));
+        env.storage().persistent().extend_ttl(
+            &total_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        to_lock
+    }
+
+    /// Resolves the reserve lock of a refund's appeal. With `pay_out` the
+    /// locked amount leaves the reserve and goes to the refund recipient;
+    /// otherwise it is simply unlocked. Returns the amount that was locked.
+    fn settle_appeal_lock(env: &Env, refund: &Refund, pay_out: bool) -> i128 {
+        let lock_key = DataKey2::AppealLockedAmount(refund.id);
+        let locked: i128 = env.storage().persistent().get(&lock_key).unwrap_or(0);
+        if locked <= 0 {
+            return 0;
+        }
+        env.storage().persistent().remove(&lock_key);
+
+        let total_key = DataKey2::MerchantReserveLocked(refund.merchant.clone());
+        let locked_total = Self::reserve_locked(env, &refund.merchant);
+        env.storage()
+            .persistent()
+            .set(&total_key, &(locked_total - locked).max(0));
+        env.storage().persistent().extend_ttl(
+            &total_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        if pay_out {
+            let balance_key = DataKey2::MerchantReserveBalance(refund.merchant.clone());
+            let balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&balance_key, &(balance - locked));
+            env.storage().persistent().extend_ttl(
+                &balance_key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            token::Client::new(env, &refund.token).transfer(
+                &env.current_contract_address(),
+                &Self::refund_recipient(refund),
+                &locked,
+            );
+        }
+        locked
     }
 
     /// #585: Admin-triggered one-time migration of a merchant's legacy (#274)
@@ -7237,7 +7405,7 @@ impl AhjoorRefundContract {
 
         let reserve_key = DataKey2::MerchantReserveBalance(merchant.clone());
         let reserve: i128 = env.storage().persistent().get(&reserve_key).unwrap_or(0);
-        if reserve < total {
+        if reserve - Self::reserve_locked(&env, &merchant) < total {
             panic!("InsufficientReserveForRecall");
         }
         env.storage().persistent().set(&reserve_key, &(reserve - total));
@@ -7542,6 +7710,9 @@ mod test_reason_auto_approve;
 
 #[cfg(test)]
 mod test_fast_lane;
+
+#[cfg(test)]
+mod test_appeal_reserve_lock;
 /// Event: Customer appealed a rejected refund (#159)
 #[contractevent]
 #[derive(Clone, Debug)]

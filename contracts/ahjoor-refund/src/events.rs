@@ -692,6 +692,68 @@ pub fn emit_reason_auto_approve_removed(e: &Env, merchant: Address, reason_code:
     .publish(e);
 }
 
+/// Event: Disputed amount locked in the merchant reserve for a pending appeal
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveLockedForAppeal {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+}
+
+/// Event: Appeal failed; reserve lock released back to the merchant
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AppealReserveReleased {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+}
+
+/// Event: Appeal succeeded; locked reserve paid out to the customer
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AppealReservePaidOut {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+pub fn emit_reserve_locked_for_appeal(e: &Env, refund_id: u32, merchant: Address, amount: i128) {
+    ReserveLockedForAppeal {
+        refund_id,
+        merchant,
+        amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_appeal_reserve_released(e: &Env, refund_id: u32, merchant: Address, amount: i128) {
+    AppealReserveReleased {
+        refund_id,
+        merchant,
+        amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_appeal_reserve_paid_out(
+    e: &Env,
+    refund_id: u32,
+    merchant: Address,
+    recipient: Address,
+    amount: i128,
+) {
+    AppealReservePaidOut {
+        refund_id,
+        merchant,
+        recipient,
+        amount,
+    }
+    .publish(e);
+}
+
 /// Event: Admin set the trusted-customer fast-lane criteria
 #[contractevent]
 #[derive(Clone, Debug)]
