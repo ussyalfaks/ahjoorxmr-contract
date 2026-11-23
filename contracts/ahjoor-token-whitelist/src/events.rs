@@ -424,3 +424,16 @@ pub fn emit_swap_pair_allowed(e: &Env, token_a: Address, token_b: Address, max_s
 pub fn emit_swap_pair_disallowed(e: &Env, token_a: Address, token_b: Address) {
     SwapPairDisallowed { token_a, token_b }.publish(e);
 }
+
+/// #1185: A SAC token was listed with a verified classic-asset identity.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AssetIdentitySet {
+    pub token: Address,
+    pub asset_code: soroban_sdk::String,
+    pub issuer: Address,
+}
+
+pub fn emit_asset_identity_set(e: &Env, token: Address, asset_code: soroban_sdk::String, issuer: Address) {
+    AssetIdentitySet { token, asset_code, issuer }.publish(e);
+}

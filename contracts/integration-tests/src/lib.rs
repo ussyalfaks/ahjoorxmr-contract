@@ -4,5 +4,6 @@
 extern crate std;
 
 mod refund_payment_flow;
+mod reputation_registry_flow;
 mod rosca_payout_escrow_flow;
 mod rosca_payout_flow;

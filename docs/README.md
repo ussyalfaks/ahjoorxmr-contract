@@ -29,6 +29,8 @@ reference docs for the repository, grouped by contract.
 - [**ROSCA Group Split Flow**](rosca-group-split.md) — Proposal creation, member assignment and confirmation, expiry handling, execution, refunds, and resulting group identifiers.
 - [**ROSCA Reinvestment Flow**](rosca-reinvestment.md) — How a member rolls a round payout forward into the next round as their contribution, the deadline constraint, and how over/under-payment is handled.
 - [**ROSCA Slot Auctions**](rosca-slot-auctions.md) — Comprehensive guide to plain open-bid and commit-reveal sealed-bid slot auctions in Ahjoor ROSCA groups.
+- [**ROSCA Payout Slot Swaps**](rosca-slot-swap.md) — Request/accept/approve flow for members trading payout positions, request expiry, and how swaps interact with slot auctions and a finalized payout order.
+- [**ROSCA Payout Holdback**](rosca-payout-holdback.md) — Withholding part of early payouts until the recipient's remaining contributions are made, release vs forfeiture, how holdback stacks with payout vesting, and a worked example.
 - [**ROSCA Round-Skip Mechanism**](rosca-skip-round.md) — Member eligibility, request flow, per-cycle skip limits, skip fee handling, and downstream settlement effects.
 - [**ROSCA Emergency Loan**](rosca-emergency-loan.md) — How members can draw emergency loans from the group reserve, repayment terms, default handling, and reserve management.
 - [**On-Chain Audit Trail in ROSCA**](rosca-audit-trail.md) — Comprehensive cycle audit trail recording, contribution history pagination, retention window management, and archival lifecycle.

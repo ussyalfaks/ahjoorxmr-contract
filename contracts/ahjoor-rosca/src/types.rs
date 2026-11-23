@@ -1271,6 +1271,11 @@ pub enum DataKey6 {
     /// BytesN<32> — (member, round) → optional memo hash attached to that
     /// round's contribution (persistent; absent = no memo).
     ContributionMemo(Address, u32),
+
+    // ── Reputation Registry ──────────────────────────────────────────────────
+    /// Address — cross-contract reputation registry that credit score
+    /// changes are reported to. Absent = reporting disabled.
+    ReputationRegistry,
 }
 
 // ── Cross-Group Member Obligations ────────────────────────────────────────────

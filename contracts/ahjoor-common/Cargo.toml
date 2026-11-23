@@ -11,3 +11,10 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+
+[features]
+default = ["contract"]
+# Compiles the `ReputationRegistry` contract. Crates that only need the shared
+# helpers or the registry client can depend on this crate with
+# `default-features = false`.
+contract = []
