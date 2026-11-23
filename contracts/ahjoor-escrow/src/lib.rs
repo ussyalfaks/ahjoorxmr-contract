@@ -580,6 +580,34 @@ pub struct Escrow {
     pub top_up_acknowledged: bool,
 }
 
+/// Maximum number of distinct token allocations held by a single multi-asset escrow.
+const MAX_ASSETS_PER_MULTI_ASSET_ESCROW: u32 = 10;
+
+/// A single (token, amount) allocation within a multi-asset escrow.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetAllocation {
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// An escrow that locks several distinct tokens at once under one buyer/seller
+/// agreement. All assets move together: release and refund are all-or-nothing
+/// across every asset in `assets`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiAssetEscrow {
+    pub id: u32,
+    pub buyer: Address,
+    pub arbiter: Address,
+    pub assets: Vec<AssetAllocation>,
+    pub sellers: Vec<(Address, u32)>, // (address, bps) — must sum to 10_000
+    pub status: EscrowStatus,
+    pub created_at: u64,
+    pub deadline: u64,
+    pub metadata_hash: Option<BytesN<32>>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscrowReceipt {
@@ -9337,6 +9365,52 @@ impl AhjoorEscrowContract {
         id
     }
 
+    fn next_multi_asset_escrow_id(env: &Env) -> u32 {
+        let mut counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::MultiAssetEscrowCounter)
+            .unwrap_or(0);
+        let id = counter;
+        counter += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey3::MultiAssetEscrowCounter, &counter);
+        id
+    }
+
+    /// Transfer every asset in a multi-asset escrow from the contract to its
+    /// seller(s), splitting each asset by seller bps share. The first seller
+    /// absorbs integer-division dust, matching `transfer_to_sellers`.
+    fn transfer_multi_asset_to_sellers(env: &Env, escrow: &MultiAssetEscrow) {
+        for i in 0..escrow.assets.len() {
+            let asset = escrow.assets.get(i).unwrap();
+            let client = token::Client::new(env, &asset.token);
+
+            if escrow.sellers.len() <= 1 {
+                let recipient = escrow.sellers.get(0).unwrap().0;
+                client.transfer(&env.current_contract_address(), &recipient, &asset.amount);
+                continue;
+            }
+
+            let mut distributed: i128 = 0;
+            for j in 1..escrow.sellers.len() {
+                let (addr, bps) = escrow.sellers.get(j).unwrap();
+                let share = (asset.amount * bps as i128) / 10_000;
+                if share > 0 {
+                    client.transfer(&env.current_contract_address(), &addr, &share);
+                }
+                distributed += share;
+            }
+
+            let (first_seller, _) = escrow.sellers.get(0).unwrap();
+            let first_share = asset.amount - distributed;
+            if first_share > 0 {
+                client.transfer(&env.current_contract_address(), &first_seller, &first_share);
+            }
+        }
+    }
+
     fn next_receipt_id(env: &Env) -> u32 {
         let mut counter: u32 = env
             .storage()
@@ -11096,6 +11170,209 @@ impl AhjoorEscrowContract {
         }
     }
 
+    // ── Multi-Asset Escrow ───────────────────────────────────────────────────
+
+    /// Create an escrow that locks several distinct tokens at once under one
+    /// buyer/seller agreement. Funds for every asset in `assets` are pulled
+    /// from the buyer immediately. Release and refund act on all assets
+    /// together (all-or-nothing settlement).
+    ///
+    /// `sellers` must be empty (single-seller mode, wrapped at 10 000 bps) or
+    /// a list of up to 5 `(address, bps)` pairs summing to exactly 10 000 bps.
+    pub fn create_multi_asset_escrow(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        sellers: Vec<(Address, u32)>,
+        arbiter: Address,
+        assets: Vec<AssetAllocation>,
+        deadline: u64,
+        metadata_hash: Option<BytesN<32>>,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        if deadline <= env.ledger().timestamp() {
+            panic_with_error!(&env, EscrowError::DeadlineMustBeFuture);
+        }
+
+        if assets.is_empty() {
+            panic_with_error!(&env, EscrowErrorExt5::AssetListCannotBeEmpty);
+        }
+        if assets.len() > MAX_ASSETS_PER_MULTI_ASSET_ESCROW {
+            panic_with_error!(&env, EscrowErrorExt5::TooManyAssetsInEscrow);
+        }
+
+        let mut seen_tokens: Vec<Address> = Vec::new(&env);
+        for i in 0..assets.len() {
+            let asset = assets.get(i).unwrap();
+            if asset.amount <= 0 {
+                panic_with_error!(&env, EscrowErrorExt5::AssetAmountMustBePositive);
+            }
+            if seen_tokens.contains(&asset.token) {
+                panic_with_error!(&env, EscrowErrorExt5::DuplicateTokenInAssetList);
+            }
+            seen_tokens.push_back(asset.token.clone());
+        }
+
+        let resolved_sellers: Vec<(Address, u32)> = if sellers.is_empty() {
+            let mut v = Vec::new(&env);
+            v.push_back((seller.clone(), 10_000u32));
+            v
+        } else {
+            if sellers.len() > 5 {
+                panic_with_error!(&env, EscrowError::Maximum5SellersAllowed);
+            }
+            let mut total_bps: u32 = 0;
+            for i in 0..sellers.len() {
+                let (_, bps) = sellers.get(i).unwrap();
+                total_bps += bps;
+            }
+            if total_bps != 10_000 {
+                panic_with_error!(&env, EscrowError::SellerAllocationsMustSumTo10000Bps);
+            }
+            sellers
+        };
+
+        // Pull every asset from the buyer into the contract.
+        for i in 0..assets.len() {
+            let asset = assets.get(i).unwrap();
+            let token_client = token::Client::new(&env, &asset.token);
+            token_client.transfer(&buyer, &env.current_contract_address(), &asset.amount);
+        }
+
+        let escrow_id = Self::next_multi_asset_escrow_id(&env);
+        let now = env.ledger().timestamp();
+
+        let escrow = MultiAssetEscrow {
+            id: escrow_id,
+            buyer: buyer.clone(),
+            arbiter: arbiter.clone(),
+            assets: assets.clone(),
+            sellers: resolved_sellers,
+            status: EscrowStatus::Active,
+            created_at: now,
+            deadline,
+            metadata_hash,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::MultiAssetEscrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::MultiAssetEscrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_multi_asset_escrow_created(
+            &env,
+            escrow_id,
+            buyer,
+            arbiter,
+            assets.len(),
+            deadline,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        escrow_id
+    }
+
+    /// Release every asset in a multi-asset escrow to its seller(s), split by
+    /// each seller's bps share. Callable by the buyer or the arbiter.
+    pub fn release_multi_asset_escrow(env: Env, caller: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        caller.require_auth();
+
+        let mut escrow: MultiAssetEscrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::MultiAssetEscrow(escrow_id))
+            .expect("Multi-asset escrow not found");
+
+        if escrow.status != EscrowStatus::Active {
+            panic_with_error!(&env, EscrowErrorExt5::MultiAssetEscrowNotActive);
+        }
+        if caller != escrow.buyer && caller != escrow.arbiter {
+            panic_with_error!(&env, EscrowErrorExt5::OnlyBuyerOrArbiterCanReleaseMultiAssetEscrow);
+        }
+
+        Self::transfer_multi_asset_to_sellers(&env, &escrow);
+
+        escrow.status = EscrowStatus::Released;
+        env.storage()
+            .persistent()
+            .set(&DataKey3::MultiAssetEscrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::MultiAssetEscrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_multi_asset_escrow_released(&env, escrow_id, escrow.assets.len());
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Refund every asset in a multi-asset escrow back to the buyer.
+    /// The arbiter may refund at any time; the buyer may self-refund only
+    /// after the escrow's deadline has passed.
+    pub fn refund_multi_asset_escrow(env: Env, caller: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        caller.require_auth();
+
+        let mut escrow: MultiAssetEscrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::MultiAssetEscrow(escrow_id))
+            .expect("Multi-asset escrow not found");
+
+        if escrow.status != EscrowStatus::Active {
+            panic_with_error!(&env, EscrowErrorExt5::MultiAssetEscrowNotActive);
+        }
+        if caller != escrow.buyer && caller != escrow.arbiter {
+            panic_with_error!(&env, EscrowErrorExt5::OnlyBuyerOrArbiterCanRefundMultiAssetEscrow);
+        }
+        if caller == escrow.buyer && env.ledger().timestamp() < escrow.deadline {
+            panic_with_error!(&env, EscrowErrorExt5::RefundNotYetAvailableBeforeDeadline);
+        }
+
+        for i in 0..escrow.assets.len() {
+            let asset = escrow.assets.get(i).unwrap();
+            let token_client = token::Client::new(&env, &asset.token);
+            token_client.transfer(&env.current_contract_address(), &escrow.buyer, &asset.amount);
+        }
+
+        escrow.status = EscrowStatus::Refunded;
+        env.storage()
+            .persistent()
+            .set(&DataKey3::MultiAssetEscrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::MultiAssetEscrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_multi_asset_escrow_refunded(&env, escrow_id, escrow.assets.len());
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Fetch a multi-asset escrow by ID.
+    pub fn get_multi_asset_escrow(env: Env, escrow_id: u32) -> MultiAssetEscrow {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::MultiAssetEscrow(escrow_id))
+            .expect("Multi-asset escrow not found")
+    }
+
 }
 
 #[cfg(test)]
@@ -11156,3 +11433,6 @@ mod test_response_reminders;
 
 #[cfg(test)]
 mod test_extend_deadline;
+
+#[cfg(test)]
+mod test_multi_asset_escrow;

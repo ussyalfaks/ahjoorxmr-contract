@@ -2037,3 +2037,66 @@ pub fn emit_deadline_extended_by_buyer(
     }
     .publish(e);
 }
+
+// ── Multi-Asset Escrow ───────────────────────────────────────────────────────
+
+/// Event: Multi-asset escrow created, locking several distinct tokens at once.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MultiAssetEscrowCreated {
+    pub escrow_id: u32,
+    pub buyer: Address,
+    pub arbiter: Address,
+    pub asset_count: u32,
+    pub deadline: u64,
+}
+
+pub fn emit_multi_asset_escrow_created(
+    e: &Env,
+    escrow_id: u32,
+    buyer: Address,
+    arbiter: Address,
+    asset_count: u32,
+    deadline: u64,
+) {
+    MultiAssetEscrowCreated {
+        escrow_id,
+        buyer,
+        arbiter,
+        asset_count,
+        deadline,
+    }
+    .publish(e);
+}
+
+/// Event: All assets in a multi-asset escrow released to its seller(s).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MultiAssetEscrowReleased {
+    pub escrow_id: u32,
+    pub asset_count: u32,
+}
+
+pub fn emit_multi_asset_escrow_released(e: &Env, escrow_id: u32, asset_count: u32) {
+    MultiAssetEscrowReleased {
+        escrow_id,
+        asset_count,
+    }
+    .publish(e);
+}
+
+/// Event: All assets in a multi-asset escrow refunded back to the buyer.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MultiAssetEscrowRefunded {
+    pub escrow_id: u32,
+    pub asset_count: u32,
+}
+
+pub fn emit_multi_asset_escrow_refunded(e: &Env, escrow_id: u32, asset_count: u32) {
+    MultiAssetEscrowRefunded {
+        escrow_id,
+        asset_count,
+    }
+    .publish(e);
+}
