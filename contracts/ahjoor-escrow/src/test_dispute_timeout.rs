@@ -409,3 +409,265 @@ fn test_update_default_dispute_timeout() {
     let timeout = client.get_default_dispute_timeout();
     assert_eq!(timeout, new_timeout);
 }
+
+#[test]
+fn test_timeout_exactly_at_deadline() {
+    let (env, admin, buyer, seller, arbiter, token, client) = setup_test_env();
+
+    // Set default winner to Buyer
+    client.set_default_dispute_winner(&admin, &DisputeDefaultWinner::Buyer);
+
+    // Create escrow
+    let escrow_id = client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &1000,
+        &token,
+        &(env.ledger().timestamp() + 86400),
+        &None,
+        &soroban_sdk::Vec::new(&env),
+        &false,
+        &0,
+    );
+
+    // Raise dispute
+    client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&env, "test"), &1000);
+
+    // Advance time to exactly 7 days (the boundary condition)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 7 * 24 * 60 * 60; // exactly 7 days
+    });
+
+    // Should still fail - needs to be PAST the deadline
+    let __typed_err_result = client.try_enforce_dispute_timeout(&escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::DisputeTimeoutDeadlineHasNotPassedYet.into());
+
+    // Add 1 second more
+    env.ledger().with_mut(|li| {
+        li.timestamp += 1;
+    });
+
+    // Now should succeed
+    client.enforce_dispute_timeout(&escrow_id);
+
+    // Verify timeout was enforced
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, crate::EscrowStatus::Refunded);
+}
+
+#[test]
+fn test_multiple_arbiters_timeout_counts_independently() {
+    let (env, _admin, buyer, seller, _arbiter, token, client) = setup_test_env();
+
+    // Create two different arbiters
+    let arbiter1 = Address::generate(&env);
+    let arbiter2 = Address::generate(&env);
+
+    // First escrow with arbiter1 - timeout
+    let escrow_id1 = client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter1,
+        &1000,
+        &token,
+        &(env.ledger().timestamp() + 86400),
+        &None,
+        &soroban_sdk::Vec::new(&env),
+        &false,
+        &0,
+    );
+    client.dispute_escrow(&buyer, &escrow_id1, &String::from_str(&env, "test1"), &1000);
+    env.ledger().with_mut(|li| {
+        li.timestamp += 8 * 24 * 60 * 60;
+    });
+    client.enforce_dispute_timeout(&escrow_id1);
+
+    // Second escrow with arbiter2 - timeout
+    let escrow_id2 = client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter2,
+        &1000,
+        &token,
+        &(env.ledger().timestamp() + 86400),
+        &None,
+        &soroban_sdk::Vec::new(&env),
+        &false,
+        &0,
+    );
+    client.dispute_escrow(&buyer, &escrow_id2, &String::from_str(&env, "test2"), &1000);
+    env.ledger().with_mut(|li| {
+        li.timestamp += 8 * 24 * 60 * 60;
+    });
+    client.enforce_dispute_timeout(&escrow_id2);
+
+    // Third escrow with arbiter1 again - timeout
+    let escrow_id3 = client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter1,
+        &1000,
+        &token,
+        &(env.ledger().timestamp() + 86400),
+        &None,
+        &soroban_sdk::Vec::new(&env),
+        &false,
+        &0,
+    );
+    client.dispute_escrow(&buyer, &escrow_id3, &String::from_str(&env, "test3"), &1000);
+    env.ledger().with_mut(|li| {
+        li.timestamp += 8 * 24 * 60 * 60;
+    });
+    client.enforce_dispute_timeout(&escrow_id3);
+
+    // Verify arbiter1 has 2 timeouts and arbiter2 has 1
+    let timeout_count1 = client.get_arbiter_timeout_count(&arbiter1);
+    let timeout_count2 = client.get_arbiter_timeout_count(&arbiter2);
+    assert_eq!(timeout_count1, 2);
+    assert_eq!(timeout_count2, 1);
+}
+
+#[test]
+fn test_timeout_does_not_increment_if_resolved_in_time() {
+    let (env, _admin, buyer, seller, arbiter, token, client) = setup_test_env();
+
+    // First escrow - timeout
+    let escrow_id1 = client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &1000,
+        &token,
+        &(env.ledger().timestamp() + 86400),
+        &None,
+        &soroban_sdk::Vec::new(&env),
+        &false,
+        &0,
+    );
+    client.dispute_escrow(&buyer, &escrow_id1, &String::from_str(&env, "test1"), &1000);
+    env.ledger().with_mut(|li| {
+        li.timestamp += 8 * 24 * 60 * 60;
+    });
+    client.enforce_dispute_timeout(&escrow_id1);
+
+    // Verify counter is 1
+    let timeout_count = client.get_arbiter_timeout_count(&arbiter);
+    assert_eq!(timeout_count, 1);
+
+    // Second escrow - resolved in time
+    let escrow_id2 = client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &1000,
+        &token,
+        &(env.ledger().timestamp() + 86400),
+        &None,
+        &soroban_sdk::Vec::new(&env),
+        &false,
+        &0,
+    );
+    client.dispute_escrow(&buyer, &escrow_id2, &String::from_str(&env, "test2"), &1000);
+    env.ledger().with_mut(|li| {
+        li.timestamp += 3 * 24 * 60 * 60; // Only 3 days
+    });
+    client.resolve_dispute(&arbiter, &escrow_id2, &0u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
+
+    // Verify counter is still 1 (not incremented)
+    let timeout_count = client.get_arbiter_timeout_count(&arbiter);
+    assert_eq!(timeout_count, 1);
+}
+
+#[test]
+fn test_custom_timeout_shorter_than_default() {
+    let (env, admin, buyer, seller, arbiter, token, client) = setup_test_env();
+
+    // Set default winner to Seller
+    client.set_default_dispute_winner(&admin, &DisputeDefaultWinner::Seller);
+
+    // Create escrow with 1-day custom timeout (shorter than default 7 days)
+    let custom_timeout = 1 * 24 * 60 * 60; // 1 day
+    let escrow_id = client.create_escrow_w_timeout(
+        &buyer,
+        &seller,
+        &arbiter,
+        &1000,
+        &token,
+        &(env.ledger().timestamp() + 86400),
+        &None,
+        &soroban_sdk::Vec::new(&env),
+        &0,
+        &custom_timeout,
+    );
+
+    // Raise dispute
+    client.dispute_escrow(&seller, &escrow_id, &String::from_str(&env, "test"), &1000);
+
+    // Advance time by 2 days (past custom 1-day timeout, but before default 7-day)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 2 * 24 * 60 * 60;
+    });
+
+    // Should succeed with custom timeout
+    client.enforce_dispute_timeout(&escrow_id);
+
+    // Verify timeout was enforced
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, crate::EscrowStatus::Released);
+
+    // Verify arbiter timeout counter incremented
+    let timeout_count = client.get_arbiter_timeout_count(&arbiter);
+    assert_eq!(timeout_count, 1);
+}
+
+#[test]
+fn test_custom_timeout_longer_than_default() {
+    let (env, admin, buyer, seller, arbiter, token, client) = setup_test_env();
+
+    // Set default winner to Buyer
+    client.set_default_dispute_winner(&admin, &DisputeDefaultWinner::Buyer);
+
+    // Create escrow with 14-day custom timeout (longer than default 7 days)
+    let custom_timeout = 14 * 24 * 60 * 60; // 14 days
+    let escrow_id = client.create_escrow_w_timeout(
+        &buyer,
+        &seller,
+        &arbiter,
+        &1000,
+        &token,
+        &(env.ledger().timestamp() + 86400),
+        &None,
+        &soroban_sdk::Vec::new(&env),
+        &0,
+        &custom_timeout,
+    );
+
+    // Raise dispute
+    client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&env, "test"), &1000);
+
+    // Advance time by 8 days (past default 7-day timeout, but before custom 14-day)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 8 * 24 * 60 * 60;
+    });
+
+    // Should fail - custom timeout not reached yet
+    let __typed_err_result = client.try_enforce_dispute_timeout(&escrow_id);
+    assert_eq!(__typed_err_result.unwrap_err().unwrap(), EscrowErrorExt::DisputeTimeoutDeadlineHasNotPassedYet.into());
+
+    // Advance to 15 days (past custom 14-day timeout)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 7 * 24 * 60 * 60; // 7 more days = 15 total
+    });
+
+    // Now should succeed
+    client.enforce_dispute_timeout(&escrow_id);
+
+    // Verify timeout was enforced
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, crate::EscrowStatus::Refunded);
+
+    // Verify arbiter timeout counter incremented
+    let timeout_count = client.get_arbiter_timeout_count(&arbiter);
+    assert_eq!(timeout_count, 1);
+}
