@@ -1293,6 +1293,9 @@ pub enum DataKey4 {
     SecurityDepositCounter,
     /// #1167: Persistent: security deposit record keyed by deposit ID
     SecurityDeposit(u32),
+    /// Persistent: beneficiary of a payment paid on someone else's behalf
+    /// (absent when the payer is also the beneficiary)
+    PaymentBeneficiary(u32),
 }
 
 mod price_quotes;
@@ -1718,6 +1721,7 @@ impl AhjoorPaymentsContract {
             None,
             None,
             idempotency_key,
+            None,
         )
     }
 
@@ -1748,6 +1752,7 @@ impl AhjoorPaymentsContract {
             None,
             None,
             idempotency_key,
+            None,
         );
 
         // If invoice provided, compute hash and store it
@@ -1768,6 +1773,11 @@ impl AhjoorPaymentsContract {
     }
 
     /// Extended payment creation with optional recipient splits and scheduling.
+    ///
+    /// When `beneficiary` is `Some(address)` the `customer` acts as the payer
+    /// (funds, spend limits, refunds) while the beneficiary receives the
+    /// purchase record and loyalty points. `None` (or the payer's own address)
+    /// keeps the payer as the beneficiary.
     #[allow(clippy::too_many_arguments)]
     pub fn create_payment_with_options(
         env: Env,
@@ -1780,8 +1790,9 @@ impl AhjoorPaymentsContract {
         split_recipients: Option<Vec<SplitRecipient>>,
         execute_after: Option<u64>,
         idempotency_key: Option<BytesN<32>>,
+        beneficiary: Option<Address>,
     ) -> u32 {
-        Self::create_payment_with_expiry(
+        Self::create_payment_internal(
             env,
             customer,
             merchant,
@@ -1793,7 +1804,19 @@ impl AhjoorPaymentsContract {
             execute_after,
             idempotency_key,
             None,
+            beneficiary,
         )
+    }
+
+    /// Returns the beneficiary of a payment (loyalty points and purchase
+    /// record owner). Equals the payer unless one was set at creation.
+    pub fn get_payment_beneficiary(env: Env, payment_id: u32) -> Address {
+        let payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+        Self::payment_beneficiary(&env, payment_id, &payment.customer)
     }
 
     /// Extended payment creation with an optional merchant-defined expiry (#130).
@@ -1815,6 +1838,40 @@ impl AhjoorPaymentsContract {
         execute_after: Option<u64>,
         idempotency_key: Option<BytesN<32>>,
         expiry_seconds: Option<u64>,
+    ) -> u32 {
+        Self::create_payment_internal(
+            env,
+            customer,
+            merchant,
+            amount,
+            token,
+            reference,
+            metadata,
+            split_recipients,
+            execute_after,
+            idempotency_key,
+            expiry_seconds,
+            None,
+        )
+    }
+
+    /// Shared payment creation path. Not exported: Soroban caps contract
+    /// functions at 10 parameters, so the beneficiary is only reachable via
+    /// `create_payment_with_options`.
+    #[allow(clippy::too_many_arguments)]
+    fn create_payment_internal(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+        amount: i128,
+        token: Address,
+        reference: Option<String>,
+        metadata: Option<Map<String, String>>,
+        split_recipients: Option<Vec<SplitRecipient>>,
+        execute_after: Option<u64>,
+        idempotency_key: Option<BytesN<32>>,
+        expiry_seconds: Option<u64>,
+        beneficiary: Option<Address>,
     ) -> u32 {
         Self::require_not_paused(&env);
         customer.require_auth();
@@ -1961,7 +2018,24 @@ impl AhjoorPaymentsContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        Self::add_customer_payment(&env, &customer, payment_id);
+        // Pay-on-behalf: the beneficiary owns the purchase record and loyalty
+        // points, while the payer (`customer`) stays on the payment for
+        // spend limits and refunds.
+        let record_owner = match beneficiary {
+            Some(b) if b != customer => {
+                let key = DataKey4::PaymentBeneficiary(payment_id);
+                env.storage().persistent().set(&key, &b);
+                env.storage().persistent().extend_ttl(
+                    &key,
+                    PERSISTENT_LIFETIME_THRESHOLD,
+                    PERSISTENT_BUMP_AMOUNT,
+                );
+                events::emit_payment_beneficiary_set(&env, payment_id, customer.clone(), b.clone());
+                b
+            }
+            _ => customer.clone(),
+        };
+        Self::add_customer_payment(&env, &record_owner, payment_id);
 
         // Index by merchant+reference if provided (#67)
         if let Some(ref r) = reference {
@@ -2655,7 +2729,8 @@ impl AhjoorPaymentsContract {
         if !release_to_merchant {
             // Reverse loyalty points on customer-favoured resolution (#411)
             let refund_amt = payment.amount - payment.refunded_amount.min(payment.amount);
-            Self::reverse_points_for_refund(&env, &payment.customer, refund_amt, payment.amount);
+            let points_owner = Self::payment_beneficiary(&env, payment_id, &payment.customer);
+            Self::reverse_points_for_refund(&env, &points_owner, refund_amt, payment.amount);
         }
 
         events::emit_dispute_resolved(&env, payment_id, release_to_merchant, admin);
@@ -5182,7 +5257,8 @@ impl AhjoorPaymentsContract {
         }
 
         // Reverse proportional loyalty points on refund (#411)
-        Self::reverse_points_for_refund(&env, &payment.customer, refund_amount, payment.amount);
+        let points_owner = Self::payment_beneficiary(&env, payment_id, &payment.customer);
+        Self::reverse_points_for_refund(&env, &points_owner, refund_amount, payment.amount);
 
         // Update stats (#70) — count each partial refund call
         Self::inc_global_refunded(&env, &payment.token, refund_amount);
@@ -8521,7 +8597,8 @@ impl AhjoorPaymentsContract {
         events::emit_payment_receipt_issued(env, payment_id, receipt_hash);
 
         // #239: Accrue loyalty points to customer
-        Self::accrue_loyalty_points(env, payment_id, &payment.customer, payment.amount);
+        let points_owner = Self::payment_beneficiary(env, payment_id, &payment.customer);
+        Self::accrue_loyalty_points(env, payment_id, &points_owner, payment.amount);
 
         env.storage()
             .instance()
@@ -9255,6 +9332,14 @@ impl AhjoorPaymentsContract {
             .instance()
             .set(&DataKey::PaymentCounter, &counter);
         id
+    }
+
+    /// Beneficiary of a payment, falling back to the payer when none was set.
+    fn payment_beneficiary(env: &Env, payment_id: u32, payer: &Address) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey4::PaymentBeneficiary(payment_id))
+            .unwrap_or(payer.clone())
     }
 
     fn add_customer_payment(env: &Env, customer: &Address, payment_id: u32) {
@@ -10330,6 +10415,7 @@ impl AhjoorPaymentsContract {
             invoice.merchant.clone(),
             invoice.amount,
             invoice.token.clone(),
+            None,
             None,
             None,
             None,
@@ -12763,6 +12849,9 @@ mod test_disputes_by_merchant;
 
 #[cfg(test)]
 mod test_settlement_batches;
+
+#[cfg(test)]
+mod test_beneficiary;
 
 #[cfg(test)]
 mod test_price_quotes;

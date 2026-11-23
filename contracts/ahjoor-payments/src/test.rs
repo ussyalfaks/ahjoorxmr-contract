@@ -3718,6 +3718,7 @@ fn test_split_recipients_invalid_sum_rejected() {
         &Some(splits),
         &None,
         &None,
+        &None,
     );
 }
 
@@ -3752,6 +3753,7 @@ fn test_split_recipients_two_way_exact_distribution() {
         &None,
         &None,
         &Some(splits),
+        &None,
         &None,
         &None,
     );
@@ -3803,6 +3805,7 @@ fn test_split_recipients_three_way_with_dust_to_merchant() {
         &Some(splits),
         &None,
         &None,
+        &None,
     );
     s.client.complete_payment(&pid);
 
@@ -3838,6 +3841,7 @@ fn test_split_completion_emits_events() {
         &None,
         &None,
         &Some(splits),
+        &None,
         &None,
         &None,
     );
@@ -4006,6 +4010,7 @@ fn test_scheduled_payment_rejects_early_execution() {
         &None,
         &Some(2_000u64),
         &None,
+        &None,
     );
 
     s.client.execute_scheduled_payment(&pid);
@@ -4030,6 +4035,7 @@ fn test_scheduled_payment_anyone_can_execute_after_time() {
         &None,
         &None,
         &Some(1_500u64),
+        &None,
         &None,
     );
 
@@ -4064,6 +4070,7 @@ fn test_scheduled_payment_cancel_before_execution_refunds() {
         &None,
         &Some(2_000u64),
         &None,
+        &None,
     );
 
     assert_eq!(s.token_client.balance(&customer), 4700);
@@ -4093,6 +4100,7 @@ fn test_scheduled_payment_cannot_cancel_after_ready() {
         &None,
         &None,
         &Some(2_000u64),
+        &None,
         &None,
     );
 

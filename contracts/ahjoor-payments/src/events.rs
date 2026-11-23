@@ -165,6 +165,15 @@ pub struct PaymentExpiryOverride {
     pub expiry_seconds: u64,
 }
 
+/// Event: Payment created on behalf of a different beneficiary
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentBeneficiarySet {
+    pub payment_id: u32,
+    pub payer: Address,
+    pub beneficiary: Address,
+}
+
 /// Event: Authorized payment captured by merchant — funds released (#127)
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -567,6 +576,15 @@ pub fn emit_payment_expiry_override(e: &Env, payment_id: u32, expiry_seconds: u6
     PaymentExpiryOverride {
         payment_id,
         expiry_seconds,
+    }
+    .publish(e);
+}
+
+pub fn emit_payment_beneficiary_set(e: &Env, payment_id: u32, payer: Address, beneficiary: Address) {
+    PaymentBeneficiarySet {
+        payment_id,
+        payer,
+        beneficiary,
     }
     .publish(e);
 }
@@ -2479,6 +2497,64 @@ pub fn emit_security_deposit_closed(
         status,
         to_merchant,
         to_customer,
+    }
+    .publish(e);
+}
+
+/// Event: Merchant sales tax collected at settlement
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TaxCollected {
+    pub payment_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+    pub tax_address: Address,
+    pub token: Address,
+}
+
+/// Event: Proportional sales tax refunded to the customer
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TaxRefunded {
+    pub payment_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+    pub tax_address: Address,
+    pub token: Address,
+}
+
+pub fn emit_tax_collected(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    amount: i128,
+    tax_address: Address,
+    token: Address,
+) {
+    TaxCollected {
+        payment_id,
+        merchant,
+        amount,
+        tax_address,
+        token,
+    }
+    .publish(e);
+}
+
+pub fn emit_tax_refunded(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    amount: i128,
+    tax_address: Address,
+    token: Address,
+) {
+    TaxRefunded {
+        payment_id,
+        merchant,
+        amount,
+        tax_address,
+        token,
     }
     .publish(e);
 }
