@@ -174,6 +174,15 @@ pub struct PaymentBeneficiarySet {
     pub beneficiary: Address,
 }
 
+/// Event: Absolute min/max fee caps set for a token
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TokenFeeCapsSet {
+    pub token: Address,
+    pub min_fee: i128,
+    pub max_fee: i128,
+}
+
 /// Event: Authorized payment captured by merchant — funds released (#127)
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -585,6 +594,15 @@ pub fn emit_payment_beneficiary_set(e: &Env, payment_id: u32, payer: Address, be
         payment_id,
         payer,
         beneficiary,
+    }
+    .publish(e);
+}
+
+pub fn emit_token_fee_caps_set(e: &Env, token: Address, min_fee: i128, max_fee: i128) {
+    TokenFeeCapsSet {
+        token,
+        min_fee,
+        max_fee,
     }
     .publish(e);
 }
