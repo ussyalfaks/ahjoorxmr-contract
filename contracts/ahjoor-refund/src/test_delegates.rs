@@ -77,7 +77,7 @@ fn test_delegate_can_approve_after_add_delegate() {
     let s = setup();
     let delegate = Address::generate(&s.env);
 
-    s.refund_client.add_delegate(&s.merchant, &delegate);
+    s.refund_client.add_delegate(&s.merchant, &delegate, &None);
     assert_eq!(s.refund_client.get_delegates(&s.merchant).len(), 1);
 
     let refund_id = request_refund(&s);
@@ -94,7 +94,7 @@ fn test_removed_delegate_cannot_approve() {
     let s = setup();
     let delegate = Address::generate(&s.env);
 
-    s.refund_client.add_delegate(&s.merchant, &delegate);
+    s.refund_client.add_delegate(&s.merchant, &delegate, &None);
     s.refund_client.remove_delegate(&s.merchant, &delegate);
     assert_eq!(s.refund_client.get_delegates(&s.merchant).len(), 0);
 
@@ -107,7 +107,7 @@ fn test_delegate_approval_only_while_registered() {
     let s = setup();
     let delegate = Address::generate(&s.env);
 
-    s.refund_client.add_delegate(&s.merchant, &delegate);
+    s.refund_client.add_delegate(&s.merchant, &delegate, &None);
     let first = request_refund(&s);
     s.refund_client.approve_refund(&delegate, &first);
     assert_eq!(
@@ -134,7 +134,7 @@ fn test_non_delegate_cannot_approve_even_when_merchant_has_delegates() {
     let delegate = Address::generate(&s.env);
     let stranger = Address::generate(&s.env);
 
-    s.refund_client.add_delegate(&s.merchant, &delegate);
+    s.refund_client.add_delegate(&s.merchant, &delegate, &None);
     let refund_id = request_refund(&s);
     s.refund_client.approve_refund(&stranger, &refund_id);
 }
@@ -146,7 +146,7 @@ fn test_delegate_of_other_merchant_cannot_approve() {
     let other_merchant = Address::generate(&s.env);
     let other_delegate = Address::generate(&s.env);
 
-    s.refund_client.add_delegate(&other_merchant, &other_delegate);
+    s.refund_client.add_delegate(&other_merchant, &other_delegate, &None);
     let refund_id = request_refund(&s);
     s.refund_client.approve_refund(&other_delegate, &refund_id);
 }
@@ -164,6 +164,6 @@ fn test_remove_unknown_delegate_panics() {
 fn test_add_duplicate_delegate_panics() {
     let s = setup();
     let delegate = Address::generate(&s.env);
-    s.refund_client.add_delegate(&s.merchant, &delegate);
-    s.refund_client.add_delegate(&s.merchant, &delegate);
+    s.refund_client.add_delegate(&s.merchant, &delegate, &None);
+    s.refund_client.add_delegate(&s.merchant, &delegate, &None);
 }

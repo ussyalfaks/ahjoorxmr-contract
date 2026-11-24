@@ -692,6 +692,130 @@ pub fn emit_reason_auto_approve_removed(e: &Env, merchant: Address, reason_code:
     .publish(e);
 }
 
+/// Event: Disputed amount locked in the merchant reserve for a pending appeal
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveLockedForAppeal {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+}
+
+/// Event: Appeal failed; reserve lock released back to the merchant
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AppealReserveReleased {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+}
+
+/// Event: Appeal succeeded; locked reserve paid out to the customer
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AppealReservePaidOut {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+pub fn emit_reserve_locked_for_appeal(e: &Env, refund_id: u32, merchant: Address, amount: i128) {
+    ReserveLockedForAppeal {
+        refund_id,
+        merchant,
+        amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_appeal_reserve_released(e: &Env, refund_id: u32, merchant: Address, amount: i128) {
+    AppealReserveReleased {
+        refund_id,
+        merchant,
+        amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_appeal_reserve_paid_out(
+    e: &Env,
+    refund_id: u32,
+    merchant: Address,
+    recipient: Address,
+    amount: i128,
+) {
+    AppealReservePaidOut {
+        refund_id,
+        merchant,
+        recipient,
+        amount,
+    }
+    .publish(e);
+}
+
+/// Event: Admin set the trusted-customer fast-lane criteria
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct FastLaneCriteriaSet {
+    pub min_completed_payments: u32,
+    pub max_fraud_score: u32,
+}
+
+/// Event: Merchant opted in to the fast lane
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct FastLaneOptIn {
+    pub merchant: Address,
+    pub max_amount: i128,
+}
+
+/// Event: Merchant opted out of the fast lane
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct FastLaneOptOut {
+    pub merchant: Address,
+}
+
+/// Event: Refund auto-approved through the trusted-customer fast lane
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundApprovedByFastLane {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub amount: i128,
+}
+
+pub fn emit_fast_lane_criteria_set(e: &Env, min_completed_payments: u32, max_fraud_score: u32) {
+    FastLaneCriteriaSet {
+        min_completed_payments,
+        max_fraud_score,
+    }
+    .publish(e);
+}
+
+pub fn emit_fast_lane_opt_in(e: &Env, merchant: Address, max_amount: i128) {
+    FastLaneOptIn { merchant, max_amount }.publish(e);
+}
+
+pub fn emit_fast_lane_opt_out(e: &Env, merchant: Address) {
+    FastLaneOptOut { merchant }.publish(e);
+}
+
+pub fn emit_refund_auto_approved_by_fast_lane(
+    e: &Env,
+    refund_id: u32,
+    customer: Address,
+    amount: i128,
+) {
+    RefundApprovedByFastLane {
+        refund_id,
+        customer,
+        amount,
+    }
+    .publish(e);
+}
+
 pub fn emit_refund_auto_approved_by_reason_rule(
     e: &Env,
     refund_id: u32,
@@ -1382,4 +1506,159 @@ pub struct RefundLineItemsRecorded {
 
 pub fn emit_refund_line_items_recorded(e: &Env, refund_id: u32, payment_id: u32, line_item_indices: Vec<u32>) {
     RefundLineItemsRecorded { refund_id, payment_id, line_item_indices }.publish(e);
+}
+
+// --- #1174: Per-delegate approval caps ---
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DelegateLimitSet {
+    pub merchant: Address,
+    pub delegate: Address,
+    pub max_approve_amount: Option<i128>,
+}
+
+pub fn emit_delegate_limit_set(
+    e: &Env,
+    merchant: Address,
+    delegate: Address,
+    max_approve_amount: Option<i128>,
+) {
+    DelegateLimitSet {
+        merchant,
+        delegate,
+        max_approve_amount,
+    }
+    .publish(e);
+}
+
+// --- #1176: Approval revocation ---
+
+/// Event: merchant revoked an approval; the customer may appeal until `appeal_deadline`.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundApprovalRevoked {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub customer: Address,
+    pub reason_hash: BytesN<32>,
+    pub appeal_deadline: u64,
+}
+
+pub fn emit_refund_approval_revoked(
+    e: &Env,
+    refund_id: u32,
+    merchant: Address,
+    customer: Address,
+    reason_hash: BytesN<32>,
+    appeal_deadline: u64,
+) {
+    RefundApprovalRevoked {
+        refund_id,
+        merchant,
+        customer,
+        reason_hash,
+        appeal_deadline,
+    }
+    .publish(e);
+}
+
+// --- #1177: Installment plans ---
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanProposed {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub installment_count: u32,
+    pub installment_amount: i128,
+    pub interval_seconds: u64,
+}
+
+pub fn emit_installment_plan_proposed(
+    e: &Env,
+    refund_id: u32,
+    merchant: Address,
+    installment_count: u32,
+    installment_amount: i128,
+    interval_seconds: u64,
+) {
+    InstallmentPlanProposed {
+        refund_id,
+        merchant,
+        installment_count,
+        installment_amount,
+        interval_seconds,
+    }
+    .publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanAccepted {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub first_due_at: u64,
+}
+
+pub fn emit_installment_plan_accepted(e: &Env, refund_id: u32, customer: Address, first_due_at: u64) {
+    InstallmentPlanAccepted {
+        refund_id,
+        customer,
+        first_due_at,
+    }
+    .publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPaid {
+    pub refund_id: u32,
+    pub installment_number: u32,
+    pub amount: i128,
+    pub paid_amount: i128,
+    pub remaining_amount: i128,
+}
+
+pub fn emit_installment_paid(
+    e: &Env,
+    refund_id: u32,
+    installment_number: u32,
+    amount: i128,
+    paid_amount: i128,
+    remaining_amount: i128,
+) {
+    InstallmentPaid {
+        refund_id,
+        installment_number,
+        amount,
+        paid_amount,
+        remaining_amount,
+    }
+    .publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentMissed {
+    pub refund_id: u32,
+    pub paid_count: u32,
+    pub remaining_amount: i128,
+    pub due_at: u64,
+}
+
+pub fn emit_installment_missed(
+    e: &Env,
+    refund_id: u32,
+    paid_count: u32,
+    remaining_amount: i128,
+    due_at: u64,
+) {
+    InstallmentMissed {
+        refund_id,
+        paid_count,
+        remaining_amount,
+        due_at,
+    }
+    .publish(e);
 }

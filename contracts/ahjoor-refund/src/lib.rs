@@ -12,6 +12,12 @@ const INSTANCE_BUMP_AMOUNT: u32 = 120_000;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_000;
 
+/// Upper bound for the admin-configured fast-lane payment history requirement,
+/// and the most payment records scanned when evaluating a customer, so the
+/// eligibility check stays within the contract's CPU budget.
+const MAX_FAST_LANE_MIN_PAYMENTS: u32 = 100;
+const MAX_FAST_LANE_PAYMENT_SCAN: u32 = 200;
+
 /// #582: Minimum allowed `dispute_window`, in seconds (1 hour), below which
 /// `auto_approve_refund` would become callable immediately or near-immediately
 /// after a refund request, defeating the intended merchant review window.
@@ -65,12 +71,14 @@ mod payment_contract {
         pub external_id: Option<BytesN<32>>,
         pub tipping_enabled: bool,
         pub extension_count: u32,
+        pub tax_collected: i128,
     }
 
     #[allow(dead_code)]
     #[contractclient(name = "PaymentContractClient")]
     pub trait PaymentContractInterface {
         fn get_payment(env: Env, payment_id: u32) -> Payment;
+        fn get_customer_payments(env: Env, customer: Address) -> Vec<u32>;
         fn get_invoice_hash(env: Env, payment_id: u32) -> Option<BytesN<32>>;
     }
 }
@@ -99,6 +107,10 @@ pub enum RefundStatus {
     CrossContractRefunded = 11,
     /// Auto-approved due to merchant non-response (#335)
     AutoApproved = 12,
+    /// #1176: Merchant revoked its approval before processing; customer may appeal.
+    ApprovalRevoked = 13,
+    /// #1177: Customer accepted a merchant installment plan; being paid in installments.
+    InInstallments = 14,
 }
 
 /// #238: Priority label for refund requests.
@@ -386,11 +398,67 @@ pub enum DataKey2 {
     /// `AutoApproveThreshold`; 0 means "always review this reason".
     ReasonAutoApprove(Address, u32),
 
-    // --- Feature: Cross-Contract Reputation Registry (#1191) ---
-    /// Address of the reputation registry that abuse score changes are
-    /// reported to. Absent = reporting disabled.
-    ReputationRegistry,
+    // --- Feature: Line-Item Refunds ---
+    /// Vec<u32> of invoice line-item indices already refunded for a payment.
+    RefundedLineItems(u32),
+    /// Vec<u32> of invoice line-item indices covered by a refund.
+    RefundLineItems(u32),
+
+    // --- Feature: SLA Penalty ---
+    /// Admin-configured SLA penalty in basis points.
+    SlaPenaltyBps,
+    /// SLA penalty paid out for a refund.
+    RefundSlaPenaltyPaid(u32),
 }
+
+#[derive(Clone)]
+#[contracttype]
+pub enum DataKey3 {
+    /// #1174: Max amount a delegate may approve: (merchant, delegate) → i128.
+    /// Absent = uncapped.
+    DelegateApproveCap(Address, Address),
+    /// #1176: Amount drawn from the merchant reserve when a refund was approved.
+    ApprovalReserveDraw(u32),
+    /// #1176: Reason hash recorded when an approval was revoked.
+    ApprovalRevocation(u32),
+    /// #1176: Admin-configured approval revocation window in seconds.
+    RevokeApprovalWindow,
+    /// #1177: Installment plan for a refund.
+    InstallmentPlan(u32),
+}
+
+/// #1174: A delegate and its optional approval cap.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegateLimit {
+    pub delegate: Address,
+    /// None = no cap (may approve any amount).
+    pub max_approve_amount: Option<i128>,
+}
+
+/// #1177: Merchant-proposed installment plan for a large refund.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstallmentPlan {
+    pub refund_id: u32,
+    pub total_amount: i128,
+    pub installment_amount: i128,
+    pub installment_count: u32,
+    pub interval_seconds: u64,
+    pub paid_count: u32,
+    pub paid_amount: i128,
+    pub remaining_amount: i128,
+    /// Timestamp by which the next installment must be paid (0 until accepted).
+    pub next_due_at: u64,
+    pub accepted: bool,
+    pub escalated: bool,
+}
+
+/// #1176: Default window (seconds) after approval during which a merchant may revoke it.
+const DEFAULT_REVOKE_APPROVAL_WINDOW_SECONDS: u64 = 3_600;
+/// #1177: Bounds on number of installments.
+const MIN_INSTALLMENTS: u32 = 2;
+const MAX_INSTALLMENTS: u32 = 12;
 
 mod events;
 mod reputation;
@@ -514,6 +582,16 @@ pub struct RefundAbuseRecord {
     pub last_increment_ledger: u64,
     /// Ledger of the last refund submission (for rapid-submission detection).
     pub last_submission_ledger: u32,
+}
+
+/// Eligibility criteria for the trusted-customer refund fast lane.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FastLaneCriteria {
+    /// Completed payments (made by the customer) required to qualify.
+    pub min_completed_payments: u32,
+    /// Highest fraud score (inclusive) a qualifying customer may have.
+    pub max_fraud_score: u32,
 }
 
 /// #276: Evidence submitted by merchant for a refund dispute.
@@ -1044,8 +1122,27 @@ impl AhjoorRefundContract {
             false
         };
 
-        let is_auto_approved =
-            is_whitelisted || is_reason_rule_auto_approved || is_threshold_auto_approved;
+        // Trusted-customer fast lane: only for merchants that opted in, when no
+        // reason-specific rule governs the request and no other path approved it.
+        let is_fast_lane_auto_approved = if !is_whitelisted
+            && !is_threshold_auto_approved
+            && reason_rule_max.is_none()
+        {
+            match Self::fast_lane_max_amount(&env, &merchant) {
+                Some(max_amount) => {
+                    effective_amount <= max_amount
+                        && Self::is_fast_lane_customer(env.clone(), customer.clone())
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+
+        let is_auto_approved = is_whitelisted
+            || is_reason_rule_auto_approved
+            || is_threshold_auto_approved
+            || is_fast_lane_auto_approved;
 
         let initial_status = if is_auto_approved {
             RefundStatus::Approved
@@ -1059,6 +1156,8 @@ impl AhjoorRefundContract {
             Some(String::from_str(&env, "reason_rule"))
         } else if is_threshold_auto_approved {
             Some(String::from_str(&env, "threshold"))
+        } else if is_fast_lane_auto_approved {
+            Some(String::from_str(&env, "fast_lane"))
         } else {
             None
         };
@@ -1202,6 +1301,7 @@ impl AhjoorRefundContract {
         }
 
         let customer_for_event = customer.clone();
+        let customer_for_event_fast_lane = customer.clone();
         events::emit_refund_requested(
             &env,
             refund_id,
@@ -1241,6 +1341,15 @@ impl AhjoorRefundContract {
             events::emit_refund_auto_approved_by_threshold(&env, refund_id, effective_amount);
         }
 
+        if is_fast_lane_auto_approved {
+            events::emit_refund_auto_approved_by_fast_lane(
+                &env,
+                refund_id,
+                customer_for_event_fast_lane,
+                effective_amount,
+            );
+        }
+
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -1265,12 +1374,20 @@ impl AhjoorRefundContract {
             .get(&DataKey::Refund(refund_id))
             .expect("Refund not found");
 
-        // #167: Allow admin OR a delegate of the refund's merchant
+        // #167: Allow admin OR a delegate of the refund's merchant.
+        // #1174: The merchant itself may also approve (e.g. above a delegate's cap).
         let is_admin = admin == stored_admin;
-        let is_delegate = !is_admin && Self::is_merchant_delegate(&env, &refund.merchant, &admin);
+        let is_merchant = !is_admin && admin == refund.merchant;
+        let is_delegate = !is_admin
+            && !is_merchant
+            && Self::is_merchant_delegate(&env, &refund.merchant, &admin);
 
-        if !is_admin && !is_delegate {
+        if !is_admin && !is_merchant && !is_delegate {
             panic!("Only admin or merchant delegate can approve refunds");
+        }
+
+        if is_delegate {
+            Self::enforce_delegate_cap(&env, &refund.merchant, &admin, refund.amount);
         }
 
         if refund.status != RefundStatus::Requested
@@ -1322,6 +1439,14 @@ impl AhjoorRefundContract {
             let client = token::Client::new(&env, &refund.token);
             client.transfer(&env.current_contract_address(), &Self::refund_recipient(&refund), &draw);
             events::emit_reserve_used_for_refund(&env, refund.merchant.clone(), refund_id, draw);
+            // #1176: Funds already left the contract — approval can no longer be revoked.
+            let draw_key = DataKey3::ApprovalReserveDraw(refund_id);
+            env.storage().persistent().set(&draw_key, &draw);
+            env.storage().persistent().extend_ttl(
+                &draw_key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
         }
 
         env.storage()
@@ -1666,6 +1791,10 @@ impl AhjoorRefundContract {
 
         if !is_admin && !is_delegate {
             panic!("Only admin or merchant delegate can approve refunds as voucher");
+        }
+
+        if is_delegate {
+            Self::enforce_delegate_cap(&env, &refund.merchant, &admin, refund.amount);
         }
 
         if refund.status != RefundStatus::Requested
@@ -2150,9 +2279,22 @@ impl AhjoorRefundContract {
 
     /// Add a delegate that can approve/reject refunds for a specific merchant.
     /// Maximum 5 delegates per merchant. Only the merchant can call this.
-    pub fn add_delegate(env: Env, merchant: Address, delegate: Address) {
+    /// #1174: `max_approve_amount` optionally caps the refund amount this delegate
+    /// may approve; larger refunds need the merchant, admin, or a higher-capped delegate.
+    pub fn add_delegate(
+        env: Env,
+        merchant: Address,
+        delegate: Address,
+        max_approve_amount: Option<i128>,
+    ) {
         Self::require_not_paused(&env);
         merchant.require_auth();
+
+        if let Some(cap) = max_approve_amount {
+            if cap <= 0 {
+                panic!("Delegate approval cap must be positive");
+            }
+        }
 
         let key = DataKey::MerchantDelegates(merchant.clone());
         let mut delegates: Vec<Address> = env
@@ -2179,7 +2321,20 @@ impl AhjoorRefundContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        events::emit_delegate_added(&env, merchant, delegate);
+        let cap_key = DataKey3::DelegateApproveCap(merchant.clone(), delegate.clone());
+        if let Some(cap) = max_approve_amount {
+            env.storage().persistent().set(&cap_key, &cap);
+            env.storage().persistent().extend_ttl(
+                &cap_key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        } else {
+            env.storage().persistent().remove(&cap_key);
+        }
+
+        events::emit_delegate_added(&env, merchant.clone(), delegate.clone());
+        events::emit_delegate_limit_set(&env, merchant, delegate, max_approve_amount);
 
         env.storage()
             .instance()
@@ -2212,6 +2367,10 @@ impl AhjoorRefundContract {
             panic!("Address is not a delegate");
         }
 
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::DelegateApproveCap(merchant.clone(), delegate.clone()));
+
         env.storage().persistent().set(&key, &new_delegates);
         env.storage().persistent().extend_ttl(
             &key,
@@ -2230,6 +2389,382 @@ impl AhjoorRefundContract {
             .persistent()
             .get(&DataKey::MerchantDelegates(merchant))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// #1174: Each delegate of `merchant` with its approval cap (None = uncapped).
+    pub fn get_delegate_limits(env: Env, merchant: Address) -> Vec<DelegateLimit> {
+        let delegates: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantDelegates(merchant.clone()))
+            .unwrap_or(Vec::new(&env));
+        let mut out = Vec::new(&env);
+        for delegate in delegates.iter() {
+            let max_approve_amount: Option<i128> = env
+                .storage()
+                .persistent()
+                .get(&DataKey3::DelegateApproveCap(merchant.clone(), delegate.clone()));
+            out.push_back(DelegateLimit {
+                delegate,
+                max_approve_amount,
+            });
+        }
+        out
+    }
+
+    // -------------------------------------------------------------------------
+    // #1176: Revoke a mistaken approval before it is processed
+    // -------------------------------------------------------------------------
+
+    /// Admin sets the window (seconds after approval) during which a merchant may revoke it.
+    pub fn set_revoke_approval_window(env: Env, admin: Address, seconds: u64) {
+        Self::require_admin(&env, &admin);
+        if seconds == 0 {
+            panic!("Revoke window must be positive");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey3::RevokeApprovalWindow, &seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_revoke_approval_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::RevokeApprovalWindow)
+            .unwrap_or(DEFAULT_REVOKE_APPROVAL_WINDOW_SECONDS)
+    }
+
+    /// Merchant revokes an approval made by mistake, before `process_refund`.
+    /// Any restocking fee released on approval is returned to escrow. The
+    /// customer is notified by event and may `appeal_refund` within the appeal window.
+    pub fn revoke_refund_approval(
+        env: Env,
+        merchant: Address,
+        refund_id: u32,
+        reason_hash: BytesN<32>,
+    ) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        let mut refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.merchant != merchant {
+            panic!("Only the refund's merchant can revoke an approval");
+        }
+        if refund.status != RefundStatus::Approved {
+            panic!("Refund is not in approved status");
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey3::ApprovalReserveDraw(refund_id))
+        {
+            panic!("Approval already disbursed from reserve");
+        }
+
+        let now = env.ledger().timestamp();
+        let approved_at = refund.approved_at.expect("Approval timestamp missing");
+        let window = Self::get_revoke_approval_window(env.clone());
+        if now > approved_at + window {
+            panic!("Revoke window has expired");
+        }
+
+        // Return any restocking fee the merchant received on approval.
+        if refund.restocking_fee > 0 {
+            let client = token::Client::new(&env, &refund.token);
+            client.transfer(&merchant, &env.current_contract_address(), &refund.restocking_fee);
+            refund.restocking_fee = 0;
+        }
+
+        refund.status = RefundStatus::ApprovalRevoked;
+        refund.approved_at = None;
+        // Appeal window is measured from the revocation.
+        refund.rejected_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Refund(refund_id), &refund);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Refund(refund_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let rk = DataKey3::ApprovalRevocation(refund_id);
+        env.storage().persistent().set(&rk, &reason_hash);
+        env.storage()
+            .persistent()
+            .extend_ttl(&rk, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+        let appeal_window: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AppealWindow)
+            .unwrap_or(0);
+
+        events::emit_refund_approval_revoked(
+            &env,
+            refund_id,
+            merchant,
+            refund.customer.clone(),
+            reason_hash,
+            now + appeal_window,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #1176: Reason hash recorded when the refund's approval was revoked.
+    pub fn get_approval_revocation(env: Env, refund_id: u32) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::ApprovalRevocation(refund_id))
+    }
+
+    // -------------------------------------------------------------------------
+    // #1177: Installment plans for large refunds
+    // -------------------------------------------------------------------------
+
+    /// Merchant proposes paying a requested refund in `installment_count`
+    /// equal installments, one every `interval_seconds`. Replaces any
+    /// not-yet-accepted proposal.
+    pub fn propose_installment_plan(
+        env: Env,
+        merchant: Address,
+        refund_id: u32,
+        installment_count: u32,
+        interval_seconds: u64,
+    ) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        let refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.merchant != merchant {
+            panic!("Only the refund's merchant can propose an installment plan");
+        }
+        let key = DataKey3::InstallmentPlan(refund_id);
+        if let Some(existing) = env.storage().persistent().get::<_, InstallmentPlan>(&key) {
+            if existing.accepted {
+                panic!("Installment plan already active");
+            }
+        }
+        if refund.status != RefundStatus::Requested {
+            panic!("Refund is not in requested status");
+        }
+        if installment_count < MIN_INSTALLMENTS || installment_count > MAX_INSTALLMENTS {
+            panic!("Invalid installment count");
+        }
+        if interval_seconds == 0 {
+            panic!("Installment interval must be positive");
+        }
+
+
+        let installment_amount = refund.amount / installment_count as i128;
+        if installment_amount <= 0 {
+            panic!("Refund too small for installments");
+        }
+
+        let plan = InstallmentPlan {
+            refund_id,
+            total_amount: refund.amount,
+            installment_amount,
+            installment_count,
+            interval_seconds,
+            paid_count: 0,
+            paid_amount: 0,
+            remaining_amount: refund.amount,
+            next_due_at: 0,
+            accepted: false,
+            escalated: false,
+        };
+        Self::save_installment_plan(&env, &plan);
+
+        events::emit_installment_plan_proposed(
+            &env,
+            refund_id,
+            merchant,
+            installment_count,
+            installment_amount,
+            interval_seconds,
+        );
+    }
+
+    /// Customer accepts the merchant's proposed installment plan.
+    pub fn accept_installment_plan(env: Env, customer: Address, refund_id: u32) {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        let mut refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.customer != customer {
+            panic!("Only the refund's customer can accept the plan");
+        }
+        let mut plan: InstallmentPlan = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::InstallmentPlan(refund_id))
+            .expect("No installment plan proposed");
+        if plan.accepted {
+            panic!("Installment plan already active");
+        }
+        if refund.status != RefundStatus::Requested {
+            panic!("Refund is not in requested status");
+        }
+
+        let now = env.ledger().timestamp();
+        plan.accepted = true;
+        plan.next_due_at = now + plan.interval_seconds;
+        Self::save_installment_plan(&env, &plan);
+
+        refund.status = RefundStatus::InInstallments;
+        refund.approved_at = Some(now);
+        Self::save_refund(&env, &refund);
+        Self::remove_from_pending_queue(&env, refund_id);
+
+        events::emit_installment_plan_accepted(&env, refund_id, customer, plan.next_due_at);
+    }
+
+    /// Merchant pays the next installment directly to the refund recipient.
+    /// The final installment covers any rounding remainder and completes the refund.
+    pub fn pay_installment(env: Env, merchant: Address, refund_id: u32) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        let mut refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.merchant != merchant {
+            panic!("Only the refund's merchant can pay installments");
+        }
+        if refund.status != RefundStatus::InInstallments {
+            panic!("Refund is not being paid in installments");
+        }
+        let mut plan: InstallmentPlan = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::InstallmentPlan(refund_id))
+            .expect("No installment plan proposed");
+
+        let now = env.ledger().timestamp();
+        if now > plan.next_due_at {
+            panic!("Installment overdue");
+        }
+
+        let amount = if plan.paid_count + 1 >= plan.installment_count {
+            plan.remaining_amount
+        } else {
+            plan.installment_amount
+        };
+
+        let client = token::Client::new(&env, &refund.token);
+        client.transfer(&merchant, &Self::refund_recipient(&refund), &amount);
+
+        plan.paid_count += 1;
+        plan.paid_amount += amount;
+        plan.remaining_amount -= amount;
+
+        if plan.remaining_amount == 0 {
+            refund.status = RefundStatus::Processed;
+            refund.processed_at = Some(now);
+            Self::save_refund(&env, &refund);
+            Self::update_stats_on_process(&env, &refund.merchant, refund.amount);
+        } else {
+            plan.next_due_at += plan.interval_seconds;
+        }
+        Self::save_installment_plan(&env, &plan);
+
+        events::emit_installment_paid(
+            &env,
+            refund_id,
+            plan.paid_count,
+            amount,
+            plan.paid_amount,
+            plan.remaining_amount,
+        );
+    }
+
+    /// Permissionless: once an installment is overdue, escalate the refund to
+    /// senior review. The refund amount is reduced to what remains unpaid, so
+    /// senior resolution only covers the outstanding balance.
+    pub fn report_missed_installment(env: Env, refund_id: u32) {
+        Self::require_not_paused(&env);
+
+        let mut refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+        if refund.status != RefundStatus::InInstallments {
+            panic!("Refund is not being paid in installments");
+        }
+        let mut plan: InstallmentPlan = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::InstallmentPlan(refund_id))
+            .expect("No installment plan proposed");
+
+        if env.ledger().timestamp() <= plan.next_due_at {
+            panic!("Installment not yet overdue");
+        }
+
+        let senior_arbiter: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SeniorArbiter)
+            .expect("SeniorArbiterNotConfigured");
+        let senior_window: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::SeniorReviewDeadlineLedgers)
+            .unwrap_or(DEFAULT_SENIOR_REVIEW_DEADLINE_LEDGERS);
+
+        plan.escalated = true;
+        Self::save_installment_plan(&env, &plan);
+
+        refund.status = RefundStatus::EscalatedToSenior;
+        refund.amount = plan.remaining_amount;
+        refund.senior_review_deadline_ledger = env.ledger().sequence() + senior_window;
+        Self::save_refund(&env, &refund);
+
+        events::emit_installment_missed(
+            &env,
+            refund_id,
+            plan.paid_count,
+            plan.remaining_amount,
+            plan.next_due_at,
+        );
+        events::emit_refund_escalated(
+            &env,
+            refund_id,
+            env.current_contract_address(),
+            senior_arbiter,
+        );
+    }
+
+    pub fn get_installment_plan(env: Env, refund_id: u32) -> Option<InstallmentPlan> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::InstallmentPlan(refund_id))
     }
 
     // -------------------------------------------------------------------------
@@ -2436,6 +2971,155 @@ impl AhjoorRefundContract {
             .instance()
             .get(&DataKey::AutoApproveThreshold(merchant))
             .unwrap_or(0)
+    }
+
+    // -------------------------------------------------------------------------
+    // Trusted-customer fast lane
+    // -------------------------------------------------------------------------
+
+    /// Admin sets who qualifies as a trusted customer: at least
+    /// `min_completed_payments` completed payments, a clean abuse record and a
+    /// fraud score of at most `max_fraud_score`.
+    pub fn set_fast_lane_criteria(
+        env: Env,
+        admin: Address,
+        min_completed_payments: u32,
+        max_fraud_score: u32,
+    ) {
+        Self::require_admin(&env, &admin);
+
+        if min_completed_payments == 0 {
+            panic!("min_completed_payments must be positive");
+        }
+        if min_completed_payments > MAX_FAST_LANE_MIN_PAYMENTS {
+            panic!("min_completed_payments exceeds maximum");
+        }
+
+        env.storage().instance().set(
+            &DataKey2::FastLaneCriteria,
+            &FastLaneCriteria {
+                min_completed_payments,
+                max_fraud_score,
+            },
+        );
+        events::emit_fast_lane_criteria_set(&env, min_completed_payments, max_fraud_score);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the fast-lane criteria, or `None` when the fast lane is disabled.
+    pub fn get_fast_lane_criteria(env: Env) -> Option<FastLaneCriteria> {
+        env.storage().instance().get(&DataKey2::FastLaneCriteria)
+    }
+
+    /// Merchant opts in to the fast lane. Refund requests from fast-lane
+    /// customers for at most `max_amount` are approved automatically.
+    pub fn opt_in_fast_lane(env: Env, merchant: Address, max_amount: i128) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        if max_amount <= 0 {
+            panic!("Fast-lane max amount must be positive");
+        }
+
+        let key = DataKey2::FastLaneMaxAmount(merchant.clone());
+        env.storage().persistent().set(&key, &max_amount);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_fast_lane_opt_in(&env, merchant, max_amount);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Merchant leaves the fast lane; their refunds go back to the normal queue.
+    pub fn opt_out_fast_lane(env: Env, merchant: Address) {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        let key = DataKey2::FastLaneMaxAmount(merchant.clone());
+        if !env.storage().persistent().has(&key) {
+            panic!("Merchant not opted in to fast lane");
+        }
+        env.storage().persistent().remove(&key);
+        events::emit_fast_lane_opt_out(&env, merchant);
+    }
+
+    /// Returns the merchant's fast-lane max amount, or `None` if not opted in.
+    pub fn get_fast_lane_max_amount(env: Env, merchant: Address) -> Option<i128> {
+        Self::fast_lane_max_amount(&env, &merchant)
+    }
+
+    /// True when the customer qualifies for the fast lane: enough completed
+    /// payments, no abuse score or active block, and a fraud score within the
+    /// configured limit. Always false while no criteria are configured.
+    pub fn is_fast_lane_customer(env: Env, customer: Address) -> bool {
+        let criteria: FastLaneCriteria =
+            match env.storage().instance().get(&DataKey2::FastLaneCriteria) {
+                Some(c) => c,
+                None => return false,
+            };
+
+        if Self::get_fraud_score(env.clone(), customer.clone()) > criteria.max_fraud_score {
+            return false;
+        }
+
+        let abuse = Self::load_abuse_record_with_decay(&env, &customer);
+        let current_ledger = env.ledger().sequence() as u64;
+        if abuse.abuse_score > 0
+            || (abuse.blocked_until_ledger > 0 && current_ledger <= abuse.blocked_until_ledger)
+        {
+            return false;
+        }
+
+        Self::completed_payments_at_least(&env, &customer, criteria.min_completed_payments)
+    }
+
+    fn fast_lane_max_amount(env: &Env, merchant: &Address) -> Option<i128> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::FastLaneMaxAmount(merchant.clone()))
+    }
+
+    /// Counts the customer's own completed payments on the payment contract,
+    /// stopping as soon as `needed` is reached.
+    fn completed_payments_at_least(env: &Env, customer: &Address, needed: u32) -> bool {
+        let payment_contract_addr: Address = match env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentContractAddress)
+        {
+            Some(a) => a,
+            None => return false,
+        };
+        let payment_client = payment_contract::PaymentContractClient::new(env, &payment_contract_addr);
+        let ids = match payment_client.try_get_customer_payments(customer) {
+            Ok(Ok(ids)) => ids,
+            _ => return false,
+        };
+
+        let scan = ids.len().min(MAX_FAST_LANE_PAYMENT_SCAN);
+        let mut completed: u32 = 0;
+        for i in 0..scan {
+            let payment_id = ids.get(i).unwrap();
+            if let Ok(Ok(payment)) = payment_client.try_get_payment(&payment_id) {
+                if payment.status == payment_contract::PaymentStatus::Completed
+                    && payment.customer == *customer
+                {
+                    completed += 1;
+                    if completed >= needed {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     // -------------------------------------------------------------------------
@@ -2843,7 +3527,10 @@ impl AhjoorRefundContract {
             .get(&DataKey::Refund(refund_id))
             .expect("Refund not found");
 
-        if refund.status != RefundStatus::Rejected {
+        // #1176: A revoked approval can be appealed like a rejection.
+        if refund.status != RefundStatus::Rejected
+            && refund.status != RefundStatus::ApprovalRevoked
+        {
             panic!("Appeal only allowed from Rejected status");
         }
 
@@ -2874,6 +3561,18 @@ impl AhjoorRefundContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+
+        // Lock the disputed amount in the merchant's reserve so it cannot be
+        // withdrawn while the appeal is pending.
+        let locked = Self::lock_reserve_for_appeal(&env, &refund);
+        if locked > 0 {
+            events::emit_reserve_locked_for_appeal(
+                &env,
+                refund_id,
+                refund.merchant.clone(),
+                locked,
+            );
+        }
 
         events::emit_refund_appealed(&env, refund_id, customer);
 
@@ -2961,6 +3660,18 @@ impl AhjoorRefundContract {
             };
 
             Self::update_stats_on_process(&env, &refund.merchant, refund.amount);
+
+            // Customer won: the funds locked in the merchant reserve are paid out.
+            let paid_out = Self::settle_appeal_lock(&env, &refund, true);
+            if paid_out > 0 {
+                events::emit_appeal_reserve_paid_out(
+                    &env,
+                    refund_id,
+                    refund.merchant.clone(),
+                    Self::refund_recipient(&refund),
+                    paid_out,
+                );
+            }
         } else {
             // Final rejection — return escrowed funds to customer
             client.transfer(
@@ -2973,6 +3684,17 @@ impl AhjoorRefundContract {
             refund.rejected_at = Some(now);
 
             Self::update_stats_on_reject(&env, &refund.merchant);
+
+            // Appeal failed: the merchant's locked reserve is released.
+            let released = Self::settle_appeal_lock(&env, &refund, false);
+            if released > 0 {
+                events::emit_appeal_reserve_released(
+                    &env,
+                    refund_id,
+                    refund.merchant.clone(),
+                    released,
+                );
+            }
         }
 
         env.storage()
@@ -3551,8 +4273,9 @@ impl AhjoorRefundContract {
         };
         let reserve_key = DataKey2::MerchantReserveBalance(refund.merchant.clone());
         let balance: i128 = env.storage().persistent().get(&reserve_key).unwrap_or(0);
+        let available = (balance - Self::reserve_locked(env, &refund.merchant)).max(0);
         let penalty = (refund.amount as u128 * bps as u128 / 10_000) as i128;
-        let paid = if penalty > balance { balance } else { penalty };
+        let paid = if penalty > available { available } else { penalty };
         if paid <= 0 {
             return 0;
         }
@@ -3765,6 +4488,35 @@ impl AhjoorRefundContract {
     // --- Helper Functions for Stats and Whitelist ---
 
     /// Check if `caller` is a registered delegate for `merchant` (#167).
+    /// #1174: Panic if `delegate` has a cap below `amount`.
+    fn enforce_delegate_cap(env: &Env, merchant: &Address, delegate: &Address, amount: i128) {
+        let cap: Option<i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::DelegateApproveCap(merchant.clone(), delegate.clone()));
+        if let Some(cap) = cap {
+            if amount > cap {
+                panic!("Refund amount exceeds delegate approval cap");
+            }
+        }
+    }
+
+    fn save_refund(env: &Env, refund: &Refund) {
+        let key = DataKey::Refund(refund.id);
+        env.storage().persistent().set(&key, refund);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+    }
+
+    fn save_installment_plan(env: &Env, plan: &InstallmentPlan) {
+        let key = DataKey3::InstallmentPlan(plan.refund_id);
+        env.storage().persistent().set(&key, plan);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+    }
+
     fn is_merchant_delegate(env: &Env, merchant: &Address, caller: &Address) -> bool {
         let delegates: Vec<Address> = env
             .storage()
@@ -6354,6 +7106,11 @@ impl AhjoorRefundContract {
             panic!("Insufficient reserve balance");
         }
 
+        // Funds locked for pending appeals can't be withdrawn.
+        if balance - Self::reserve_locked(&env, &merchant) < amount {
+            panic!("ReserveFundsLockedForAppeal");
+        }
+
         // Check that withdrawal doesn't breach minimum
         let min_bps: u32 = env
             .storage()
@@ -6460,6 +7217,127 @@ impl AhjoorRefundContract {
             .get(&DataKey2::ReserveAlertThresholdBps)
             .unwrap_or(10_000);
         (token, min_bps, alert_bps)
+    }
+
+    /// Canonical reserve currently locked for pending appeals.
+    pub fn get_locked_reserve(env: Env, merchant: Address) -> i128 {
+        Self::reserve_locked(&env, &merchant)
+    }
+
+    /// Canonical reserve that is free to withdraw or draw on (balance minus
+    /// the amount locked for pending appeals).
+    pub fn get_available_reserve(env: Env, merchant: Address) -> i128 {
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::MerchantReserveBalance(merchant.clone()))
+            .unwrap_or(0);
+        (balance - Self::reserve_locked(&env, &merchant)).max(0)
+    }
+
+    /// Reserve amount locked for a refund's pending appeal (0 if none).
+    pub fn get_appeal_reserve_lock(env: Env, refund_id: u32) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::AppealLockedAmount(refund_id))
+            .unwrap_or(0)
+    }
+
+    fn reserve_locked(env: &Env, merchant: &Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::MerchantReserveLocked(merchant.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Locks up to the disputed amount from the merchant's available canonical
+    /// reserve. Nothing is locked when no reserve token is configured, when it
+    /// differs from the refund's token, or when the reserve is empty; a smaller
+    /// reserve is locked in full. Returns the amount locked.
+    fn lock_reserve_for_appeal(env: &Env, refund: &Refund) -> i128 {
+        let reserve_token: Address = match env.storage().instance().get(&DataKey2::ReserveToken) {
+            Some(t) => t,
+            None => return 0,
+        };
+        if reserve_token != refund.token {
+            return 0;
+        }
+
+        let balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::MerchantReserveBalance(refund.merchant.clone()))
+            .unwrap_or(0);
+        let locked_total = Self::reserve_locked(env, &refund.merchant);
+        let available = (balance - locked_total).max(0);
+        let to_lock = if refund.amount < available {
+            refund.amount
+        } else {
+            available
+        };
+        if to_lock <= 0 {
+            return 0;
+        }
+
+        let lock_key = DataKey2::AppealLockedAmount(refund.id);
+        env.storage().persistent().set(&lock_key, &to_lock);
+        env.storage().persistent().extend_ttl(
+            &lock_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let total_key = DataKey2::MerchantReserveLocked(refund.merchant.clone());
+        env.storage()
+            .persistent()
+            .set(&total_key, &(locked_total + to_lock));
+        env.storage().persistent().extend_ttl(
+            &total_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        to_lock
+    }
+
+    /// Resolves the reserve lock of a refund's appeal. With `pay_out` the
+    /// locked amount leaves the reserve and goes to the refund recipient;
+    /// otherwise it is simply unlocked. Returns the amount that was locked.
+    fn settle_appeal_lock(env: &Env, refund: &Refund, pay_out: bool) -> i128 {
+        let lock_key = DataKey2::AppealLockedAmount(refund.id);
+        let locked: i128 = env.storage().persistent().get(&lock_key).unwrap_or(0);
+        if locked <= 0 {
+            return 0;
+        }
+        env.storage().persistent().remove(&lock_key);
+
+        let total_key = DataKey2::MerchantReserveLocked(refund.merchant.clone());
+        let locked_total = Self::reserve_locked(env, &refund.merchant);
+        env.storage()
+            .persistent()
+            .set(&total_key, &(locked_total - locked).max(0));
+        env.storage().persistent().extend_ttl(
+            &total_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        if pay_out {
+            let balance_key = DataKey2::MerchantReserveBalance(refund.merchant.clone());
+            let balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&balance_key, &(balance - locked));
+            env.storage().persistent().extend_ttl(
+                &balance_key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            token::Client::new(env, &refund.token).transfer(
+                &env.current_contract_address(),
+                &Self::refund_recipient(refund),
+                &locked,
+            );
+        }
+        locked
     }
 
     /// #585: Admin-triggered one-time migration of a merchant's legacy (#274)
@@ -7047,7 +7925,7 @@ impl AhjoorRefundContract {
 
         let reserve_key = DataKey2::MerchantReserveBalance(merchant.clone());
         let reserve: i128 = env.storage().persistent().get(&reserve_key).unwrap_or(0);
-        if reserve < total {
+        if reserve - Self::reserve_locked(&env, &merchant) < total {
             panic!("InsufficientReserveForRecall");
         }
         env.storage().persistent().set(&reserve_key, &(reserve - total));
@@ -7349,6 +8227,15 @@ mod test_fraud_score;
 
 #[cfg(test)]
 mod test_reason_auto_approve;
+
+#[cfg(test)]
+mod test_delegate_caps;
+
+#[cfg(test)]
+mod test_revoke_approval;
+
+#[cfg(test)]
+mod test_installments;
 /// Event: Customer appealed a rejected refund (#159)
 #[contractevent]
 #[derive(Clone, Debug)]
