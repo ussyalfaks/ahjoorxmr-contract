@@ -1392,6 +1392,8 @@ pub enum DataKey4 {
     PaymentBeneficiary(u32),
     /// Instance: absolute min/max protocol fee configured for a token
     TokenFeeCaps(Address),
+    /// Instance: global `ahjoor-pause-registry` consulted by `require_not_paused`.
+    PauseRegistry,
 }
 
 mod price_quotes;
@@ -7437,6 +7439,20 @@ impl AhjoorPaymentsContract {
             .unwrap_or(String::from_str(&env, ""))
     }
 
+    /// Admin: set (or clear) the global `ahjoor-pause-registry`. While the
+    /// registry is paused, state changes are blocked here as well.
+    pub fn set_pause_registry(env: Env, admin: Address, registry: Option<Address>) {
+        Self::require_admin(&env, &admin);
+        match registry {
+            Some(r) => env.storage().instance().set(&DataKey4::PauseRegistry, &r),
+            None => env.storage().instance().remove(&DataKey4::PauseRegistry),
+        }
+    }
+
+    pub fn get_pause_registry(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey4::PauseRegistry)
+    }
+
     // --- Merchant Withdrawal Queue (#126) ---
 
     /// Process up to max_count entries from the merchant's withdrawal queue.
@@ -7575,6 +7591,12 @@ impl AhjoorPaymentsContract {
             .unwrap_or(false)
         {
             panic!("Contract is paused");
+        }
+        if ahjoor_common::pause_registry::is_globally_paused(
+            env,
+            env.storage().instance().get(&DataKey4::PauseRegistry),
+        ) {
+            panic!("Protocol is paused");
         }
     }
 

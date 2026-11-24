@@ -12,9 +12,17 @@ pub(crate) fn check_not_paused(env: &Env) {
         .get(&DataKey::Paused)
         .or(env.storage().instance().get(&DataKey::IsPaused))
         .unwrap_or(false);
-    if is_paused {
+    if is_paused || is_globally_paused(env) {
         panic_with_error!(env, Error::ContractPaused);
     }
+}
+
+/// `true` while the configured `ahjoor-pause-registry` reports a global pause.
+pub(crate) fn is_globally_paused(env: &Env) -> bool {
+    ahjoor_common::pause_registry::is_globally_paused(
+        env,
+        env.storage().instance().get(&crate::types::DataKey6::PauseRegistry),
+    )
 }
 
 /// Panics if the group is currently frozen by the contract-level admin.

@@ -20,7 +20,16 @@ pub trait TokenWhitelistInterface {
     /// `is_token_allowed` for existing ones.
     fn is_token_allowed_for_new(env: Env, token: Address) -> bool;
 
-    fn deprecate_token(env: Env, admin: Address, token: Address, sunset_ledger: u32);
+    fn deprecate_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+        sunset_ledger: u32,
+        replacement: Option<Address>,
+    );
+
+    /// Token integrators should migrate to from a deprecated `token`, if set.
+    fn get_replacement_token(env: Env, token: Address) -> Option<Address>;
 
     fn undeprecate_token(env: Env, admin: Address, token: Address);
 

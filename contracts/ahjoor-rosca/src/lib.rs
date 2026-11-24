@@ -76,6 +76,17 @@ pub use obligations::RoscaObligationClient;
 
 use crate::errors::{Error, ExtError, ExtError2, ExtError3};
 
+/// Every co-admin permission, each backed by one `ahjoor_common::roles` role.
+const ALL_CO_ADMIN_PERMISSIONS: [CoAdminPermission; 7] = [
+    CoAdminPermission::ManageMembers,
+    CoAdminPermission::SuspendMembers,
+    CoAdminPermission::FreezeGroup,
+    CoAdminPermission::PauseContract,
+    CoAdminPermission::ManageTokens,
+    CoAdminPermission::ManageRoundConfig,
+    CoAdminPermission::ManageMetadata,
+];
+
 #[contract]
 pub struct AhjoorContract;
 
@@ -2424,7 +2435,7 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::IsPaused)
             .unwrap_or(false);
-        if paused {
+        if paused || internals::is_globally_paused(env) {
             panic!("Contract is paused");
         }
     }
@@ -6922,6 +6933,32 @@ impl AhjoorContract {
     /// Get the protocol fee recipient address.
     pub fn get_fee_recipient(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey2::FeeRecipient)
+    }
+
+    /// Admin: set (or clear) where protocol fees are sent. Point this at the
+    /// `ahjoor-treasury` contract to pool fees with the rest of the protocol.
+    pub fn set_fee_recipient(env: Env, admin: Address, recipient: Option<Address>) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        match recipient {
+            Some(r) => env.storage().instance().set(&DataKey2::FeeRecipient, &r),
+            None => env.storage().instance().remove(&DataKey2::FeeRecipient),
+        }
+    }
+
+    /// Admin: set (or clear) the global `ahjoor-pause-registry`. While the
+    /// registry is paused, state changes are blocked here as well.
+    pub fn set_pause_registry(env: Env, admin: Address, registry: Option<Address>) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        match registry {
+            Some(r) => env.storage().instance().set(&DataKey6::PauseRegistry, &r),
+            None => env.storage().instance().remove(&DataKey6::PauseRegistry),
+        }
+    }
+
+    pub fn get_pause_registry(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey6::PauseRegistry)
     }
 
     /// Admin configures the reputation-gated fee discount.
@@ -12645,6 +12682,45 @@ impl AhjoorContract {
         }
     }
 
+    // Co-admin permission checks run on the shared `ahjoor_common::roles`
+    // module: each `CoAdminPermission` maps to one role symbol, and a co-admin
+    // holds that role exactly while it is registered, active and has the
+    // permission. `CoAdminRecord` stays the source of truth for views and
+    // metadata; `sync_co_admin_roles` keeps the role grants in step with it.
+
+    /// Role symbol backing a co-admin permission.
+    fn co_admin_role(env: &Env, permission: CoAdminPermission) -> Symbol {
+        Symbol::new(
+            env,
+            match permission {
+                CoAdminPermission::ManageMembers => "coadm_manage_members",
+                CoAdminPermission::SuspendMembers => "coadm_suspend_members",
+                CoAdminPermission::FreezeGroup => "coadm_freeze_group",
+                CoAdminPermission::PauseContract => "coadm_pause_contract",
+                CoAdminPermission::ManageTokens => "coadm_manage_tokens",
+                CoAdminPermission::ManageRoundConfig => "coadm_round_config",
+                CoAdminPermission::ManageMetadata => "coadm_metadata",
+            },
+        )
+    }
+
+    /// Re-derives `co_admin`'s role grants from its record (or revokes all of
+    /// them when `record` is `None`, i.e. the co-admin was removed).
+    fn apply_co_admin_roles(env: &Env, co_admin: &Address, record: Option<&CoAdminRecord>) {
+        for permission in ALL_CO_ADMIN_PERMISSIONS {
+            let role = Self::co_admin_role(env, permission);
+            let should_hold = match record {
+                Some(r) => r.active && r.permissions.contains(&permission),
+                None => false,
+            };
+            if should_hold {
+                ahjoor_common::roles::grant_role(env, &role, co_admin);
+            } else {
+                ahjoor_common::roles::revoke_role(env, &role, co_admin);
+            }
+        }
+    }
+
     /// Internal helper — verify that `caller` is an active co-admin with the
     /// given `permission`.  Returns the `CoAdminRecord` on success.
     ///
@@ -12662,14 +12738,8 @@ impl AhjoorContract {
         if !record.active {
             panic_with_error!(env, ExtError2::NotACoAdminRole);
         }
-        let mut has_perm = false;
-        for i in 0..record.permissions.len() {
-            if record.permissions.get(i).unwrap() == permission {
-                has_perm = true;
-                break;
-            }
-        }
-        if !has_perm {
+        let role = Self::co_admin_role(env, permission);
+        if !ahjoor_common::roles::has_role(env, &role, caller) {
             panic_with_error!(env, ExtError2::CoAdminPermissionDenied);
         }
         record
@@ -12686,18 +12756,17 @@ impl AhjoorContract {
         if *caller == stored {
             return true;
         }
-        let co_admins = Self::load_co_admins(env);
-        if let Some(record) = co_admins.get(caller.clone()) {
-            if !record.active {
-                return false;
-            }
-            for i in 0..record.permissions.len() {
-                if record.permissions.get(i).unwrap() == permission {
-                    return true;
-                }
-            }
-        }
-        false
+        ahjoor_common::roles::has_role(env, &Self::co_admin_role(env, permission), caller)
+    }
+
+    /// Admin: re-sync a co-admin's role grants from its stored record.
+    /// One-off migration for co-admins registered before permission checks
+    /// moved to `ahjoor_common::roles`; harmless to call at any time.
+    pub fn sync_co_admin_roles(env: Env, admin: Address, co_admin: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        let record = Self::load_co_admins(&env).get(co_admin.clone());
+        Self::apply_co_admin_roles(&env, &co_admin, record.as_ref());
     }
 
     /// Admin: register a new co-admin with a scoped set of permissions.
@@ -12731,6 +12800,7 @@ impl AhjoorContract {
             added_at_ledger: env.ledger().sequence(),
             active: true,
         };
+        Self::apply_co_admin_roles(&env, &co_admin, Some(&record));
         co_admins.set(co_admin.clone(), record);
         Self::save_co_admins(&env, &co_admins);
 
@@ -12755,6 +12825,7 @@ impl AhjoorContract {
         }
         co_admins.remove(co_admin.clone());
         Self::save_co_admins(&env, &co_admins);
+        Self::apply_co_admin_roles(&env, &co_admin, None);
 
         events::emit_co_admin_removed(&env, admin, co_admin);
         env.storage()
@@ -12780,6 +12851,7 @@ impl AhjoorContract {
             .get(co_admin.clone())
             .unwrap_or_else(|| panic_with_error!(&env, ExtError2::CoAdminNotFound));
         record.active = active;
+        Self::apply_co_admin_roles(&env, &co_admin, Some(&record));
         co_admins.set(co_admin.clone(), record);
         Self::save_co_admins(&env, &co_admins);
 
@@ -12814,6 +12886,7 @@ impl AhjoorContract {
             .unwrap_or_else(|| panic_with_error!(&env, ExtError2::CoAdminNotFound));
         let perm_count = permissions.len() as u32;
         record.permissions = permissions;
+        Self::apply_co_admin_roles(&env, &co_admin, Some(&record));
         co_admins.set(co_admin.clone(), record);
         Self::save_co_admins(&env, &co_admins);
 

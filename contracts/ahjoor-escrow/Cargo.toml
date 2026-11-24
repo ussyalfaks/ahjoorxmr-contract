@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 soroban-sdk = { workspace = true }
 ahjoor-token-whitelist = { path = "../ahjoor-token-whitelist", default-features = false }
+ahjoor-common = { path = "../ahjoor-common", default-features = false }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

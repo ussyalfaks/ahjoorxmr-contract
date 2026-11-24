@@ -1276,6 +1276,11 @@ pub enum DataKey6 {
     /// Address — cross-contract reputation registry that credit score
     /// changes are reported to. Absent = reporting disabled.
     ReputationRegistry,
+
+    // ── Global Pause ─────────────────────────────────────────────────────────
+    /// Address — global `ahjoor-pause-registry` consulted by
+    /// `check_not_paused`. Absent = only the local pause flag applies.
+    PauseRegistry,
 }
 
 // ── Cross-Group Member Obligations ────────────────────────────────────────────
