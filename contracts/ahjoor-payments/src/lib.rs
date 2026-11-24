@@ -561,6 +561,15 @@ pub struct FeeTier {
     pub fee_bps: u32,
 }
 
+/// Absolute fee bounds for a token, in token units, applied on top of the
+/// basis-point fee (default or tier). `max_fee == 0` means "no maximum".
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeCaps {
+    pub min_fee: i128,
+    pub max_fee: i128,
+}
+
 /// Invoice line item for payment (#128)
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1378,6 +1387,11 @@ pub enum DataKey4 {
     SecurityDepositCounter,
     /// #1167: Persistent: security deposit record keyed by deposit ID
     SecurityDeposit(u32),
+    /// Persistent: beneficiary of a payment paid on someone else's behalf
+    /// (absent when the payer is also the beneficiary)
+    PaymentBeneficiary(u32),
+    /// Instance: absolute min/max protocol fee configured for a token
+    TokenFeeCaps(Address),
 }
 
 mod price_quotes;
@@ -1803,6 +1817,7 @@ impl AhjoorPaymentsContract {
             None,
             None,
             idempotency_key,
+            None,
         )
     }
 
@@ -1833,6 +1848,7 @@ impl AhjoorPaymentsContract {
             None,
             None,
             idempotency_key,
+            None,
         );
 
         // If invoice provided, compute hash and store it
@@ -1853,6 +1869,11 @@ impl AhjoorPaymentsContract {
     }
 
     /// Extended payment creation with optional recipient splits and scheduling.
+    ///
+    /// When `beneficiary` is `Some(address)` the `customer` acts as the payer
+    /// (funds, spend limits, refunds) while the beneficiary receives the
+    /// purchase record and loyalty points. `None` (or the payer's own address)
+    /// keeps the payer as the beneficiary.
     #[allow(clippy::too_many_arguments)]
     pub fn create_payment_with_options(
         env: Env,
@@ -1865,8 +1886,9 @@ impl AhjoorPaymentsContract {
         split_recipients: Option<Vec<SplitRecipient>>,
         execute_after: Option<u64>,
         idempotency_key: Option<BytesN<32>>,
+        beneficiary: Option<Address>,
     ) -> u32 {
-        Self::create_payment_with_expiry(
+        Self::create_payment_internal(
             env,
             customer,
             merchant,
@@ -1878,7 +1900,19 @@ impl AhjoorPaymentsContract {
             execute_after,
             idempotency_key,
             None,
+            beneficiary,
         )
+    }
+
+    /// Returns the beneficiary of a payment (loyalty points and purchase
+    /// record owner). Equals the payer unless one was set at creation.
+    pub fn get_payment_beneficiary(env: Env, payment_id: u32) -> Address {
+        let payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+        Self::payment_beneficiary(&env, payment_id, &payment.customer)
     }
 
     /// Extended payment creation with an optional merchant-defined expiry (#130).
@@ -1900,6 +1934,40 @@ impl AhjoorPaymentsContract {
         execute_after: Option<u64>,
         idempotency_key: Option<BytesN<32>>,
         expiry_seconds: Option<u64>,
+    ) -> u32 {
+        Self::create_payment_internal(
+            env,
+            customer,
+            merchant,
+            amount,
+            token,
+            reference,
+            metadata,
+            split_recipients,
+            execute_after,
+            idempotency_key,
+            expiry_seconds,
+            None,
+        )
+    }
+
+    /// Shared payment creation path. Not exported: Soroban caps contract
+    /// functions at 10 parameters, so the beneficiary is only reachable via
+    /// `create_payment_with_options`.
+    #[allow(clippy::too_many_arguments)]
+    fn create_payment_internal(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+        amount: i128,
+        token: Address,
+        reference: Option<String>,
+        metadata: Option<Map<String, String>>,
+        split_recipients: Option<Vec<SplitRecipient>>,
+        execute_after: Option<u64>,
+        idempotency_key: Option<BytesN<32>>,
+        expiry_seconds: Option<u64>,
+        beneficiary: Option<Address>,
     ) -> u32 {
         Self::require_not_paused(&env);
         customer.require_auth();
@@ -2046,7 +2114,24 @@ impl AhjoorPaymentsContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        Self::add_customer_payment(&env, &customer, payment_id);
+        // Pay-on-behalf: the beneficiary owns the purchase record and loyalty
+        // points, while the payer (`customer`) stays on the payment for
+        // spend limits and refunds.
+        let record_owner = match beneficiary {
+            Some(b) if b != customer => {
+                let key = DataKey4::PaymentBeneficiary(payment_id);
+                env.storage().persistent().set(&key, &b);
+                env.storage().persistent().extend_ttl(
+                    &key,
+                    PERSISTENT_LIFETIME_THRESHOLD,
+                    PERSISTENT_BUMP_AMOUNT,
+                );
+                events::emit_payment_beneficiary_set(&env, payment_id, customer.clone(), b.clone());
+                b
+            }
+            _ => customer.clone(),
+        };
+        Self::add_customer_payment(&env, &record_owner, payment_id);
 
         // Index by merchant+reference if provided (#67)
         if let Some(ref r) = reference {
@@ -2430,7 +2515,8 @@ impl AhjoorPaymentsContract {
         let projected_volume = settlement_record.volume_30d.saturating_add(total_amount);
         let tier_fee_bps = Self::fee_bps_for_volume(&env, projected_volume);
 
-        let fee_collected = (total_amount * tier_fee_bps as i128) / 10_000;
+        let fee_collected =
+            Self::compute_fee(&env, &settlement_token, total_amount, tier_fee_bps);
         let net_amount = total_amount
             .checked_sub(fee_collected)
             .expect("Settlement fee exceeds amount");
@@ -2740,7 +2826,8 @@ impl AhjoorPaymentsContract {
         if !release_to_merchant {
             // Reverse loyalty points on customer-favoured resolution (#411)
             let refund_amt = payment.amount - payment.refunded_amount.min(payment.amount);
-            Self::reverse_points_for_refund(&env, &payment.customer, refund_amt, payment.amount);
+            let points_owner = Self::payment_beneficiary(&env, payment_id, &payment.customer);
+            Self::reverse_points_for_refund(&env, &points_owner, refund_amt, payment.amount);
         }
 
         events::emit_dispute_resolved(&env, payment_id, release_to_merchant, admin);
@@ -3598,6 +3685,55 @@ impl AhjoorPaymentsContract {
             .instance()
             .get(&DataKey::FeeTiers)
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Admin sets absolute minimum and maximum fees for a token. The effective
+    /// fee is `clamp(amount * bps, min_fee, max_fee)` (tiers included) and never
+    /// exceeds the payment amount. `max_fee == 0` means no maximum; passing
+    /// `0, 0` removes the caps for the token.
+    pub fn set_token_fee_caps(
+        env: Env,
+        admin: Address,
+        token: Address,
+        min_fee: i128,
+        max_fee: i128,
+    ) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can set fee caps");
+        }
+        if min_fee < 0 || max_fee < 0 {
+            panic!("Fee caps cannot be negative");
+        }
+        if max_fee > 0 && min_fee > max_fee {
+            panic!("min_fee cannot exceed max_fee");
+        }
+
+        let key = DataKey4::TokenFeeCaps(token.clone());
+        if min_fee == 0 && max_fee == 0 {
+            env.storage().instance().remove(&key);
+        } else {
+            env.storage()
+                .instance()
+                .set(&key, &FeeCaps { min_fee, max_fee });
+        }
+        events::emit_token_fee_caps_set(&env, token, min_fee, max_fee);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the absolute fee caps configured for a token, if any.
+    pub fn get_token_fee_caps(env: Env, token: Address) -> Option<FeeCaps> {
+        env.storage()
+            .instance()
+            .get(&DataKey4::TokenFeeCaps(token))
     }
 
     pub fn get_merchant_fee_tier(env: Env, merchant: Address) -> u32 {
@@ -5274,7 +5410,8 @@ impl AhjoorPaymentsContract {
         }
 
         // Reverse proportional loyalty points on refund (#411)
-        Self::reverse_points_for_refund(&env, &payment.customer, refund_amount, payment.amount);
+        let points_owner = Self::payment_beneficiary(&env, payment_id, &payment.customer);
+        Self::reverse_points_for_refund(&env, &points_owner, refund_amount, payment.amount);
 
         // Update stats (#70) — count each partial refund call
         Self::inc_global_refunded(&env, &payment.token, refund_amount);
@@ -8414,7 +8551,7 @@ impl AhjoorPaymentsContract {
             return;
         }
 
-        let fee_amount = (final_amount * applied_fee_bps as i128) / 10_000;
+        let fee_amount = Self::compute_fee(env, &final_token, final_amount, applied_fee_bps);
         let net_amount = final_amount - fee_amount;
 
         let fee_recipient: Address = env
@@ -8632,7 +8769,8 @@ impl AhjoorPaymentsContract {
         events::emit_payment_receipt_issued(env, payment_id, receipt_hash);
 
         // #239: Accrue loyalty points to customer
-        Self::accrue_loyalty_points(env, payment_id, &payment.customer, payment.amount);
+        let points_owner = Self::payment_beneficiary(env, payment_id, &payment.customer);
+        Self::accrue_loyalty_points(env, payment_id, &points_owner, payment.amount);
 
         env.storage()
             .instance()
@@ -8712,14 +8850,53 @@ impl AhjoorPaymentsContract {
             .expect("Split payees not found");
         let token_client = token::Client::new(env, &payment.token);
 
+        // Per-payee bps fees first; if absolute fee caps apply to the token the
+        // clamped total is re-spread across payees in proportion to their share.
+        let mut fees: Vec<i128> = Vec::new(env);
+        let mut raw_total_fee: i128 = 0;
+        let mut total_remaining: i128 = 0;
+        for p in payees.iter() {
+            let remaining = p.gross - p.refunded;
+            let fee = (remaining * fee_bps as i128) / 10_000;
+            fees.push_back(fee);
+            raw_total_fee += fee;
+            total_remaining += remaining;
+        }
+        let capped_total_fee =
+            Self::clamp_fee(env, &payment.token, raw_total_fee, total_remaining);
+        if capped_total_fee != raw_total_fee {
+            let mut respread: Vec<i128> = Vec::new(env);
+            let mut allocated: i128 = 0;
+            for p in payees.iter() {
+                let remaining = p.gross - p.refunded;
+                let fee = capped_total_fee * remaining / total_remaining;
+                respread.push_back(fee);
+                allocated += fee;
+            }
+            let mut dust = capped_total_fee - allocated;
+            let mut adjusted: Vec<i128> = Vec::new(env);
+            for i in 0..payees.len() {
+                let p = payees.get(i).unwrap();
+                let remaining = p.gross - p.refunded;
+                let mut fee = respread.get(i).unwrap();
+                if dust > 0 {
+                    let extra = dust.min(remaining - fee);
+                    fee += extra;
+                    dust -= extra;
+                }
+                adjusted.push_back(fee);
+            }
+            fees = adjusted;
+        }
+
         let mut total_fee: i128 = 0;
         let mut total_paid: i128 = 0;
         let mut updated: Vec<SplitPayee> = Vec::new(env);
         let mut transfers: Vec<SplitTransfer> = Vec::new(env);
-        for p in payees.iter() {
-            let mut p = p;
+        for i in 0..payees.len() {
+            let mut p = payees.get(i).unwrap();
             let remaining = p.gross - p.refunded;
-            let fee = (remaining * fee_bps as i128) / 10_000;
+            let fee = fees.get(i).unwrap();
             let paid = remaining - fee;
             if paid > 0 {
                 token_client.transfer(&env.current_contract_address(), &p.payee, &paid);
@@ -8908,6 +9085,35 @@ impl AhjoorPaymentsContract {
         preimage.append(&invoice.currency_label.clone().to_xdr(env));
 
         env.crypto().sha256(&preimage).into()
+    }
+
+    /// Protocol fee for `amount` at `bps`, clamped to the token's absolute
+    /// `[min_fee, max_fee]` bounds (if configured) and never above `amount`.
+    fn compute_fee(env: &Env, token: &Address, amount: i128, bps: u32) -> i128 {
+        Self::clamp_fee(env, token, (amount * bps as i128) / 10_000, amount)
+    }
+
+    fn clamp_fee(env: &Env, token: &Address, raw_fee: i128, amount: i128) -> i128 {
+        let mut fee = raw_fee;
+        if let Some(caps) = env
+            .storage()
+            .instance()
+            .get::<DataKey4, FeeCaps>(&DataKey4::TokenFeeCaps(token.clone()))
+        {
+            if fee < caps.min_fee {
+                fee = caps.min_fee;
+            }
+            if caps.max_fee > 0 && fee > caps.max_fee {
+                fee = caps.max_fee;
+            }
+        }
+        if fee > amount {
+            fee = amount;
+        }
+        if fee < 0 {
+            fee = 0;
+        }
+        fee
     }
 
     fn fee_bps_for_volume(env: &Env, volume: i128) -> u32 {
@@ -9366,6 +9572,14 @@ impl AhjoorPaymentsContract {
             .instance()
             .set(&DataKey::PaymentCounter, &counter);
         id
+    }
+
+    /// Beneficiary of a payment, falling back to the payer when none was set.
+    fn payment_beneficiary(env: &Env, payment_id: u32, payer: &Address) -> Address {
+        env.storage()
+            .persistent()
+            .get(&DataKey4::PaymentBeneficiary(payment_id))
+            .unwrap_or(payer.clone())
     }
 
     fn add_customer_payment(env: &Env, customer: &Address, payment_id: u32) {
@@ -10441,6 +10655,7 @@ impl AhjoorPaymentsContract {
             invoice.merchant.clone(),
             invoice.amount,
             invoice.token.clone(),
+            None,
             None,
             None,
             None,
@@ -13386,6 +13601,12 @@ mod test_disputes_by_merchant;
 
 #[cfg(test)]
 mod test_settlement_batches;
+
+#[cfg(test)]
+mod test_beneficiary;
+
+#[cfg(test)]
+mod test_fee_caps;
 
 #[cfg(test)]
 mod test_price_quotes;

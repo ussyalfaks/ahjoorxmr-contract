@@ -165,6 +165,24 @@ pub struct PaymentExpiryOverride {
     pub expiry_seconds: u64,
 }
 
+/// Event: Payment created on behalf of a different beneficiary
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentBeneficiarySet {
+    pub payment_id: u32,
+    pub payer: Address,
+    pub beneficiary: Address,
+}
+
+/// Event: Absolute min/max fee caps set for a token
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TokenFeeCapsSet {
+    pub token: Address,
+    pub min_fee: i128,
+    pub max_fee: i128,
+}
+
 /// Event: Authorized payment captured by merchant — funds released (#127)
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -567,6 +585,24 @@ pub fn emit_payment_expiry_override(e: &Env, payment_id: u32, expiry_seconds: u6
     PaymentExpiryOverride {
         payment_id,
         expiry_seconds,
+    }
+    .publish(e);
+}
+
+pub fn emit_payment_beneficiary_set(e: &Env, payment_id: u32, payer: Address, beneficiary: Address) {
+    PaymentBeneficiarySet {
+        payment_id,
+        payer,
+        beneficiary,
+    }
+    .publish(e);
+}
+
+pub fn emit_token_fee_caps_set(e: &Env, token: Address, min_fee: i128, max_fee: i128) {
+    TokenFeeCapsSet {
+        token,
+        min_fee,
+        max_fee,
     }
     .publish(e);
 }
