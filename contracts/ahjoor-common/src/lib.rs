@@ -2,6 +2,8 @@
 
 use soroban_sdk::{Env, IntoVal, TryFromVal, Val, Vec};
 
+pub mod reputation;
+
 /// Shared pagination helper used by all contracts.
 ///
 /// Clamps `limit` to `max_limit` and returns an empty vector when `start` is

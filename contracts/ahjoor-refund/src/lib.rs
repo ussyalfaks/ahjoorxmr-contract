@@ -461,6 +461,7 @@ const MIN_INSTALLMENTS: u32 = 2;
 const MAX_INSTALLMENTS: u32 = 12;
 
 mod events;
+mod reputation;
 
 /// Merchant refund policy for on-chain validation (#320)
 #[contracttype]
@@ -6372,10 +6373,27 @@ impl AhjoorRefundContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        reputation::report(&env, &customer, 0);
 
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #1191: Admin sets (or clears with `None`) the cross-contract
+    /// reputation registry that customers' abuse score changes are reported
+    /// to. This contract must be allowlisted as a source in the registry for
+    /// reports to be recorded; a rejected report never blocks a refund flow.
+    pub fn set_reputation_registry(env: Env, admin: Address, registry: Option<Address>) {
+        Self::require_admin(&env, &admin);
+        reputation::set_registry(&env, &registry);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_reputation_registry(env: Env) -> Option<Address> {
+        reputation::registry(&env)
     }
 
     /// Public read: returns the customer's abuse record with lazy decay applied.
@@ -6677,6 +6695,9 @@ impl AhjoorRefundContract {
 
         // Emit decay event if score was reduced by decay, then persist
         Self::persist_abuse_record_with_decay_event(env, customer, &old_record, &record);
+        if record.abuse_score != old_record.abuse_score {
+            reputation::report(env, customer, record.abuse_score);
+        }
     }
 
     fn increment_abuse_score(env: &Env, customer: &Address, delta: u32, is_elevated: bool) {
@@ -6721,6 +6742,7 @@ impl AhjoorRefundContract {
 
         // Persist; decay event emitted if score dropped due to exponential decay on load
         Self::persist_abuse_record_with_decay_event(env, customer, &old_record, &record);
+        reputation::report(env, customer, record.abuse_score);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

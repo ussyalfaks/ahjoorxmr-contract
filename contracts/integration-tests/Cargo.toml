@@ -16,6 +16,7 @@ ahjoor-rosca = { path = "../ahjoor-rosca" }
 ahjoor-payments = { path = "../ahjoor-payments" }
 ahjoor-refund = { path = "../ahjoor-refund" }
 ahjoor-escrow = { path = "../ahjoor-escrow" }
+ahjoor-common = { path = "../ahjoor-common" }
 
 [features]
 testutils = []

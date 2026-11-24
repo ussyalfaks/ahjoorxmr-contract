@@ -1,5 +1,6 @@
 use soroban_sdk::{contractclient, Address, BytesN, Env};
 
+use crate::AssetIdentity;
 use crate::ContractTokenEntry;
 use crate::Error;
 use crate::TokenQuota;
@@ -9,6 +10,10 @@ pub trait TokenWhitelistInterface {
     fn is_token_allowed(env: Env, token: Address) -> bool;
 
     fn is_whitelisted(env: Env, token: Address) -> bool;
+
+    /// #1185: Verified classic-asset identity of a SAC token, if it was
+    /// listed with `add_sac_token`.
+    fn get_asset_identity(env: Env, token: Address) -> Option<AssetIdentity>;
 
     /// Create-time check: rejects deprecated tokens. Consuming contracts
     /// should use this when opening new positions and keep using

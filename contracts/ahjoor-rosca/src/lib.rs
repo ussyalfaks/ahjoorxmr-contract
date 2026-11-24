@@ -51,6 +51,7 @@ mod metadata;
 mod obligations;
 mod payout_split;
 mod penalty_waiver;
+mod reputation;
 mod round_extension;
 pub mod savings_goal_tracking;
 pub mod savings_goal_tracking_impl;
@@ -10678,6 +10679,23 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Admin sets (or clears with `None`) the cross-contract reputation
+    /// registry that members' credit score changes are reported to. This
+    /// group must be allowlisted as a source in the registry for reports to
+    /// be recorded; a rejected report never blocks the ROSCA operation.
+    pub fn set_reputation_registry(env: Env, admin: Address, registry: Option<Address>) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        reputation::set_registry(&env, &registry);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_reputation_registry(env: Env) -> Option<Address> {
+        reputation::registry(&env)
+    }
+
     /// Returns the current credit score record for a member.
     pub fn get_credit_score(env: Env, member: Address) -> MemberScore {
         let scores: Map<Address, MemberScore> = env
@@ -11010,6 +11028,7 @@ impl AhjoorContract {
                 PERSISTENT_BUMP_AMOUNT,
             );
             events::emit_credit_score_updated(env, member.clone(), old_score, ms.score, reason);
+            reputation::report(env, member, ms.score);
         }
     }
 

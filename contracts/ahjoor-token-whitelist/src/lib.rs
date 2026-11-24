@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, xdr::ToXdr,
+    Address, Bytes, BytesN, Env, String, Vec,
 };
 
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -47,6 +48,12 @@ pub enum Error {
     RemovalNotScheduled = 15,
     RemovalNotYetActive = 16,
     InvalidCategory = 17,
+    /// #1185: Asset code must be 1-12 ASCII alphanumeric characters.
+    InvalidAssetCode = 18,
+    /// #1185: Asset issuer must be a Stellar account (G...) address.
+    InvalidAssetIssuer = 19,
+    /// #1185: Token address is not the SAC derived from asset code + issuer.
+    AssetAddressMismatch = 20,
 }
 
 #[contracttype]
@@ -112,6 +119,16 @@ pub struct TokenMetadata {
     pub symbol: soroban_sdk::String,
     pub logo_hash: BytesN<32>,
     pub canonical_oracle: Option<Address>,
+}
+
+/// #1185: Classic Stellar asset backing a Stellar Asset Contract (SAC) token.
+/// Recorded when the token is listed with `add_sac_token`, after checking
+/// that the token address is the SAC derived from `asset_code` + `issuer`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetIdentity {
+    pub asset_code: String,
+    pub issuer: Address,
 }
 
 /// Deprecation state of a whitelisted token. A deprecated token must not be
@@ -228,6 +245,8 @@ pub enum DataKey {
     MultisigProposal(u32),
     /// #1183: Allowed swap pair (canonical lower address, higher address) -> max slippage bps.
     SwapPair(Address, Address),
+    /// #1185: Verified classic-asset identity (code + issuer) of a SAC token.
+    AssetIdentity(Address),
 }
 
 #[contracttype]
@@ -311,6 +330,8 @@ mod test_guardian;
 mod test_multisig;
 #[cfg(test)]
 mod test_swap_pair;
+#[cfg(test)]
+mod test_asset_identity;
 
 pub use client::TokenWhitelistClient;
 
@@ -547,6 +568,70 @@ impl TokenWhitelistContract {
             }
         }
         res
+    }
+
+    /// #1185: List a Stellar Asset Contract token for a classic asset. The
+    /// token address must be the SAC derived from `asset_code` + `issuer`,
+    /// so a look-alike contract cannot be listed under a known asset's name.
+    /// The verified identity is stored and readable via `get_asset_identity`.
+    pub fn add_sac_token(env: Env, admin: Address, token: Address, asset_code: String, issuer: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        Self::require_no_multisig(&env);
+        let expected = Self::derive_sac_address(&env, &asset_code, &issuer);
+        if expected != token {
+            panic_with_error!(&env, Error::AssetAddressMismatch);
+        }
+        Self::do_add_token(&env, token.clone(), admin);
+        let identity = AssetIdentity { asset_code: asset_code.clone(), issuer: issuer.clone() };
+        let key = DataKey::AssetIdentity(token.clone());
+        env.storage().persistent().set(&key, &identity);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        events::emit_asset_identity_set(&env, token, asset_code, issuer);
+    }
+
+    /// #1185: Verified classic-asset identity of a SAC token listed with
+    /// `add_sac_token`. `None` for tokens listed by address alone.
+    pub fn get_asset_identity(env: Env, token: Address) -> Option<AssetIdentity> {
+        env.storage().persistent().get(&DataKey::AssetIdentity(token))
+    }
+
+    /// #1185: Address of the Stellar Asset Contract for the classic asset
+    /// `asset_code` issued by `issuer`. Builds the `Asset` XDR
+    /// (`CreditAlphanum4` for 1-4 character codes, `CreditAlphanum12` for
+    /// 5-12) and asks the host for its deterministic contract id.
+    fn derive_sac_address(env: &Env, asset_code: &String, issuer: &Address) -> Address {
+        let code_len = asset_code.len();
+        if code_len == 0 || code_len > 12 {
+            panic_with_error!(env, Error::InvalidAssetCode);
+        }
+        let mut code = [0u8; 12];
+        asset_code.copy_into_slice(&mut code[..code_len as usize]);
+        for b in code[..code_len as usize].iter() {
+            if !b.is_ascii_alphanumeric() {
+                panic_with_error!(env, Error::InvalidAssetCode);
+            }
+        }
+
+        // ScVal::Address XDR: [0,0,0,18] ScVal type, [0,0,0,0] ScAddress::Account,
+        // [0,0,0,0] PublicKeyTypeEd25519, then the 32-byte key.
+        let issuer_xdr = issuer.clone().to_xdr(env);
+        let account_header = Bytes::from_array(env, &[0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0]);
+        if issuer_xdr.len() != 44 || issuer_xdr.slice(0..12) != account_header {
+            panic_with_error!(env, Error::InvalidAssetIssuer);
+        }
+
+        let mut asset = Bytes::new(env);
+        if code_len <= 4 {
+            asset.extend_from_array(&[0, 0, 0, 1]); // ASSET_TYPE_CREDIT_ALPHANUM4
+            asset.extend_from_slice(&code[..4]);
+        } else {
+            asset.extend_from_array(&[0, 0, 0, 2]); // ASSET_TYPE_CREDIT_ALPHANUM12
+            asset.extend_from_slice(&code);
+        }
+        asset.extend_from_array(&[0, 0, 0, 0]); // PUBLIC_KEY_TYPE_ED25519
+        asset.append(&issuer_xdr.slice(12..44));
+        env.deployer().with_stellar_asset(asset).deployed_address()
     }
 
     /// Returns the current whitelist version. The version is incremented
@@ -1306,6 +1391,9 @@ impl TokenWhitelistContract {
         if env.storage().persistent().has(&DataKey::TokenDeprecation(token.clone())) {
             env.storage().persistent().remove(&DataKey::TokenDeprecation(token.clone()));
             Self::adjust_deprecated_count(env, false);
+        }
+        if env.storage().persistent().has(&DataKey::AssetIdentity(token.clone())) {
+            env.storage().persistent().remove(&DataKey::AssetIdentity(token.clone()));
         }
     }
 
