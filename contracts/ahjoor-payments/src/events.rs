@@ -2519,21 +2519,10 @@ pub fn emit_security_deposit_closed(
     .publish(e);
 }
 
-/// Event: Merchant sales tax collected at settlement
+/// Event: tax withheld from a payment and sent to the tax authority address.
 #[contractevent]
 #[derive(Clone, Debug)]
 pub struct TaxCollected {
-    pub payment_id: u32,
-    pub merchant: Address,
-    pub amount: i128,
-    pub tax_address: Address,
-    pub token: Address,
-}
-
-/// Event: Proportional sales tax refunded to the customer
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct TaxRefunded {
     pub payment_id: u32,
     pub merchant: Address,
     pub amount: i128,
@@ -2557,6 +2546,17 @@ pub fn emit_tax_collected(
         token,
     }
     .publish(e);
+}
+
+/// Event: proportional tax returned to the customer on refund.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TaxRefunded {
+    pub payment_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+    pub tax_address: Address,
+    pub token: Address,
 }
 
 pub fn emit_tax_refunded(

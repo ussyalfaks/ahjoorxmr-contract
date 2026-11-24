@@ -1507,3 +1507,158 @@ pub struct RefundLineItemsRecorded {
 pub fn emit_refund_line_items_recorded(e: &Env, refund_id: u32, payment_id: u32, line_item_indices: Vec<u32>) {
     RefundLineItemsRecorded { refund_id, payment_id, line_item_indices }.publish(e);
 }
+
+// --- #1174: Per-delegate approval caps ---
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DelegateLimitSet {
+    pub merchant: Address,
+    pub delegate: Address,
+    pub max_approve_amount: Option<i128>,
+}
+
+pub fn emit_delegate_limit_set(
+    e: &Env,
+    merchant: Address,
+    delegate: Address,
+    max_approve_amount: Option<i128>,
+) {
+    DelegateLimitSet {
+        merchant,
+        delegate,
+        max_approve_amount,
+    }
+    .publish(e);
+}
+
+// --- #1176: Approval revocation ---
+
+/// Event: merchant revoked an approval; the customer may appeal until `appeal_deadline`.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundApprovalRevoked {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub customer: Address,
+    pub reason_hash: BytesN<32>,
+    pub appeal_deadline: u64,
+}
+
+pub fn emit_refund_approval_revoked(
+    e: &Env,
+    refund_id: u32,
+    merchant: Address,
+    customer: Address,
+    reason_hash: BytesN<32>,
+    appeal_deadline: u64,
+) {
+    RefundApprovalRevoked {
+        refund_id,
+        merchant,
+        customer,
+        reason_hash,
+        appeal_deadline,
+    }
+    .publish(e);
+}
+
+// --- #1177: Installment plans ---
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanProposed {
+    pub refund_id: u32,
+    pub merchant: Address,
+    pub installment_count: u32,
+    pub installment_amount: i128,
+    pub interval_seconds: u64,
+}
+
+pub fn emit_installment_plan_proposed(
+    e: &Env,
+    refund_id: u32,
+    merchant: Address,
+    installment_count: u32,
+    installment_amount: i128,
+    interval_seconds: u64,
+) {
+    InstallmentPlanProposed {
+        refund_id,
+        merchant,
+        installment_count,
+        installment_amount,
+        interval_seconds,
+    }
+    .publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanAccepted {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub first_due_at: u64,
+}
+
+pub fn emit_installment_plan_accepted(e: &Env, refund_id: u32, customer: Address, first_due_at: u64) {
+    InstallmentPlanAccepted {
+        refund_id,
+        customer,
+        first_due_at,
+    }
+    .publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPaid {
+    pub refund_id: u32,
+    pub installment_number: u32,
+    pub amount: i128,
+    pub paid_amount: i128,
+    pub remaining_amount: i128,
+}
+
+pub fn emit_installment_paid(
+    e: &Env,
+    refund_id: u32,
+    installment_number: u32,
+    amount: i128,
+    paid_amount: i128,
+    remaining_amount: i128,
+) {
+    InstallmentPaid {
+        refund_id,
+        installment_number,
+        amount,
+        paid_amount,
+        remaining_amount,
+    }
+    .publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentMissed {
+    pub refund_id: u32,
+    pub paid_count: u32,
+    pub remaining_amount: i128,
+    pub due_at: u64,
+}
+
+pub fn emit_installment_missed(
+    e: &Env,
+    refund_id: u32,
+    paid_count: u32,
+    remaining_amount: i128,
+    due_at: u64,
+) {
+    InstallmentMissed {
+        refund_id,
+        paid_count,
+        remaining_amount,
+        due_at,
+    }
+    .publish(e);
+}

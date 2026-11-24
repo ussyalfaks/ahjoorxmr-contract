@@ -232,7 +232,7 @@ fn test_admin_resume_when_not_paused_panics() {
 fn test_set_subscription_plan_stores_plan() {
     let s = sub_v2_setup();
     s.client
-        .set_subscription_plan(&s.admin, &1, &s.merchant, &s.token_addr, &250, &7, &true);
+        .set_subscription_plan(&s.admin, &1, &s.merchant, &s.token_addr, &250, &7, &true, &0u32);
 
     let plan = s.client.get_subscription_plan(&1);
     assert_eq!(plan.plan_id, 1);
@@ -257,6 +257,7 @@ fn test_change_subscription_plan_applies_to_next_billing_cycle() {
         &NEW_AMOUNT,
         &NEW_INTERVAL_DAYS,
         &true,
+        &0u32,
     );
 
     // First charge on the original plan.
@@ -308,7 +309,7 @@ fn test_change_subscription_plan_rejected_while_paused() {
     let s = sub_v2_setup();
     let id = create_sub(&s);
     s.client
-        .set_subscription_plan(&s.admin, &1, &s.merchant, &s.token_addr, &250, &7, &true);
+        .set_subscription_plan(&s.admin, &1, &s.merchant, &s.token_addr, &250, &7, &true, &0u32);
     s.client.pause_subscription_v2(&s.subscriber, &id, &reason(&s));
 
     let res = s.client.try_change_subscription_plan(&id, &1);
@@ -322,7 +323,7 @@ fn test_change_to_inactive_plan_panics() {
     let s = sub_v2_setup();
     let id = create_sub(&s);
     s.client
-        .set_subscription_plan(&s.admin, &1, &s.merchant, &s.token_addr, &250, &7, &false);
+        .set_subscription_plan(&s.admin, &1, &s.merchant, &s.token_addr, &250, &7, &false, &0u32);
     s.client.change_subscription_plan(&id, &1);
 }
 
@@ -333,6 +334,7 @@ fn test_change_to_other_merchants_plan_panics() {
     let id = create_sub(&s);
     let other_merchant = Address::generate(&s.env);
     s.client
-        .set_subscription_plan(&s.admin, &1, &other_merchant, &s.token_addr, &250, &7, &true);
+        .set_subscription_plan(&s.admin, &1, &other_merchant, &s.token_addr, &250, &7, &true, &0u32);
     s.client.change_subscription_plan(&id, &1);
 }
+

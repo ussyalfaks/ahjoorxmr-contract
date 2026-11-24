@@ -10,6 +10,10 @@ pub mod multi_token_invoice;
 pub mod multi_token_invoice_impl;
 pub mod pre_approved_spending;
 pub mod pre_approved_spending_impl;
+pub mod customer_spend;
+pub mod fulfilment;
+pub mod security_deposit;
+pub mod withdrawal_policy;
 
 /// Maximum length (bytes) for the optional payment reference string.
 const MAX_REFERENCE_LEN: u32 = 64;
@@ -219,6 +223,44 @@ pub enum Error2 {
     DaoCaseNotFoundForPayment = 60,
     /// DAO escalation cannot be cancelled because voting has started.
     DaoEscalationHasVotes = 61,
+
+    // --- Split Bill errors (#split-bill) ---
+    /// Split bill does not exist.
+    SplitBillNotFound = 62,
+    /// At least two shares are required to create a split bill.
+    SplitBillTooFewShares = 63,
+    /// A customer address appears more than once in the share list.
+    SplitBillDuplicateCustomer = 64,
+    /// Every share amount must be positive.
+    SplitBillShareMustBePositive = 65,
+    /// The split bill expiry must be in the future.
+    SplitBillExpiryMustBeFuture = 66,
+    /// This customer already paid their share.
+    SplitBillShareAlreadyPaid = 67,
+    /// This address has no share in the split bill.
+    SplitBillNotAParticipant = 68,
+    /// The split bill has already been completed or refunded.
+    SplitBillAlreadyTerminal = 69,
+    /// Cannot expire a split bill that is already terminal.
+    SplitBillNotExpirable = 70,
+    /// Cannot expire a split bill whose expiry has not passed.
+    SplitBillNotYetExpired = 71,
+
+    // --- Subscription seat errors (#sub-seats) ---
+    /// Plan does not exist.
+    PlanNotFound = 72,
+    /// Caller is not the subscription owner.
+    NotSubscriptionOwner = 73,
+    /// Plan has no seat capacity configured.
+    PlanHasNoSeats = 74,
+    /// Plan seat list is already at maximum capacity.
+    PlanSeatsFull = 75,
+    /// Address is already an active seat.
+    SeatAlreadyActive = 76,
+    /// Address is not a seat in this plan period.
+    SeatNotFound = 77,
+    /// Seat changes must be pending; this seat is not scheduled for removal.
+    SeatNotPendingRemoval = 78,
 }
 
 /// Extension errors that overflow the 50-variant contracterror limit.
@@ -775,6 +817,49 @@ pub struct SubscriptionPlan {
     pub amount: i128,
     pub interval_days: u64,
     pub active: bool,
+    /// Maximum number of seats this plan allows (`0` = unlimited / no seat management).
+    pub max_seats: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Split Bill types (#split-bill)
+// ---------------------------------------------------------------------------
+
+/// Overall status of a split bill.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SplitBillStatus {
+    /// Awaiting all participants to pay their shares.
+    Open = 0,
+    /// All shares paid; merchant received the full amount.
+    Completed = 1,
+    /// Expiry passed without full funding; all shares refunded.
+    Refunded = 2,
+}
+
+/// A single participant's share inside a split bill.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SplitBillShare {
+    pub customer: Address,
+    pub amount: i128,
+    pub paid: bool,
+}
+
+/// A group split-bill record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SplitBill {
+    pub id: u32,
+    pub merchant: Address,
+    pub token: Address,
+    /// Sum of all share amounts (== the invoice total).
+    pub total: i128,
+    /// How much has been paid so far.
+    pub funded: i128,
+    pub status: SplitBillStatus,
+    pub expiry: u64,
+    pub created_at: u64,
 }
 
 #[contracttype]
@@ -2992,6 +3077,13 @@ impl AhjoorPaymentsContract {
 
         payment.status = PaymentStatus::CancelledInCoolingOff;
         payment.refunded_amount = payment.amount;
+        // #1166: customer spend aggregate
+        customer_spend::record_customer_refund(
+            &env,
+            &payment.customer,
+            &payment.category,
+            payment.amount,
+        );
 
         env.storage()
             .persistent()
@@ -5691,6 +5783,9 @@ impl AhjoorPaymentsContract {
             panic!("Withdrawal would drop collateral below minimum required");
         }
 
+        // #1169: above the merchant's policy threshold, withdrawals need signer approval.
+        withdrawal_policy::enforce_single_key_withdrawal(&env, &merchant, amount);
+
         let usdc_token: Address = env
             .storage()
             .instance()
@@ -6547,6 +6642,8 @@ impl AhjoorPaymentsContract {
         Self::reverse_points_for_refund(&env, &payment.customer, amount, payment.amount);
         Self::inc_global_refunded(&env, &payment.token, amount);
         Self::inc_merchant_refunded(&env, &merchant, &payment.token, amount);
+        // #1166: customer spend aggregate
+        customer_spend::record_customer_refund(&env, &payment.customer, &payment.category, amount);
 
         env.storage()
             .persistent()
@@ -6758,6 +6855,11 @@ impl AhjoorPaymentsContract {
         sub.last_charged_at = now;
         sub.charges_count += 1;
         sub.next_due_ledger = u64::from(env.ledger().sequence()) + Self::seconds_to_ledgers(sub.interval_seconds);
+
+        // Flush seat removals that were queued during the previous period.
+        if let Some(plan_id) = sub.plan_id {
+            Self::flush_pending_seat_removals(&env, plan_id);
+        }
 
         env.storage()
             .persistent()
@@ -7062,6 +7164,7 @@ impl AhjoorPaymentsContract {
         amount: i128,
         interval_days: u64,
         active: bool,
+        max_seats: u32,
     ) {
         Self::require_not_paused(&env);
         Self::require_admin(&env, &admin);
@@ -7080,6 +7183,7 @@ impl AhjoorPaymentsContract {
             amount,
             interval_days,
             active,
+            max_seats,
         };
 
         env.storage()
@@ -8610,6 +8714,13 @@ impl AhjoorPaymentsContract {
 
         Self::inc_global_completed(env, &payment.token, net_amount);
         Self::inc_merchant_completed(env, &payment.merchant, &payment.token, net_amount);
+        // #1166: customer spend aggregate (gross amount the customer paid).
+        customer_spend::record_customer_spend(
+            env,
+            &payment.customer,
+            &payment.category,
+            original_amount,
+        );
         Self::inc_volume_bucket(env, &payment.token, net_amount);
         Self::inc_merchant_volume_bucket(env, &payment.merchant, original_amount);
 
@@ -12971,6 +13082,518 @@ impl AhjoorPaymentsContract {
             .get(&DataKey3::TipSubscription(subscription_id))
             .expect("Tip subscription not found")
     }
+
+    // =========================================================================
+    //  Split Bill (#split-bill)
+    // =========================================================================
+
+    /// Create a split bill for a shared purchase.
+    ///
+    /// `merchant` is the payee. `shares` is a list of `(customer, amount)` pairs —
+    /// every amount must be positive and no customer address may appear twice.
+    /// The bill `total` is the sum of all share amounts.
+    ///
+    /// Each participant must call `pay_bill_share` before `expiry` (unix
+    /// timestamp). When the last share is paid the full total is transferred
+    /// to `merchant` and the bill becomes `Completed`. If `expiry` passes
+    /// while the bill is still `Open`, any caller may invoke `expire_split_bill`
+    /// to refund every participant who already paid.
+    pub fn create_split_bill(
+        env: Env,
+        merchant: Address,
+        token: Address,
+        shares: Vec<(Address, i128)>,
+        expiry: u64,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        let now = env.ledger().timestamp();
+        if expiry <= now {
+            panic_with_error!(&env, Error2::SplitBillExpiryMustBeFuture);
+        }
+        if shares.len() < 2 {
+            panic_with_error!(&env, Error2::SplitBillTooFewShares);
+        }
+
+        Self::require_token_allowed(&env, &token);
+        Self::require_merchant_approved(&env, &merchant);
+
+        let mut total: i128 = 0;
+        let mut bill_shares: Vec<SplitBillShare> = Vec::new(&env);
+        let mut seen: Vec<Address> = Vec::new(&env);
+
+        for (customer, amount) in shares.iter() {
+            if amount <= 0 {
+                panic_with_error!(&env, Error2::SplitBillShareMustBePositive);
+            }
+            if seen.contains(&customer) {
+                panic_with_error!(&env, Error2::SplitBillDuplicateCustomer);
+            }
+            seen.push_back(customer.clone());
+            total = total.checked_add(amount).expect("split bill total overflow");
+            bill_shares.push_back(SplitBillShare { customer, amount, paid: false });
+        }
+
+        let mut counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::SplitBillCounter)
+            .unwrap_or(0);
+        let bill_id = counter;
+        counter += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey3::SplitBillCounter, &counter);
+
+        let bill = SplitBill {
+            id: bill_id,
+            merchant: merchant.clone(),
+            token: token.clone(),
+            total,
+            funded: 0,
+            status: SplitBillStatus::Open,
+            expiry,
+            created_at: now,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::SplitBill(bill_id), &bill);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SplitBill(bill_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey3::SplitBillShares(bill_id), &bill_shares);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SplitBillShares(bill_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        events::emit_split_bill_created(&env, bill_id, merchant, token, total, expiry);
+        bill_id
+    }
+
+    /// Pay the caller's share of a split bill.
+    ///
+    /// Transfers `share.amount` from `customer` to the contract. When this
+    /// payment completes the last outstanding share the full `total` is
+    /// forwarded to the merchant atomically.
+    pub fn pay_bill_share(env: Env, customer: Address, bill_id: u32) {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        let mut bill: SplitBill = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SplitBill(bill_id))
+            .unwrap_or_else(|| panic_with_error!(&env, Error2::SplitBillNotFound));
+
+        if bill.status != SplitBillStatus::Open {
+            panic_with_error!(&env, Error2::SplitBillAlreadyTerminal);
+        }
+        if env.ledger().timestamp() > bill.expiry {
+            panic_with_error!(&env, Error2::SplitBillNotYetExpired);
+        }
+
+        let mut bill_shares: Vec<SplitBillShare> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SplitBillShares(bill_id))
+            .unwrap_or_else(|| panic_with_error!(&env, Error2::SplitBillNotFound));
+
+        // Find the caller's share.
+        let mut found = false;
+        for i in 0..bill_shares.len() {
+            let mut share = bill_shares.get(i).unwrap();
+            if share.customer == customer {
+                if share.paid {
+                    panic_with_error!(&env, Error2::SplitBillShareAlreadyPaid);
+                }
+                // Pull the customer's share into the contract.
+                token::Client::new(&env, &bill.token).transfer(
+                    &customer,
+                    &env.current_contract_address(),
+                    &share.amount,
+                );
+                share.paid = true;
+                bill.funded = bill.funded.checked_add(share.amount).expect("overflow");
+                bill_shares.set(i, share);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            panic_with_error!(&env, Error2::SplitBillNotAParticipant);
+        }
+
+        // Check if fully funded.
+        let completed = bill.funded >= bill.total;
+        if completed {
+            bill.status = SplitBillStatus::Completed;
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::SplitBill(bill_id), &bill);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SplitBill(bill_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey3::SplitBillShares(bill_id), &bill_shares);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SplitBillShares(bill_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        events::emit_split_bill_share_paid(&env, bill_id, customer, bill.funded, bill.total);
+
+        if completed {
+            // Transfer entire amount to merchant.
+            token::Client::new(&env, &bill.token).transfer(
+                &env.current_contract_address(),
+                &bill.merchant,
+                &bill.total,
+            );
+            events::emit_split_bill_completed(&env, bill_id, bill.merchant, bill.total);
+        }
+    }
+
+    /// Expire a split bill whose deadline has passed and refund all paid shares.
+    ///
+    /// Anyone may call this once `ledger().timestamp() > bill.expiry`.
+    pub fn expire_split_bill(env: Env, bill_id: u32) {
+        Self::require_not_paused(&env);
+
+        let mut bill: SplitBill = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SplitBill(bill_id))
+            .unwrap_or_else(|| panic_with_error!(&env, Error2::SplitBillNotFound));
+
+        if bill.status != SplitBillStatus::Open {
+            panic_with_error!(&env, Error2::SplitBillNotExpirable);
+        }
+        if env.ledger().timestamp() <= bill.expiry {
+            panic_with_error!(&env, Error2::SplitBillNotYetExpired);
+        }
+
+        let bill_shares: Vec<SplitBillShare> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SplitBillShares(bill_id))
+            .unwrap_or_else(|| panic_with_error!(&env, Error2::SplitBillNotFound));
+
+        // Refund every participant who already paid.
+        for i in 0..bill_shares.len() {
+            let share = bill_shares.get(i).unwrap();
+            if share.paid {
+                token::Client::new(&env, &bill.token).transfer(
+                    &env.current_contract_address(),
+                    &share.customer,
+                    &share.amount,
+                );
+            }
+        }
+
+        bill.status = SplitBillStatus::Refunded;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::SplitBill(bill_id), &bill);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SplitBill(bill_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        events::emit_split_bill_refunded(&env, bill_id, bill.funded);
+    }
+
+    /// Read a split bill header.
+    pub fn get_split_bill(env: Env, bill_id: u32) -> SplitBill {
+        let bill: SplitBill = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SplitBill(bill_id))
+            .unwrap_or_else(|| panic!("Split bill not found"));
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SplitBill(bill_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        bill
+    }
+
+    /// Read the share list for a split bill.
+    pub fn get_split_bill_shares(env: Env, bill_id: u32) -> Vec<SplitBillShare> {
+        let shares: Vec<SplitBillShare> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SplitBillShares(bill_id))
+            .unwrap_or_else(|| panic!("Split bill not found"));
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SplitBillShares(bill_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        shares
+    }
+
+    // =========================================================================
+    //  Subscription Seats (#sub-seats)
+    // =========================================================================
+    //
+    // A plan with `max_seats > 0` supports seat management.
+    // The *owner* of a subscription (the subscriber) calls `add_seat` to cover
+    // an additional address and `remove_seat` to schedule that address for
+    // removal at the next billing period.  `is_seat_active` lets a merchant
+    // verify coverage without trust.
+    //
+    // Seat changes are *deferred*: `add_seat` takes effect immediately
+    // (address is added to the current active seat list), while `remove_seat`
+    // queues the address for removal and it is dropped from the active list
+    // the next time `charge_subscription` runs for that subscription.
+
+    /// Add a seat to a plan-linked subscription.
+    ///
+    /// The `subscriber` (plan owner) must call this.  The seat address is
+    /// covered starting from the current period.
+    pub fn add_seat(env: Env, subscription_id: u32, seat: Address) {
+        Self::require_not_paused(&env);
+
+        let sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(subscription_id))
+            .unwrap_or_else(|| panic_with_error!(&env, Error2::PlanNotFound));
+        sub.subscriber.require_auth();
+
+        if !sub.active {
+            panic!("Subscription is cancelled");
+        }
+
+        let plan_id = sub.plan_id.unwrap_or_else(|| panic_with_error!(&env, Error2::PlanHasNoSeats));
+        let plan: SubscriptionPlan = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SubscriptionPlan(plan_id))
+            .unwrap_or_else(|| panic_with_error!(&env, Error2::PlanNotFound));
+
+        if plan.max_seats == 0 {
+            panic_with_error!(&env, Error2::PlanHasNoSeats);
+        }
+
+        let mut seats: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PlanSeats(plan_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if seats.len() >= plan.max_seats {
+            panic_with_error!(&env, Error2::PlanSeatsFull);
+        }
+        if seats.contains(&seat) {
+            panic_with_error!(&env, Error2::SeatAlreadyActive);
+        }
+
+        seats.push_back(seat.clone());
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::PlanSeats(plan_id), &seats);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::PlanSeats(plan_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        events::emit_seat_added(&env, subscription_id, plan_id, seat);
+    }
+
+    /// Schedule a seat for removal at the start of the next billing period.
+    ///
+    /// The seat continues to be active (`is_seat_active` returns `true`) until
+    /// `charge_subscription` is called for this subscription, at which point
+    /// pending removals are flushed before the new period begins.
+    pub fn remove_seat(env: Env, subscription_id: u32, seat: Address) {
+        Self::require_not_paused(&env);
+
+        let sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(subscription_id))
+            .unwrap_or_else(|| panic_with_error!(&env, Error2::PlanNotFound));
+        sub.subscriber.require_auth();
+
+        if !sub.active {
+            panic!("Subscription is cancelled");
+        }
+
+        let plan_id = sub.plan_id.unwrap_or_else(|| panic_with_error!(&env, Error2::PlanHasNoSeats));
+        let plan: SubscriptionPlan = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SubscriptionPlan(plan_id))
+            .unwrap_or_else(|| panic_with_error!(&env, Error2::PlanNotFound));
+
+        if plan.max_seats == 0 {
+            panic_with_error!(&env, Error2::PlanHasNoSeats);
+        }
+
+        // Verify the seat exists in the active list.
+        let seats: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PlanSeats(plan_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if !seats.contains(&seat) {
+            panic_with_error!(&env, Error2::SeatNotFound);
+        }
+
+        // Add to the pending-removal list (idempotent — no double-queue).
+        let mut pending: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PlanPendingSeatRemoval(plan_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if pending.contains(&seat) {
+            panic_with_error!(&env, Error2::SeatAlreadyActive); // already queued
+        }
+
+        pending.push_back(seat.clone());
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::PlanPendingSeatRemoval(plan_id), &pending);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::PlanPendingSeatRemoval(plan_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        events::emit_seat_removal_scheduled(&env, subscription_id, plan_id, seat);
+    }
+
+    /// Returns `true` if `address` is currently an active seat for `subscription_id`.
+    ///
+    /// A seat is active if it appears in the plan's current seat list and is
+    /// *not* yet flushed. Merchants call this to verify coverage.
+    pub fn is_seat_active(env: Env, subscription_id: u32, address: Address) -> bool {
+        let sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(subscription_id))
+            .unwrap_or_else(|| panic!("Subscription not found"));
+
+        if !sub.active {
+            return false;
+        }
+
+        let plan_id = match sub.plan_id {
+            Some(id) => id,
+            None => return false,
+        };
+
+        let plan: SubscriptionPlan = match env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SubscriptionPlan(plan_id))
+        {
+            Some(p) => p,
+            None => return false,
+        };
+
+        if plan.max_seats == 0 {
+            return false;
+        }
+
+        let seats: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PlanSeats(plan_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // A seat in the pending-removal list is still active until the next period.
+        seats.contains(&address)
+    }
+
+    /// Flush pending seat removals for a plan.
+    ///
+    /// Called internally at the start of each charge cycle. Removes from the
+    /// active seat list every address that was queued via `remove_seat`.
+    fn flush_pending_seat_removals(env: &Env, plan_id: u32) {
+        let pending: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PlanPendingSeatRemoval(plan_id))
+            .unwrap_or_else(|| Vec::new(env));
+
+        if pending.is_empty() {
+            return;
+        }
+
+        let mut seats: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::PlanSeats(plan_id))
+            .unwrap_or_else(|| Vec::new(env));
+
+        // Rebuild seats list excluding any pending removals.
+        let mut updated: Vec<Address> = Vec::new(env);
+        for i in 0..seats.len() {
+            let addr = seats.get(i).unwrap();
+            if !pending.contains(&addr) {
+                updated.push_back(addr);
+            }
+        }
+        let _ = seats; // drop borrow
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::PlanSeats(plan_id), &updated);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::PlanSeats(plan_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Clear the pending-removal list.
+        let empty: Vec<Address> = Vec::new(env);
+        env.storage()
+            .persistent()
+            .set(&DataKey3::PlanPendingSeatRemoval(plan_id), &empty);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::PlanPendingSeatRemoval(plan_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -13078,3 +13701,7 @@ mod test_unblock_evidence_dispute;
 mod test_merchant_tax;
 
 pub use events::*;
+#[cfg(test)]
+mod test_split_bill;
+#[cfg(test)]
+mod test_subscription_seats;
