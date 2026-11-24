@@ -24,6 +24,10 @@ const DEFAULT_REMINDER_WINDOW_SECONDS: u64 = 3_600;
 const DEFAULT_MAX_DEADLINE_EXTENSION_SECONDS: u64 = 30 * 24 * 60 * 60;
 /// Maximum number of escrow IDs accepted in one `emit_response_reminders` call.
 const MAX_REMINDER_BATCH_SIZE: u32 = 50;
+/// Upper bound on the keeper reward paid out of `auto_release_expired` (5%).
+const MAX_KEEPER_REWARD_BPS: u32 = 500;
+/// Keeper reward is disabled unless the admin opts in via `set_keeper_reward_bps`.
+const DEFAULT_KEEPER_REWARD_BPS: u32 = 0;
 
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -385,6 +389,8 @@ pub enum EscrowErrorExt5 {
     DeadlineExtensionExceedsCap = 34,
     /// extend_deadline: cannot extend deadline while a dispute is active.
     CannotExtendDeadlineDuringDispute = 35,
+    /// set_keeper_reward_bps: value exceeds the configured maximum.
+    KeeperRewardBpsExceedsMaximum = 36,
 }
 
 /// #977: Mutual settlement offer for a disputed escrow.
@@ -572,6 +578,34 @@ pub struct Escrow {
     pub extensions: EscrowExtensions,
     pub top_up_history: Vec<TopUpEntry>,
     pub top_up_acknowledged: bool,
+}
+
+/// Maximum number of distinct token allocations held by a single multi-asset escrow.
+const MAX_ASSETS_PER_MULTI_ASSET_ESCROW: u32 = 10;
+
+/// A single (token, amount) allocation within a multi-asset escrow.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetAllocation {
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// An escrow that locks several distinct tokens at once under one buyer/seller
+/// agreement. All assets move together: release and refund are all-or-nothing
+/// across every asset in `assets`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiAssetEscrow {
+    pub id: u32,
+    pub buyer: Address,
+    pub arbiter: Address,
+    pub assets: Vec<AssetAllocation>,
+    pub sellers: Vec<(Address, u32)>, // (address, bps) — must sum to 10_000
+    pub status: EscrowStatus,
+    pub created_at: u64,
+    pub deadline: u64,
+    pub metadata_hash: Option<BytesN<32>>,
 }
 
 #[contracttype]
@@ -988,6 +1022,10 @@ pub enum DataKey3 {
     DeadlineReminderSent(u32),
     /// #1062: admin-configurable deadline reminder window in seconds (default: 48 h)
     DeadlineReminderWindowSeconds,
+    /// Admin-configurable reward (bps of escrow.amount) paid to whichever
+    /// address calls `auto_release_expired` on an expired escrow.
+    /// 0 (default) disables the reward.
+    KeeperRewardBps,
 }
 
 /// A third party's pre-funded protocol fee for a specific escrow.
@@ -1572,14 +1610,7 @@ impl AhjoorEscrowContract {
             top_up_acknowledged: true,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         env.storage()
             .persistent()
@@ -1737,10 +1768,7 @@ impl AhjoorEscrowContract {
             let mut escrow: Escrow = env
                 .storage().persistent().get(&DataKey::Escrow(escrow_id)).expect("Escrow not found");
             escrow.extensions.inspector = Some(insp.clone());
-            env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &escrow);
         }
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         escrow_id
@@ -1767,10 +1795,7 @@ impl AhjoorEscrowContract {
         }
         escrow.status = EscrowStatus::AwaitingInspection;
         Self::record_status_history(&env, escrow_id, EscrowStatus::AwaitingInspection);
-        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         events::emit_seller_marked_complete(&env, escrow_id, seller);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
@@ -1803,10 +1828,7 @@ impl AhjoorEscrowContract {
             &DataKey2::InspectorReport(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
         );
         escrow.status = if approved { EscrowStatus::InspectionPassed } else { EscrowStatus::InspectionFailed };
-        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         events::emit_inspection_report_submitted(&env, escrow_id, inspector, approved, report_hash);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
@@ -1841,10 +1863,7 @@ impl AhjoorEscrowContract {
                 updated.status = EscrowStatus::Active;
                 Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
             }
-            env.storage().persistent().set(&DataKey::Escrow(escrow_id), &updated);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &updated);
             env.storage().persistent().remove(&key);
             Self::record_inspector_incomplete_ruling(&env, &old_inspector);
             events::emit_inspector_replaced(&env, escrow_id, old_inspector, new_inspector);
@@ -2241,14 +2260,7 @@ impl AhjoorEscrowContract {
             top_up_acknowledged: true,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(env, escrow_id, &escrow);
 
         // #797: Persist bond + funding deadline; principal starts unfunded when deferred.
         if let Some(bond) = features.creation_bond {
@@ -2444,14 +2456,7 @@ impl AhjoorEscrowContract {
             .expect("Escrow not found");
         escrow.extensions.dispute_timeout_seconds = Some(dispute_timeout_seconds);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         escrow_id
     }
@@ -2629,14 +2634,7 @@ impl AhjoorEscrowContract {
         // Burn associated receipt atomically on release
         Self::burn_receipt_if_exists(&env, escrow_id);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         env.storage()
             .instance()
@@ -3002,9 +3000,7 @@ impl AhjoorEscrowContract {
         escrow.extensions.auto_renew = false;
         escrow.extensions.renewals_remaining = 0;
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage().persistent().remove(&DataKey::RenewalAllowance(escrow_id));
     }
 
@@ -3117,14 +3113,7 @@ impl AhjoorEscrowContract {
             Self::settle_fee_sponsorship_on_release(&env, escrow_id, &escrow.token);
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_partial_released(&env, escrow_id, release_amount, escrow.amount);
 
@@ -3288,14 +3277,7 @@ impl AhjoorEscrowContract {
             Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
             // Burn receipt when milestones complete and escrow releases
             Self::burn_receipt_if_exists(&env, escrow_id);
-            env.storage()
-                .persistent()
-                .set(&DataKey::Escrow(escrow_id), &escrow);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &escrow);
         }
 
         events::emit_milestone_approved(&env, escrow_id, milestone_index, amount_released);
@@ -3375,14 +3357,7 @@ impl AhjoorEscrowContract {
         // Record status transition in history
         Self::record_status_history(&env, escrow_id, escrow.status);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         let dispute = Dispute {
             escrow_id,
@@ -3487,14 +3462,7 @@ impl AhjoorEscrowContract {
             Self::update_dispute_count(&env, old_status, EscrowStatus::CoolingOff);
             
             Self::record_status_history(&env, escrow_id, EscrowStatus::CoolingOff);
-            env.storage()
-                .persistent()
-                .set(&DataKey::Escrow(escrow_id), &escrow);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &escrow);
 
             events::emit_arbiter_verdict_recorded(&env, escrow_id, arbiter.clone(), buyer_percent, rationale_hash);
             events::emit_resolution_cooling_off(&env, escrow_id, buyer_percent, arbiter, env.ledger().timestamp() + cooling_off_seconds);
@@ -3833,14 +3801,7 @@ impl AhjoorEscrowContract {
         // Record status transition in history
         Self::record_status_history(env, escrow_id, escrow.status);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(env, escrow_id, &escrow);
 
         if let Some(mut dispute) = env
             .storage()
@@ -4132,14 +4093,7 @@ impl AhjoorEscrowContract {
         // Burn any receipt in either case
         Self::burn_receipt_if_exists(&env, escrow_id);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         // Mark dispute as resolved
         let mut resolved_dispute = dispute;
@@ -4247,14 +4201,7 @@ impl AhjoorEscrowContract {
         escrow.status = EscrowStatus::Resolved;
         Self::update_dispute_count(&env, old_status, escrow.status);
         Self::record_status_history(&env, escrow_id, escrow.status);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         if let Some(mut dispute) = env
             .storage()
             .persistent()
@@ -4331,14 +4278,7 @@ impl AhjoorEscrowContract {
             .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt5::NoEligibleArbiter));
 
         escrow.arbiter = new_arbiter.clone();
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         if env
             .storage()
             .persistent()
@@ -4384,6 +4324,30 @@ impl AhjoorEscrowContract {
             .instance()
             .get(&DataKey::DefaultArbiterFeeBps)
             .unwrap_or(0)
+    }
+
+    /// Admin sets the keeper reward (bps of escrow.amount) paid out of
+    /// `auto_release_expired` to whichever address triggers it. 0 disables
+    /// the reward (the full amount then goes to the buyer, as before).
+    pub fn set_keeper_reward_bps(env: Env, admin: Address, bps: u32) {
+        Self::require_admin(&env, &admin);
+        if bps > MAX_KEEPER_REWARD_BPS {
+            panic_with_error!(&env, EscrowErrorExt5::KeeperRewardBpsExceedsMaximum);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey3::KeeperRewardBps, &bps);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_keeper_reward_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::KeeperRewardBps)
+            .unwrap_or(DEFAULT_KEEPER_REWARD_BPS)
     }
 
     /// Configure oracle address and max accepted price age (seconds). Admin only.
@@ -4879,14 +4843,7 @@ impl AhjoorEscrowContract {
         escrow.status = EscrowStatus::Released;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_oracle_release_triggered(
             &env,
@@ -4902,8 +4859,12 @@ impl AhjoorEscrowContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
-    /// Auto-release expired escrow (past deadline, undisputed). Can be called by buyer.
-    pub fn auto_release_expired(env: Env, escrow_id: u32) {
+    /// Auto-release expired escrow (past deadline, undisputed) back to the buyer(s).
+    /// Permissionless keeper function — callable by **anyone**, no auth required.
+    /// `caller` receives the configured keeper reward (bps of escrow.amount,
+    /// via `set_keeper_reward_bps`; 0 by default) carved out of the refund;
+    /// the remainder goes to the buyer(s) as before.
+    pub fn auto_release_expired(env: Env, escrow_id: u32, caller: Address) {
         Self::require_not_paused(&env);
         let mut escrow: Escrow = env
             .storage()
@@ -4921,9 +4882,21 @@ impl AhjoorEscrowContract {
 
         Self::require_unlocked(&env, &escrow);
 
-        escrow.buyer.require_auth();
+        let keeper_reward_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::KeeperRewardBps)
+            .unwrap_or(DEFAULT_KEEPER_REWARD_BPS);
+        let keeper_reward = (escrow.amount * keeper_reward_bps as i128) / 10_000;
+        let refund_amount = escrow.amount - keeper_reward;
 
-        Self::transfer_to_buyers(&env, &escrow, escrow.amount, escrow_id);
+        if keeper_reward > 0 {
+            let client = token::Client::new(&env, &escrow.token);
+            client.transfer(&env.current_contract_address(), &caller, &keeper_reward);
+            events::emit_keeper_reward_paid(&env, escrow_id, caller, keeper_reward);
+        }
+
+        Self::transfer_to_buyers(&env, &escrow, refund_amount, escrow_id);
         Self::refund_fee_sponsorship(&env, escrow_id, &escrow.token);
 
         escrow.status = EscrowStatus::Refunded;
@@ -4931,16 +4904,9 @@ impl AhjoorEscrowContract {
         // Burn associated receipt on refund
         Self::burn_receipt_if_exists(&env, escrow_id);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
-        events::emit_escrow_refunded(&env, escrow_id, escrow.buyer, escrow.amount);
+        events::emit_escrow_refunded(&env, escrow_id, escrow.buyer, refund_amount);
 
         env.storage()
             .instance()
@@ -5062,14 +5028,7 @@ impl AhjoorEscrowContract {
         let old_deadline = escrow.deadline;
         escrow.deadline = proposal.new_deadline;
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage()
             .persistent()
             .remove(&DataKey::DeadlineProposal(escrow_id));
@@ -5309,12 +5268,7 @@ impl AhjoorEscrowContract {
             escrow.metadata_hash = proposal.new_metadata_hash.clone();
         }
 
-        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage().persistent().remove(&key);
 
         events::emit_amendment_applied(
@@ -5444,14 +5398,7 @@ impl AhjoorEscrowContract {
         escrow.top_up_acknowledged = false;
 
         // Save and extend TTL
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         // #797: First principal deposit marks the escrow funded.
         env.storage()
@@ -5487,14 +5434,7 @@ impl AhjoorEscrowContract {
         escrow.top_up_acknowledged = true;
 
         // Save and extend TTL
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         // Emit event
         events::emit_top_up_acknowledged(&env, escrow_id, seller, escrow.amount);
@@ -5623,14 +5563,7 @@ impl AhjoorEscrowContract {
         escrow.amount -= request.amount;
 
         // Save escrow
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         // Remove pending request
         env.storage()
@@ -5772,14 +5705,7 @@ impl AhjoorEscrowContract {
         
         Self::record_status_history(&env, escrow_id, EscrowStatus::Disputed);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow_mut);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow_mut);
 
         // Create a dispute record (using existing Dispute struct)
         let dispute = Dispute {
@@ -6006,14 +5932,7 @@ impl AhjoorEscrowContract {
         Self::update_dispute_count(&env, old_status, EscrowStatus::Disputed);
         Self::record_status_history(&env, escrow_id, EscrowStatus::Disputed);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow_mut);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow_mut);
 
         // Create a dispute record
         let dispute = Dispute {
@@ -6112,14 +6031,7 @@ impl AhjoorEscrowContract {
         let old_buyer = escrow.buyer.clone();
         escrow.buyer = new_buyer.clone();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_buyer_role_transferred(&env, escrow_id, old_buyer, new_buyer);
 
@@ -6153,9 +6065,7 @@ impl AhjoorEscrowContract {
         }
 
         escrow.metadata_hash = Some(new_hash.clone());
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         env.storage().persistent().set(
             &DataKey::EscrowMetadata(escrow_id),
@@ -6330,8 +6240,7 @@ impl AhjoorEscrowContract {
         let mut e = escrow.clone();
         e.status = EscrowStatus::Released;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
-        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &e);
-        env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        Self::save_escrow(&env, escrow_id, &e);
         lock_data.claimed = true;
         env.storage().persistent().set(&DataKey::TimeLockData(escrow_id), &lock_data);
         events::emit_timelocked_funds_claimed(&env, escrow_id, beneficiary, escrow.amount);
@@ -6352,8 +6261,7 @@ impl AhjoorEscrowContract {
         Self::refund_fee_sponsorship(&env, escrow_id, &escrow.token);
         escrow.status = EscrowStatus::Refunded;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
-        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        Self::save_escrow(&env, escrow_id, &escrow);
         events::emit_timelocked_escrow_cancelled(&env, escrow_id, buyer);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
@@ -6615,14 +6523,7 @@ impl AhjoorEscrowContract {
             top_up_acknowledged: true,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_escrow_created(
             &env,
@@ -6820,14 +6721,7 @@ impl AhjoorEscrowContract {
             top_up_acknowledged: true,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_escrow_created(
             &env, escrow_id, buyer, seller, arbiter.clone(), amount, token, deadline,
@@ -6981,14 +6875,7 @@ impl AhjoorEscrowContract {
         escrow.status = EscrowStatus::Released;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_inactivity_release_triggered(&env, escrow_id, seller, inactivity_seconds);
 
@@ -7077,14 +6964,7 @@ impl AhjoorEscrowContract {
 
         escrow.status = EscrowStatus::CancellationPending;
         Self::record_status_history(&env, escrow_id, EscrowStatus::CancellationPending);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_cancellation_requested(&env, escrow_id, caller, expires_at);
 
@@ -7122,14 +7002,7 @@ impl AhjoorEscrowContract {
         if now > request.expires_at {
             escrow.status = EscrowStatus::Active;
             Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
-            env.storage()
-                .persistent()
-                .set(&DataKey::Escrow(escrow_id), &escrow);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &escrow);
             env.storage()
                 .persistent()
                 .remove(&DataKey::CancellationRequest(escrow_id));
@@ -7192,14 +7065,7 @@ impl AhjoorEscrowContract {
         Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
         // Burn any associated receipt on cancellation accepted
         Self::burn_receipt_if_exists(&env, escrow_id);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage()
             .persistent()
             .remove(&DataKey::CancellationRequest(escrow_id));
@@ -7241,14 +7107,7 @@ impl AhjoorEscrowContract {
 
         escrow.status = EscrowStatus::Active;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage()
             .persistent()
             .remove(&DataKey::CancellationRequest(escrow_id));
@@ -7285,14 +7144,7 @@ impl AhjoorEscrowContract {
 
         escrow.status = EscrowStatus::Active;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage()
             .persistent()
             .remove(&DataKey::CancellationRequest(escrow_id));
@@ -7401,14 +7253,7 @@ impl AhjoorEscrowContract {
             top_up_acknowledged: false,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         let submissions_key = DataKey2::BountySubmissions(escrow_id);
         env.storage().persistent().set(&submissions_key, &Vec::<BountySubmission>::new(&env));
@@ -7481,14 +7326,7 @@ impl AhjoorEscrowContract {
         escrow.seller = solver.clone();
         escrow.status = EscrowStatus::BountyClaimed;
         Self::record_status_history(&env, escrow_id, EscrowStatus::BountyClaimed);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         // Update bounty data
         bounty_data.solver = Some(solver.clone());
@@ -7612,14 +7450,7 @@ impl AhjoorEscrowContract {
         // Update escrow status
         escrow.status = EscrowStatus::Released;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_bounty_awarded(&env, escrow_id, solver, amount);
 
@@ -7669,14 +7500,7 @@ impl AhjoorEscrowContract {
         escrow.seller = env.current_contract_address();
         escrow.status = EscrowStatus::BountyUnclaimed;
         Self::record_status_history(&env, escrow_id, EscrowStatus::BountyUnclaimed);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         // Update bounty data
         bounty_data.solver = None;
@@ -7744,14 +7568,7 @@ impl AhjoorEscrowContract {
         // Update escrow status
         escrow.status = EscrowStatus::Refunded;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_bounty_cancelled(&env, escrow_id, buyer, refund_amount);
 
@@ -7937,14 +7754,7 @@ impl AhjoorEscrowContract {
             top_up_acknowledged: false,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         // Store bounty metadata so the standard claim flow (claim_bounty) applies.
         let bounty_data = BountyData {
@@ -8144,14 +7954,7 @@ impl AhjoorEscrowContract {
         if all_paid {
             escrow.status = EscrowStatus::Released;
             Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
-            env.storage()
-                .persistent()
-                .set(&DataKey::Escrow(escrow_id), &escrow);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &escrow);
         }
 
         env.storage()
@@ -8370,16 +8173,14 @@ impl AhjoorEscrowContract {
             if Self::is_open_escrow_status(escrow.status) {
                 escrow.status = EscrowStatus::UnderCollateralized;
                 Self::record_status_history(&env, escrow_id, EscrowStatus::UnderCollateralized);
-                env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
-                env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+                Self::save_escrow(&env, escrow_id, &escrow);
             }
             events::emit_collateral_health_alert(&env, escrow_id, current_ratio_bps, min_ratio_bps);
         } else if escrow.status == EscrowStatus::UnderCollateralized {
             // Restore to Active if health recovered
             escrow.status = EscrowStatus::Active;
             Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
-            env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
-            env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+            Self::save_escrow(&env, escrow_id, &escrow);
         }
 
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -8437,8 +8238,7 @@ impl AhjoorEscrowContract {
             }
         }
 
-        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_collateral_deposited(&env, escrow_id, provider, amount);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -8618,14 +8418,7 @@ impl AhjoorEscrowContract {
             Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
             Self::burn_receipt_if_exists(&env, escrow_id);
 
-            env.storage()
-                .persistent()
-                .set(&DataKey::Escrow(escrow_id), &released);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &released);
         }
 
         env.storage()
@@ -8852,26 +8645,12 @@ impl AhjoorEscrowContract {
             updated_escrow.status = EscrowStatus::Released;
             Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
             Self::burn_receipt_if_exists(&env, escrow_id);
-            env.storage()
-                .persistent()
-                .set(&DataKey::Escrow(escrow_id), &updated_escrow);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &updated_escrow);
         } else {
             let mut updated_escrow = escrow.clone();
             updated_escrow.status = EscrowStatus::PartiallyReleased;
             Self::record_status_history(&env, escrow_id, EscrowStatus::PartiallyReleased);
-            env.storage()
-                .persistent()
-                .set(&DataKey::Escrow(escrow_id), &updated_escrow);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &updated_escrow);
         }
 
         env.storage()
@@ -8952,14 +8731,7 @@ impl AhjoorEscrowContract {
         } else {
             EscrowStatus::PartiallyReleased
         };
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &updated_escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &updated_escrow);
 
         events::emit_scheduled_release_executed(
             &env,
@@ -9173,14 +8945,7 @@ impl AhjoorEscrowContract {
         let old_deadline = escrow.deadline;
         escrow.deadline = new_deadline;
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_deadline_extended_by_buyer(
             &env,
@@ -9598,6 +9363,52 @@ impl AhjoorEscrowContract {
             .instance()
             .set(&DataKey::EscrowCounter, &counter);
         id
+    }
+
+    fn next_multi_asset_escrow_id(env: &Env) -> u32 {
+        let mut counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::MultiAssetEscrowCounter)
+            .unwrap_or(0);
+        let id = counter;
+        counter += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey3::MultiAssetEscrowCounter, &counter);
+        id
+    }
+
+    /// Transfer every asset in a multi-asset escrow from the contract to its
+    /// seller(s), splitting each asset by seller bps share. The first seller
+    /// absorbs integer-division dust, matching `transfer_to_sellers`.
+    fn transfer_multi_asset_to_sellers(env: &Env, escrow: &MultiAssetEscrow) {
+        for i in 0..escrow.assets.len() {
+            let asset = escrow.assets.get(i).unwrap();
+            let client = token::Client::new(env, &asset.token);
+
+            if escrow.sellers.len() <= 1 {
+                let recipient = escrow.sellers.get(0).unwrap().0;
+                client.transfer(&env.current_contract_address(), &recipient, &asset.amount);
+                continue;
+            }
+
+            let mut distributed: i128 = 0;
+            for j in 1..escrow.sellers.len() {
+                let (addr, bps) = escrow.sellers.get(j).unwrap();
+                let share = (asset.amount * bps as i128) / 10_000;
+                if share > 0 {
+                    client.transfer(&env.current_contract_address(), &addr, &share);
+                }
+                distributed += share;
+            }
+
+            let (first_seller, _) = escrow.sellers.get(0).unwrap();
+            let first_share = asset.amount - distributed;
+            if first_share > 0 {
+                client.transfer(&env.current_contract_address(), &first_seller, &first_share);
+            }
+        }
     }
 
     fn next_receipt_id(env: &Env) -> u32 {
@@ -10027,14 +9838,7 @@ impl AhjoorEscrowContract {
             escrow.extensions.collateral_forfeit_bps = collateral_forfeit_bps;
             escrow.extensions.collateral_deposit_deadline = deposit_deadline;
             escrow.extensions.collateral_amount = collateral_amount;
-            env.storage()
-                .persistent()
-                .set(&DataKey::Escrow(escrow_id), &escrow);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &escrow);
         }
         env.storage()
             .instance()
@@ -10074,14 +9878,7 @@ impl AhjoorEscrowContract {
         );
         escrow.status = EscrowStatus::Active;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         events::emit_collateral_deposited(&env, escrow_id, seller, collateral);
         env.storage()
             .instance()
@@ -10184,14 +9981,7 @@ impl AhjoorEscrowContract {
         Self::transfer_to_sellers(&env, &escrow, total, escrow_id);
         escrow.status = EscrowStatus::Released;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -10365,14 +10155,7 @@ impl AhjoorEscrowContract {
         Self::update_dispute_count(&env, old_status, EscrowStatus::Active);
 
         Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage()
             .persistent()
             .remove(&DataKey2::SellerTransferProposal(escrow_id));
@@ -10506,14 +10289,7 @@ impl AhjoorEscrowContract {
         Self::transfer_to_buyers(&env, &escrow, amount, escrow_id);
         escrow.status = EscrowStatus::Refunded;
         Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         events::emit_veto_overridden(&env, escrow_id, admin, elapsed);
         env.storage()
             .instance()
@@ -10546,14 +10322,7 @@ impl AhjoorEscrowContract {
         Self::update_dispute_count(&env, old_status, EscrowStatus::Active);
 
         Self::record_status_history(&env, escrow_id, EscrowStatus::Active);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage()
             .persistent()
             .remove(&DataKey2::SellerTransferProposal(escrow_id));
@@ -10605,14 +10374,7 @@ impl AhjoorEscrowContract {
         Self::update_dispute_count(&env, old_status, EscrowStatus::AwaitingBuyerVetoDecision);
         
         Self::record_status_history(&env, escrow_id, EscrowStatus::AwaitingBuyerVetoDecision);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         events::emit_seller_transfer_proposed(&env, escrow_id, seller, new_seller, veto_deadline);
         env.storage()
             .instance()
@@ -10643,14 +10405,7 @@ impl AhjoorEscrowContract {
         Self::update_dispute_count(&env, old_status, EscrowStatus::Refunded);
         
         Self::record_status_history(&env, escrow_id, EscrowStatus::Refunded);
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
         env.storage()
             .persistent()
             .remove(&DataKey2::SellerTransferProposal(escrow_id));
@@ -10939,14 +10694,7 @@ impl AhjoorEscrowContract {
         if all_terminal {
             escrow.status = EscrowStatus::Released;
             Self::record_status_history(&env, escrow_id, EscrowStatus::Released);
-            env.storage()
-                .persistent()
-                .set(&DataKey::Escrow(escrow_id), &escrow);
-            env.storage().persistent().extend_ttl(
-                &DataKey::Escrow(escrow_id),
-                PERSISTENT_LIFETIME_THRESHOLD,
-                PERSISTENT_BUMP_AMOUNT,
-            );
+            Self::save_escrow(&env, escrow_id, &escrow);
         }
 
         events::emit_milestone_approved(&env, escrow_id, milestone_index, amount_released);
@@ -11153,14 +10901,7 @@ impl AhjoorEscrowContract {
         escrow.top_up_history.push_back(topup_entry);
         escrow.top_up_acknowledged = false;
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         env.storage()
             .persistent()
@@ -11226,14 +10967,7 @@ impl AhjoorEscrowContract {
         Self::record_status_history(&env, escrow_id, EscrowStatus::Abandoned);
         Self::burn_receipt_if_exists(&env, escrow_id);
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Escrow(escrow_id), &escrow);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Escrow(escrow_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::save_escrow(&env, escrow_id, &escrow);
 
         events::emit_abandonment_bond_claimed(&env, escrow_id, escrow.seller.clone(), bond);
 
@@ -11436,6 +11170,209 @@ impl AhjoorEscrowContract {
         }
     }
 
+    // ── Multi-Asset Escrow ───────────────────────────────────────────────────
+
+    /// Create an escrow that locks several distinct tokens at once under one
+    /// buyer/seller agreement. Funds for every asset in `assets` are pulled
+    /// from the buyer immediately. Release and refund act on all assets
+    /// together (all-or-nothing settlement).
+    ///
+    /// `sellers` must be empty (single-seller mode, wrapped at 10 000 bps) or
+    /// a list of up to 5 `(address, bps)` pairs summing to exactly 10 000 bps.
+    pub fn create_multi_asset_escrow(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        sellers: Vec<(Address, u32)>,
+        arbiter: Address,
+        assets: Vec<AssetAllocation>,
+        deadline: u64,
+        metadata_hash: Option<BytesN<32>>,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        if deadline <= env.ledger().timestamp() {
+            panic_with_error!(&env, EscrowError::DeadlineMustBeFuture);
+        }
+
+        if assets.is_empty() {
+            panic_with_error!(&env, EscrowErrorExt5::AssetListCannotBeEmpty);
+        }
+        if assets.len() > MAX_ASSETS_PER_MULTI_ASSET_ESCROW {
+            panic_with_error!(&env, EscrowErrorExt5::TooManyAssetsInEscrow);
+        }
+
+        let mut seen_tokens: Vec<Address> = Vec::new(&env);
+        for i in 0..assets.len() {
+            let asset = assets.get(i).unwrap();
+            if asset.amount <= 0 {
+                panic_with_error!(&env, EscrowErrorExt5::AssetAmountMustBePositive);
+            }
+            if seen_tokens.contains(&asset.token) {
+                panic_with_error!(&env, EscrowErrorExt5::DuplicateTokenInAssetList);
+            }
+            seen_tokens.push_back(asset.token.clone());
+        }
+
+        let resolved_sellers: Vec<(Address, u32)> = if sellers.is_empty() {
+            let mut v = Vec::new(&env);
+            v.push_back((seller.clone(), 10_000u32));
+            v
+        } else {
+            if sellers.len() > 5 {
+                panic_with_error!(&env, EscrowError::Maximum5SellersAllowed);
+            }
+            let mut total_bps: u32 = 0;
+            for i in 0..sellers.len() {
+                let (_, bps) = sellers.get(i).unwrap();
+                total_bps += bps;
+            }
+            if total_bps != 10_000 {
+                panic_with_error!(&env, EscrowError::SellerAllocationsMustSumTo10000Bps);
+            }
+            sellers
+        };
+
+        // Pull every asset from the buyer into the contract.
+        for i in 0..assets.len() {
+            let asset = assets.get(i).unwrap();
+            let token_client = token::Client::new(&env, &asset.token);
+            token_client.transfer(&buyer, &env.current_contract_address(), &asset.amount);
+        }
+
+        let escrow_id = Self::next_multi_asset_escrow_id(&env);
+        let now = env.ledger().timestamp();
+
+        let escrow = MultiAssetEscrow {
+            id: escrow_id,
+            buyer: buyer.clone(),
+            arbiter: arbiter.clone(),
+            assets: assets.clone(),
+            sellers: resolved_sellers,
+            status: EscrowStatus::Active,
+            created_at: now,
+            deadline,
+            metadata_hash,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::MultiAssetEscrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::MultiAssetEscrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_multi_asset_escrow_created(
+            &env,
+            escrow_id,
+            buyer,
+            arbiter,
+            assets.len(),
+            deadline,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        escrow_id
+    }
+
+    /// Release every asset in a multi-asset escrow to its seller(s), split by
+    /// each seller's bps share. Callable by the buyer or the arbiter.
+    pub fn release_multi_asset_escrow(env: Env, caller: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        caller.require_auth();
+
+        let mut escrow: MultiAssetEscrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::MultiAssetEscrow(escrow_id))
+            .expect("Multi-asset escrow not found");
+
+        if escrow.status != EscrowStatus::Active {
+            panic_with_error!(&env, EscrowErrorExt5::MultiAssetEscrowNotActive);
+        }
+        if caller != escrow.buyer && caller != escrow.arbiter {
+            panic_with_error!(&env, EscrowErrorExt5::OnlyBuyerOrArbiterCanReleaseMultiAssetEscrow);
+        }
+
+        Self::transfer_multi_asset_to_sellers(&env, &escrow);
+
+        escrow.status = EscrowStatus::Released;
+        env.storage()
+            .persistent()
+            .set(&DataKey3::MultiAssetEscrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::MultiAssetEscrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_multi_asset_escrow_released(&env, escrow_id, escrow.assets.len());
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Refund every asset in a multi-asset escrow back to the buyer.
+    /// The arbiter may refund at any time; the buyer may self-refund only
+    /// after the escrow's deadline has passed.
+    pub fn refund_multi_asset_escrow(env: Env, caller: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        caller.require_auth();
+
+        let mut escrow: MultiAssetEscrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::MultiAssetEscrow(escrow_id))
+            .expect("Multi-asset escrow not found");
+
+        if escrow.status != EscrowStatus::Active {
+            panic_with_error!(&env, EscrowErrorExt5::MultiAssetEscrowNotActive);
+        }
+        if caller != escrow.buyer && caller != escrow.arbiter {
+            panic_with_error!(&env, EscrowErrorExt5::OnlyBuyerOrArbiterCanRefundMultiAssetEscrow);
+        }
+        if caller == escrow.buyer && env.ledger().timestamp() < escrow.deadline {
+            panic_with_error!(&env, EscrowErrorExt5::RefundNotYetAvailableBeforeDeadline);
+        }
+
+        for i in 0..escrow.assets.len() {
+            let asset = escrow.assets.get(i).unwrap();
+            let token_client = token::Client::new(&env, &asset.token);
+            token_client.transfer(&env.current_contract_address(), &escrow.buyer, &asset.amount);
+        }
+
+        escrow.status = EscrowStatus::Refunded;
+        env.storage()
+            .persistent()
+            .set(&DataKey3::MultiAssetEscrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::MultiAssetEscrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_multi_asset_escrow_refunded(&env, escrow_id, escrow.assets.len());
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Fetch a multi-asset escrow by ID.
+    pub fn get_multi_asset_escrow(env: Env, escrow_id: u32) -> MultiAssetEscrow {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::MultiAssetEscrow(escrow_id))
+            .expect("Multi-asset escrow not found")
+    }
+
 }
 
 #[cfg(test)]
@@ -11496,3 +11433,6 @@ mod test_response_reminders;
 
 #[cfg(test)]
 mod test_extend_deadline;
+
+#[cfg(test)]
+mod test_multi_asset_escrow;

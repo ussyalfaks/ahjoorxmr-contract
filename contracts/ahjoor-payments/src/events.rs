@@ -2272,99 +2272,213 @@ pub fn emit_settled_payment_refunded(
     SettledPaymentRefunded { payment_id, merchant, amount, from_reserve }.publish(e);
 }
 
-// ===========================================================================
-//  Split Bill events (#split-bill)
-// ===========================================================================
+// --- #1163: Settlement batch records ---
 
-/// A new split bill was created by a merchant.
+/// Event: a settlement batch was recorded for merchant reconciliation.
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct SplitBillCreated {
-    pub bill_id: u32,
+pub struct SettlementBatchRecorded {
+    pub batch_id: u32,
     pub merchant: Address,
-    pub token: Address,
-    pub total: i128,
-    pub expiry: u64,
+    pub payment_count: u32,
+    pub gross: i128,
+    pub fees: i128,
+    pub net: i128,
 }
-pub fn emit_split_bill_created(
+
+pub fn emit_settlement_batch_recorded(
     e: &Env,
-    bill_id: u32,
+    batch_id: u32,
     merchant: Address,
-    token: Address,
-    total: i128,
-    expiry: u64,
+    payment_count: u32,
+    gross: i128,
+    fees: i128,
+    net: i128,
 ) {
-    SplitBillCreated { bill_id, merchant, token, total, expiry }.publish(e);
+    SettlementBatchRecorded {
+        batch_id,
+        merchant,
+        payment_count,
+        gross,
+        fees,
+        net,
+    }
+    .publish(e);
 }
 
-/// One participant paid their share.
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct SplitBillSharePaid {
-    pub bill_id: u32,
-    pub customer: Address,
-    /// Running total funded so far (including this payment).
-    pub funded: i128,
-    pub total: i128,
-}
-pub fn emit_split_bill_share_paid(
-    e: &Env,
-    bill_id: u32,
-    customer: Address,
-    funded: i128,
-    total: i128,
-) {
-    SplitBillSharePaid { bill_id, customer, funded, total }.publish(e);
-}
+// --- #1165: Price-lock quotes ---
 
-/// All shares were paid and the merchant received the full amount.
+/// Event: merchant opened an oracle-priced checkout.
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct SplitBillCompleted {
-    pub bill_id: u32,
+pub struct OraclePricedPaymentCreated {
+    pub payment_id: u32,
     pub merchant: Address,
+    pub customer: Address,
+    pub amount_usdc: i128,
+    pub payment_token: Address,
+}
+
+pub fn emit_oracle_priced_payment_created(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    customer: Address,
+    amount_usdc: i128,
+    payment_token: Address,
+) {
+    OraclePricedPaymentCreated {
+        payment_id,
+        merchant,
+        customer,
+        amount_usdc,
+        payment_token,
+    }
+    .publish(e);
+}
+
+/// Event: merchant issued a price-lock quote.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PriceQuoteCreated {
+    pub payment_id: u32,
+    pub rate: i128,
+    pub oracle_rate: i128,
+    pub expiry_ledger: u32,
+}
+
+pub fn emit_price_quote_created(
+    e: &Env,
+    payment_id: u32,
+    rate: i128,
+    oracle_rate: i128,
+    expiry_ledger: u32,
+) {
+    PriceQuoteCreated {
+        payment_id,
+        rate,
+        oracle_rate,
+        expiry_ledger,
+    }
+    .publish(e);
+}
+
+/// Event: customer paid an oracle-priced payment.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct OraclePricedPaymentPaid {
+    pub payment_id: u32,
+    pub rate: i128,
+    pub token_amount: i128,
+    pub used_quote: bool,
+}
+
+pub fn emit_oracle_priced_payment_paid(
+    e: &Env,
+    payment_id: u32,
+    rate: i128,
+    token_amount: i128,
+    used_quote: bool,
+) {
+    OraclePricedPaymentPaid {
+        payment_id,
+        rate,
+        token_amount,
+        used_quote,
+    }
+    .publish(e);
+}
+
+// --- #1167: Security deposits ---
+
+/// Event: a security deposit was escrowed.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SecurityDepositCreated {
+    pub deposit_id: u32,
+    pub merchant: Address,
+    pub customer: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub return_by: u32,
+}
+
+pub fn emit_security_deposit_created(
+    e: &Env,
+    deposit_id: u32,
+    merchant: Address,
+    customer: Address,
+    token: Address,
+    amount: i128,
+    return_by: u32,
+) {
+    SecurityDepositCreated {
+        deposit_id,
+        merchant,
+        customer,
+        token,
+        amount,
+        return_by,
+    }
+    .publish(e);
+}
+
+/// Event: merchant proposed itemized deductions against a deposit.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DepositDeductionsClaimed {
+    pub deposit_id: u32,
+    pub item_count: u32,
     pub total: i128,
 }
-pub fn emit_split_bill_completed(e: &Env, bill_id: u32, merchant: Address, total: i128) {
-    SplitBillCompleted { bill_id, merchant, total }.publish(e);
+
+pub fn emit_deposit_deductions_claimed(e: &Env, deposit_id: u32, item_count: u32, total: i128) {
+    DepositDeductionsClaimed {
+        deposit_id,
+        item_count,
+        total,
+    }
+    .publish(e);
 }
 
-/// The bill expired; paid shares were refunded.
+/// Event: customer disputed the proposed deductions.
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct SplitBillRefunded {
-    pub bill_id: u32,
-    /// Amount that was funded (and now refunded) at expiry.
-    pub refunded_amount: i128,
-}
-pub fn emit_split_bill_refunded(e: &Env, bill_id: u32, refunded_amount: i128) {
-    SplitBillRefunded { bill_id, refunded_amount }.publish(e);
+pub struct DepositDeductionsDisputed {
+    pub deposit_id: u32,
+    pub customer: Address,
 }
 
-// ===========================================================================
-//  Subscription Seat events (#sub-seats)
-// ===========================================================================
+pub fn emit_deposit_deductions_disputed(e: &Env, deposit_id: u32, customer: Address) {
+    DepositDeductionsDisputed {
+        deposit_id,
+        customer,
+    }
+    .publish(e);
+}
 
-/// A seat was added to a subscription plan immediately.
+/// Event: a security deposit was closed and paid out.
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct SeatAdded {
-    pub subscription_id: u32,
-    pub plan_id: u32,
-    pub seat: Address,
-}
-pub fn emit_seat_added(e: &Env, subscription_id: u32, plan_id: u32, seat: Address) {
-    SeatAdded { subscription_id, plan_id, seat }.publish(e);
+pub struct SecurityDepositClosed {
+    pub deposit_id: u32,
+    pub status: crate::SecurityDepositStatus,
+    pub to_merchant: i128,
+    pub to_customer: i128,
 }
 
-/// A seat was scheduled for removal at the next billing period.
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct SeatRemovalScheduled {
-    pub subscription_id: u32,
-    pub plan_id: u32,
-    pub seat: Address,
-}
-pub fn emit_seat_removal_scheduled(e: &Env, subscription_id: u32, plan_id: u32, seat: Address) {
-    SeatRemovalScheduled { subscription_id, plan_id, seat }.publish(e);
+pub fn emit_security_deposit_closed(
+    e: &Env,
+    deposit_id: u32,
+    status: crate::SecurityDepositStatus,
+    to_merchant: i128,
+    to_customer: i128,
+) {
+    SecurityDepositClosed {
+        deposit_id,
+        status,
+        to_merchant,
+        to_customer,
+    }
+    .publish(e);
 }
