@@ -13,6 +13,8 @@ reference docs for the repository, grouped by contract.
 - [**Multi-Token Invoice in ahjoor-payments**](multi-token-invoice.md) — Invoices payable in any combination of accepted tokens, per-token conversion rates, partial payment tracking, and batch settlement.
 - [**Merchant KYB Verification**](merchant-kyb.md) — Setting, renewing and revoking merchant KYB status, and how KYB enforcement gates merchant activity.
 - [**DAO Mediation**](dao-mediation.md) — Routing unresolved payment disputes to a DAO mediator panel, member voting, and verdict execution after the voting window.
+- [**Merchant Withdrawal Queue and Limits in ahjoor-payments**](payments-withdrawals.md) — FIFO withdrawal queue ordering and prioritisation, rolling withdrawal rate-limit windows, default limits, merchant limits and admin overrides.
+- [**Vouchers, External IDs and Multisig Payment Approval in ahjoor-payments**](payments-vouchers-and-approvals.md) — Voucher discounts with `max_uses` and expiry, per-merchant external ID uniqueness and lookup, and m-of-n co-signer approval for high-value payments.
 
 ---
 

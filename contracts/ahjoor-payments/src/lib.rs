@@ -13705,3 +13705,5 @@ pub use events::*;
 mod test_split_bill;
 #[cfg(test)]
 mod test_subscription_seats;
+#[cfg(test)]
+mod test_payment_request_tip_split;
