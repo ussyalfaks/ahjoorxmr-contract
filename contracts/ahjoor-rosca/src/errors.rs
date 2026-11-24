@@ -344,6 +344,11 @@ pub enum ExtError3 {
     HardshipAlreadyUsedThisCycle = 181,
     /// The emergency reserve cannot cover the requested shortfall.
     InsufficientReserveForHardship = 182,
+    // ── Vote of No Confidence (#1122) ────────────────────────────────────────
+    /// The nominee must be an active member and must not be the current admin.
+    InvalidNoConfidenceNominee = 183,
+    /// The outgoing admin may not vote on a NoConfidence proposal.
+    AdminCannotVoteOnNoConfidence = 184,
 }
 
 /// Extension error codes 183+ — overflow from ExtError3 (50-variant limit).

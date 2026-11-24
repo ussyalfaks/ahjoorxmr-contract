@@ -319,23 +319,16 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
                 vesting::vest_payout(env, &payout_recipient, payout_amount, current_round);
                 record_member_payout(env, &payout_recipient, current_round, &token_addr, payout_amount);
             } else if payout_amount > 0 {
-                // Transfer payout to the nominated beneficiary, or the recipient
-                // themselves when no beneficiary is set.
-                let payout_destination: Address = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey5::PayoutBeneficiary(payout_recipient.clone()))
-                    .unwrap_or(payout_recipient.clone());
-                client.transfer(&env.current_contract_address(), &payout_destination, &payout_amount);
-                record_member_payout(env, &payout_recipient, current_round, &token_addr, payout_amount);
-                events::emit_payout_delivered(
+                // Honour payout splits, or route the whole payout to the
+                // nominated beneficiary (or the recipient themselves).
+                payout_split::deliver(
                     env,
                     current_round,
-                    payout_recipient.clone(),
-                    payout_destination,
-                    token_addr.clone(),
+                    &payout_recipient,
+                    &token_addr,
                     payout_amount,
                 );
+                record_member_payout(env, &payout_recipient, current_round, &token_addr, payout_amount);
             }
 
             // Transfer fee to fee recipient
@@ -792,6 +785,8 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
             events::emit_reset(env, current_round);
             return;
         }
+        // Apply any governance-approved contribution amount for this cycle.
+        contribution_amount::apply_pending(env, cycle_number, new_round);
         let members: Vec<Address> = env
             .storage()
             .instance()

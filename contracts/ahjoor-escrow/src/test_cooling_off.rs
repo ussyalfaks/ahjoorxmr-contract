@@ -317,3 +317,145 @@ fn test_flag_resolution_error_split_verdict_both_parties_may_flag() {
     );
     // (A second flag from seller would hit ResolutionAlreadyFlagged, not the losing-party guard.)
 }
+
+// ---------------------------------------------------------------------------
+// Additional Tests
+// ---------------------------------------------------------------------------
+
+/// Test: Multiple sequential flag attempts by same party should fail
+#[test]
+fn test_duplicate_flag_by_same_party_rejected() {
+    let (env, client, admin, buyer, _seller, arbiter, _token_addr, _token_client, _) = setup_cooling_off();
+    let escrow_id = 0u32;
+    let cooling_off = 3600u64;
+
+    client.set_resolution_cooloff_secs(&admin, &cooling_off);
+    // Buyer wins (100%), so seller loses and can flag
+    client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
+
+    let reason = BytesN::from_array(&env, &[5u8; 32]);
+    
+    // First flag by losing seller succeeds
+    let seller = client.get_escrow(&escrow_id).seller;
+    client.flag_resolution_error(&seller, &escrow_id, &reason);
+
+    // Second flag by same party should fail
+    let err = client
+        .try_flag_resolution_error(&seller, &escrow_id, &reason)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, EscrowErrorExt::ResolutionAlreadyFlagged.into());
+}
+
+/// Test: Admin cannot clear flag if escrow not in CoolingOff status
+#[test]
+fn test_clear_flag_requires_cooling_off_status() {
+    let (env, client, admin, buyer, _seller, _arbiter, _token_addr, _token_client, _) = setup_cooling_off();
+    let escrow_id = 0u32;
+
+    // Escrow is in Disputed status (from setup), not CoolingOff
+    let reason = BytesN::from_array(&env, &[6u8; 32]);
+    
+    // Attempting to clear flag when not in CoolingOff should fail
+    let err = client
+        .try_clear_resolution_flag(&admin, &escrow_id)
+        .unwrap_err()
+        .unwrap();
+    
+    // This should fail because the escrow isn't in CoolingOff state yet
+    assert!(err != 0); // Verify some error occurred
+}
+
+/// Test: Cooling-off window with zero duration still requires explicit finalization
+#[test]
+fn test_zero_cooling_off_requires_finalize_call() {
+    let (env, client, admin, buyer, _seller, arbiter, _token_addr, token_client, _) = setup_cooling_off();
+    let escrow_id = 0u32;
+    
+    // Set cooling-off to 1 second (minimal but non-zero)
+    client.set_resolution_cooloff_secs(&admin, &1u64);
+    
+    let buyer_bal_before = token_client.balance(&buyer);
+    client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
+
+    // Should be in CoolingOff status
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::CoolingOff);
+    
+    // Funds not yet transferred
+    assert_eq!(token_client.balance(&buyer), buyer_bal_before);
+    
+    // Advance time by 1 second
+    env.ledger().with_mut(|l| l.timestamp += 2);
+    
+    // Must explicitly call finalize
+    client.finalize_resolution(&escrow_id);
+    
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Refunded);
+    assert_eq!(token_client.balance(&buyer), buyer_bal_before + 500);
+}
+
+/// Test: Arbiter or third party cannot flag resolution (only parties can)
+#[test]
+fn test_non_party_cannot_flag_resolution() {
+    let (env, client, admin, _buyer, _seller, arbiter, _token_addr, _token_client, _) = setup_cooling_off();
+    let escrow_id = 0u32;
+    let cooling_off = 3600u64;
+
+    client.set_resolution_cooloff_secs(&admin, &cooling_off);
+    // Split verdict so both parties could flag
+    client.resolve_dispute(&arbiter, &escrow_id, &50u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
+
+    let reason = BytesN::from_array(&env, &[7u8; 32]);
+    
+    // Arbiter (non-party) tries to flag — should fail
+    let err = client
+        .try_flag_resolution_error(&arbiter, &escrow_id, &reason)
+        .unwrap_err()
+        .unwrap();
+    
+    // Should fail because arbiter is not a party to the escrow
+    assert!(err != 0);
+    
+    // Random third party tries to flag
+    let random = Address::generate(&env);
+    let err = client
+        .try_flag_resolution_error(&random, &escrow_id, &reason)
+        .unwrap_err()
+        .unwrap();
+    
+    assert!(err != 0);
+}
+
+/// Test: Flagged resolution can be finalized after admin clearance, regardless of time
+#[test]
+fn test_flagged_resolution_cleared_before_window_expires() {
+    let (env, client, admin, _buyer, seller, arbiter, _token_addr, token_client, _) = setup_cooling_off();
+    let escrow_id = 0u32;
+    let cooling_off = 7200u64; // 2 hours
+
+    client.set_resolution_cooloff_secs(&admin, &cooling_off);
+    // Seller loses
+    client.resolve_dispute(&arbiter, &escrow_id, &100u32, &soroban_sdk::BytesN::from_array(&client.env, &[0u8; 32]));
+
+    let reason = BytesN::from_array(&env, &[8u8; 32]);
+    
+    // Losing seller flags immediately
+    client.flag_resolution_error(&seller, &escrow_id, &reason);
+    
+    // Admin reviews and clears flag after only 30 minutes (well before 2 hour window)
+    env.ledger().with_mut(|l| l.timestamp += 1800);
+    client.clear_resolution_flag(&admin, &escrow_id);
+    
+    // Should be able to finalize immediately after clearance, even though cooling-off hasn't expired
+    // (admin clearance overrides the waiting period)
+    let seller_bal_before = token_client.balance(&seller);
+    client.finalize_resolution(&escrow_id);
+    
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Refunded);
+    
+    // Verify funds were transferred correctly (100% to buyer means 0 to seller from escrow)
+    assert_eq!(token_client.balance(&seller), seller_bal_before);
+}

@@ -235,6 +235,25 @@ pub struct QuorumConfigUpdated {
     pub quorum_bps: u32,
 }
 
+/// Event: A contribution amount change was approved and scheduled.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContributionAmountScheduled {
+    pub proposal_id: u32,
+    pub amount: i128,
+    pub effective_cycle: u32,
+    pub effective_round: u32,
+}
+
+/// Event: The scheduled contribution amount took effect at a cycle boundary.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContributionAmountChanged {
+    pub amount: i128,
+    pub cycle: u32,
+    pub round: u32,
+}
+
 /// Event: Member removed via proposal execution
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -429,6 +448,33 @@ pub struct AdminTransferProposed {
 #[contractevent]
 #[derive(Clone, Debug)]
 pub struct AdminTransferred {
+    pub old_admin: Address,
+    pub new_admin: Address,
+}
+
+/// Event: A vote of no confidence was opened against the current admin
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NoConfidenceProposed {
+    pub proposal_id: u32,
+    pub proposer: Address,
+    pub nominee: Address,
+}
+
+/// Event: A vote was cast on a vote of no confidence
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NoConfidenceVoteCast {
+    pub proposal_id: u32,
+    pub voter: Address,
+    pub vote_for: bool,
+}
+
+/// Event: A vote of no confidence passed and the admin was replaced
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NoConfidenceExecuted {
+    pub proposal_id: u32,
     pub old_admin: Address,
     pub new_admin: Address,
 }
@@ -687,6 +733,31 @@ pub fn emit_quorum_config_updated(e: &Env, proposal_type: crate::ProposalType, q
     .publish(e);
 }
 
+pub fn emit_contribution_amount_change_scheduled(
+    e: &Env,
+    proposal_id: u32,
+    amount: i128,
+    effective_cycle: u32,
+    effective_round: u32,
+) {
+    ContributionAmountScheduled {
+        proposal_id,
+        amount,
+        effective_cycle,
+        effective_round,
+    }
+    .publish(e);
+}
+
+pub fn emit_contribution_amount_changed(e: &Env, amount: i128, cycle: u32, round: u32) {
+    ContributionAmountChanged {
+        amount,
+        cycle,
+        round,
+    }
+    .publish(e);
+}
+
 pub fn emit_mem_del(e: &Env, member: Address) {
     MemberRemovalExecuted { member }.publish(e);
 }
@@ -767,6 +838,43 @@ pub fn emit_admin_transfer_proposed(e: &Env, current_admin: Address, proposed_ad
 
 pub fn emit_admin_transferred(e: &Env, old_admin: Address, new_admin: Address) {
     AdminTransferred {
+        old_admin,
+        new_admin,
+    }
+    .publish(e);
+}
+
+pub fn emit_no_confidence_proposed(
+    e: &Env,
+    proposal_id: u32,
+    proposer: Address,
+    nominee: Address,
+) {
+    NoConfidenceProposed {
+        proposal_id,
+        proposer,
+        nominee,
+    }
+    .publish(e);
+}
+
+pub fn emit_no_confidence_vote_cast(e: &Env, proposal_id: u32, voter: Address, vote_for: bool) {
+    NoConfidenceVoteCast {
+        proposal_id,
+        voter,
+        vote_for,
+    }
+    .publish(e);
+}
+
+pub fn emit_no_confidence_executed(
+    e: &Env,
+    proposal_id: u32,
+    old_admin: Address,
+    new_admin: Address,
+) {
+    NoConfidenceExecuted {
+        proposal_id,
         old_admin,
         new_admin,
     }
@@ -2222,6 +2330,33 @@ pub struct PayoutBeneficiaryCleared {
 
 pub fn emit_payout_beneficiary_cleared(e: &Env, member: Address) {
     PayoutBeneficiaryCleared { member }.publish(e);
+}
+
+/// Event: A member configured payout splits across multiple recipients.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutSplitsSet {
+    pub member: Address,
+    pub split_count: u32,
+}
+
+pub fn emit_payout_splits_set(e: &Env, member: Address, split_count: u32) {
+    PayoutSplitsSet {
+        member,
+        split_count,
+    }
+    .publish(e);
+}
+
+/// Event: A member cleared their payout splits.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutSplitsCleared {
+    pub member: Address,
+}
+
+pub fn emit_payout_splits_cleared(e: &Env, member: Address) {
+    PayoutSplitsCleared { member }.publish(e);
 }
 
 /// Event: A round payout was delivered. `beneficiary` is the address that
