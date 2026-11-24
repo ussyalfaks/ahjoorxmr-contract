@@ -315,6 +315,7 @@ impl AhjoorPaymentsContract {
             external_id: None,
             tipping_enabled: false,
             extension_count: 0,
+            tax_collected: 0,
         };
         env.storage()
             .persistent()
