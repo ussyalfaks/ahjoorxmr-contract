@@ -66,7 +66,6 @@ mod test_slot_auction;
 mod test_tiers;
 mod test_token_whitelist;
 mod test_weighted_voting;
-// mod test_co_payer_split;        // source file not yet committed
 // mod test_contribution_receipts; // source file not yet committed
 mod clone_client;
 pub use clone_client::RoscaCloneClient;
@@ -13837,4 +13836,7 @@ mod test_ban_list;
 mod test_upcoming_payouts;
 mod test_member_payout_history;
 mod test_hardship_reduction;
+mod test_co_payer_splits;
+mod test_multi_token_rates;
+mod test_vote_delegation;
 pub use events::*;
