@@ -36,6 +36,9 @@ reference docs for the repository, grouped by contract.
 - [**On-Chain Audit Trail in ROSCA**](rosca-audit-trail.md) — Comprehensive cycle audit trail recording, contribution history pagination, retention window management, and archival lifecycle.
 - [**ROSCA Collective Savings Goals**](rosca-savings-goals.md) — Group-wide savings targets, progress tracking against the target, and goal finalization.
 - [**ROSCA Savings Milestone Rewards**](rosca-savings-milestone-rewards.md) — Automatic token rewards when savings goal milestones are crossed.
+- [**ROSCA Hardship Contribution Reduction**](rosca-hardship-reduction.md) — Requesting a one-round reduced contribution, approval and execution-time checks, and how the reserve-funded shortfall keeps the payout whole.
+- [**ROSCA Round Extension and Penalty Waiver**](rosca-round-extension-and-penalty-waiver.md) — `ExtendRound` and `WaivePenalty` proposals: the maximum extension, the once-per-cycle limit, penalty clear vs refund, and the quorum each uses.
+- [**ROSCA Ban List**](rosca-ban-list.md) — Who can ban (admin or `MemberBan` vote), every join path a ban blocks, waitlist/invite clean-up, and unbanning.
 
 ---
 

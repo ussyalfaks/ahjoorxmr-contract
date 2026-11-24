@@ -437,3 +437,25 @@ pub struct AssetIdentitySet {
 pub fn emit_asset_identity_set(e: &Env, token: Address, asset_code: soroban_sdk::String, issuer: Address) {
     AssetIdentitySet { token, asset_code, issuer }.publish(e);
 }
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CuratorAdded {
+    pub curator: Address,
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CuratorRemoved {
+    pub curator: Address,
+    pub admin: Address,
+}
+
+pub fn emit_curator_added(e: &Env, curator: Address, admin: Address) {
+    CuratorAdded { curator, admin }.publish(e);
+}
+
+pub fn emit_curator_removed(e: &Env, curator: Address, admin: Address) {
+    CuratorRemoved { curator, admin }.publish(e);
+}
