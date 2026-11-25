@@ -12,6 +12,13 @@ pub mod pre_approved_spending;
 pub mod pre_approved_spending_impl;
 pub mod customer_spend;
 pub mod fulfilment;
+// Disabled: a second, independent security-deposit implementation that
+// landed alongside `security_deposits` and redefines the same contract
+// functions (`create_security_deposit`, `claim_deductions`, ...), so the
+// crate cannot compile with both. `security_deposits` is the one that is
+// re-exported and covered by wired tests; reconcile the two before
+// re-enabling this module.
+#[cfg(any())]
 pub mod security_deposit;
 pub mod withdrawal_policy;
 
@@ -1351,6 +1358,22 @@ pub enum DataKey3 {
     PaymentRequestPayment(u32),
     /// Persistent: per-merchant sales-tax configuration (tax_bps + tax_address).
     MerchantTax(Address),
+
+    // --- Split Bill keys (#split-bill) ---
+    /// Instance: monotonically incrementing split bill counter.
+    SplitBillCounter,
+    /// Persistent: split bill header record (bill_id → SplitBill).
+    SplitBill(u32),
+    /// Persistent: list of per-participant shares (bill_id → Vec<SplitBillShare>).
+    SplitBillShares(u32),
+
+    // --- Subscription seat keys (#sub-seats) ---
+    /// Persistent: current active seats for a plan in this billing period
+    /// (plan_id → Vec<Address>).
+    PlanSeats(u32),
+    /// Persistent: seats queued for removal at next period start
+    /// (plan_id → Vec<Address>).
+    PlanPendingSeatRemoval(u32),
 }
 
 /// Per-merchant sales-tax configuration.
@@ -1392,6 +1415,8 @@ pub enum DataKey4 {
     PaymentBeneficiary(u32),
     /// Instance: absolute min/max protocol fee configured for a token
     TokenFeeCaps(Address),
+    /// Instance: global `ahjoor-pause-registry` consulted by `require_not_paused`.
+    PauseRegistry,
 }
 
 mod price_quotes;
@@ -7437,6 +7462,20 @@ impl AhjoorPaymentsContract {
             .unwrap_or(String::from_str(&env, ""))
     }
 
+    /// Admin: set (or clear) the global `ahjoor-pause-registry`. While the
+    /// registry is paused, state changes are blocked here as well.
+    pub fn set_pause_registry(env: Env, admin: Address, registry: Option<Address>) {
+        Self::require_admin(&env, &admin);
+        match registry {
+            Some(r) => env.storage().instance().set(&DataKey4::PauseRegistry, &r),
+            None => env.storage().instance().remove(&DataKey4::PauseRegistry),
+        }
+    }
+
+    pub fn get_pause_registry(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey4::PauseRegistry)
+    }
+
     // --- Merchant Withdrawal Queue (#126) ---
 
     /// Process up to max_count entries from the merchant's withdrawal queue.
@@ -7575,6 +7614,12 @@ impl AhjoorPaymentsContract {
             .unwrap_or(false)
         {
             panic!("Contract is paused");
+        }
+        if ahjoor_common::pause_registry::is_globally_paused(
+            env,
+            env.storage().instance().get(&DataKey4::PauseRegistry),
+        ) {
+            panic!("Protocol is paused");
         }
     }
 
@@ -13705,3 +13750,5 @@ pub use events::*;
 mod test_split_bill;
 #[cfg(test)]
 mod test_subscription_seats;
+#[cfg(test)]
+mod test_payment_request_tip_split;

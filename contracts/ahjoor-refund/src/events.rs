@@ -1662,3 +1662,87 @@ pub fn emit_installment_missed(
     }
     .publish(e);
 }
+
+// --- #1170: Refunds paid in a customer-preferred token ---
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundSwapRouterSet {
+    pub router: Option<Address>,
+}
+
+pub fn emit_refund_swap_router_set(e: &Env, router: Option<Address>) {
+    RefundSwapRouterSet { router }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundSwapMaxSlippageSet {
+    pub max_slippage_bps: u32,
+}
+
+pub fn emit_refund_swap_max_slippage_set(e: &Env, max_slippage_bps: u32) {
+    RefundSwapMaxSlippageSet { max_slippage_bps }.publish(e);
+}
+
+/// Customer asked to be refunded in `preferred_token` instead of `token`.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundPreferredTokenSet {
+    pub refund_id: u32,
+    pub token: Address,
+    pub preferred_token: Address,
+}
+
+pub fn emit_refund_preferred_token_set(
+    e: &Env,
+    refund_id: u32,
+    token: Address,
+    preferred_token: Address,
+) {
+    RefundPreferredTokenSet { refund_id, token, preferred_token }.publish(e);
+}
+
+/// Refund was swapped and paid in the customer's preferred token.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundPaidInPreferredToken {
+    pub refund_id: u32,
+    pub token_in: Address,
+    pub token_out: Address,
+    pub amount_in: i128,
+    pub amount_out: i128,
+}
+
+pub fn emit_refund_paid_in_preferred_token(
+    e: &Env,
+    refund_id: u32,
+    token_in: Address,
+    token_out: Address,
+    amount_in: i128,
+    amount_out: i128,
+) {
+    RefundPaidInPreferredToken { refund_id, token_in, token_out, amount_in, amount_out }.publish(e);
+}
+
+/// Preferred-token swap could not be performed; refund paid in the original token.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundSwapFailed {
+    pub refund_id: u32,
+    pub token: Address,
+    pub preferred_token: Address,
+    pub amount: i128,
+    pub reason: Symbol,
+}
+
+pub fn emit_refund_swap_failed(
+    e: &Env,
+    refund_id: u32,
+    token: Address,
+    preferred_token: Address,
+    amount: i128,
+    reason: Symbol,
+) {
+    RefundSwapFailed { refund_id, token, preferred_token, amount, reason }.publish(e);
+}

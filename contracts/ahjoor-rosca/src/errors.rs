@@ -152,6 +152,15 @@ pub enum ExtError {
     NotContribDelegate = 86,
     /// Split proposal not found (#331).
     SplitProposalNotFound = 87,
+    // ── Curator Role for Governance ───────────────────────────────────────────
+    /// The address is already a curator.
+    CuratorAlreadyExists = 119,
+    /// No curator record found for this address.
+    CuratorNotFound = 120,
+    /// Curator has too many open proposals.
+    CuratorMaxProposalsReached = 121,
+    /// Curator is not active.
+    CuratorInactive = 122,
     /// Member list for split is invalid (overlap or missing members) (#331).
     SplitMembersInvalid = 88,
     /// Split confirmation window has closed (#331).

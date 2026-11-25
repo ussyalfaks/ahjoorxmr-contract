@@ -57,9 +57,7 @@ fn make_and_settle(s: &TaxSetup, customer: &Address, merchant: &Address, amount:
         &None,
     );
 
-    // Fund the contract (simulates customer paying into escrow)
-    s.token_client.transfer(customer, &s.client.address, &amount);
-
+    // `create_payment` has already pulled `amount` from the customer into escrow.
     s.client.complete_payment(&payment_id);
     payment_id
 }
