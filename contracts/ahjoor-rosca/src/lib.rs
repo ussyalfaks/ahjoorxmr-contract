@@ -66,7 +66,6 @@ mod test_slot_auction;
 mod test_tiers;
 mod test_token_whitelist;
 mod test_weighted_voting;
-// mod test_co_payer_split;        // source file not yet committed
 // mod test_contribution_receipts; // source file not yet committed
 mod clone_client;
 pub use clone_client::RoscaCloneClient;
