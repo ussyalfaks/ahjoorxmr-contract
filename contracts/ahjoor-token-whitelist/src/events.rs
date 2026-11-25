@@ -226,6 +226,7 @@ pub struct TokenDeprecated {
     pub token: Address,
     pub admin: Address,
     pub sunset_ledger: u32,
+    pub replacement: Option<Address>,
 }
 
 #[contractevent]
@@ -243,8 +244,14 @@ pub struct TokenSunset {
     pub ledger: u32,
 }
 
-pub fn emit_token_deprecated(e: &Env, token: Address, admin: Address, sunset_ledger: u32) {
-    TokenDeprecated { token, admin, sunset_ledger }.publish(e);
+pub fn emit_token_deprecated(
+    e: &Env,
+    token: Address,
+    admin: Address,
+    sunset_ledger: u32,
+    replacement: Option<Address>,
+) {
+    TokenDeprecated { token, admin, sunset_ledger, replacement }.publish(e);
 }
 
 pub fn emit_token_undeprecated(e: &Env, token: Address, admin: Address) {

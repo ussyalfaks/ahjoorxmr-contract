@@ -345,6 +345,8 @@ mod test_suspension;
 #[cfg(test)]
 mod test_deprecation;
 #[cfg(test)]
+mod test_replacement;
+#[cfg(test)]
 mod test_guardian;
 #[cfg(test)]
 mod test_multisig;
@@ -412,6 +414,9 @@ impl TokenWhitelistContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        // A re-listed token is live again, so a replacement pointer left
+        // over from an earlier deprecation no longer applies.
+        env.storage().persistent().remove(&DataKey::TokenReplacement(token.clone()));
         Self::increment_whitelist_version(&env);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_token_whitelisted(&env, token, admin);
@@ -767,7 +772,17 @@ impl TokenWhitelistContract {
     /// `is_token_allowed_for_new` immediately, stays valid for
     /// `is_token_allowed` / `is_whitelisted` until `sunset_ledger`, and is
     /// then lazily delisted. Admin-gated.
-    pub fn deprecate_token(env: Env, admin: Address, token: Address, sunset_ledger: u32) {
+    ///
+    /// `replacement` optionally names the token integrators should migrate
+    /// to; it must be a different, whitelisted, non-deprecated token. Read it
+    /// back with `get_replacement_token`.
+    pub fn deprecate_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+        sunset_ledger: u32,
+        replacement: Option<Address>,
+    ) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
         if !env.storage().persistent().has(&DataKey::WhitelistMembership(token.clone())) {
@@ -781,14 +796,44 @@ impl TokenWhitelistContract {
         if sunset_ledger <= current_ledger {
             panic!("sunset_ledger must be in the future");
         }
+        if let Some(ref r) = replacement {
+            if *r == token {
+                panic!("Replacement cannot be the deprecated token");
+            }
+            if !env.storage().persistent().has(&DataKey::WhitelistMembership(r.clone())) {
+                panic!("Replacement token not whitelisted");
+            }
+            if env.storage().persistent().has(&DataKey::TokenDeprecation(r.clone())) {
+                panic!("Replacement token is deprecated");
+            }
+        }
         env.storage().persistent().set(
             &key,
             &TokenDeprecation { deprecated_at_ledger: current_ledger, sunset_ledger },
         );
         env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        let replacement_key = DataKey::TokenReplacement(token.clone());
+        match replacement {
+            Some(ref r) => {
+                env.storage().persistent().set(&replacement_key, r);
+                env.storage().persistent().extend_ttl(
+                    &replacement_key,
+                    PERSISTENT_LIFETIME_THRESHOLD,
+                    PERSISTENT_BUMP_AMOUNT,
+                );
+            }
+            None => env.storage().persistent().remove(&replacement_key),
+        }
         Self::adjust_deprecated_count(&env, true);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        events::emit_token_deprecated(&env, token, admin, sunset_ledger);
+        events::emit_token_deprecated(&env, token, admin, sunset_ledger, replacement);
+    }
+
+    /// Returns the token integrators should migrate to from `token`, if one
+    /// was given to `deprecate_token`. Still answers after the sunset, when
+    /// `token` itself has been delisted.
+    pub fn get_replacement_token(env: Env, token: Address) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::TokenReplacement(token))
     }
 
     /// Reverts a deprecation, restoring the token's full status. Only
@@ -806,6 +851,7 @@ impl TokenWhitelistContract {
             panic!("Token already sunset");
         }
         env.storage().persistent().remove(&key);
+        env.storage().persistent().remove(&DataKey::TokenReplacement(token.clone()));
         Self::adjust_deprecated_count(&env, false);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_token_undeprecated(&env, token, admin);
