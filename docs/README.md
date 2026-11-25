@@ -13,6 +13,8 @@ reference docs for the repository, grouped by contract.
 - [**Multi-Token Invoice in ahjoor-payments**](multi-token-invoice.md) — Invoices payable in any combination of accepted tokens, per-token conversion rates, partial payment tracking, and batch settlement.
 - [**Merchant KYB Verification**](merchant-kyb.md) — Setting, renewing and revoking merchant KYB status, and how KYB enforcement gates merchant activity.
 - [**DAO Mediation**](dao-mediation.md) — Routing unresolved payment disputes to a DAO mediator panel, member voting, and verdict execution after the voting window.
+- [**Merchant Withdrawal Queue and Limits in ahjoor-payments**](payments-withdrawals.md) — FIFO withdrawal queue ordering and prioritisation, rolling withdrawal rate-limit windows, default limits, merchant limits and admin overrides.
+- [**Vouchers, External IDs and Multisig Payment Approval in ahjoor-payments**](payments-vouchers-and-approvals.md) — Voucher discounts with `max_uses` and expiry, per-merchant external ID uniqueness and lookup, and m-of-n co-signer approval for high-value payments.
 
 ---
 
@@ -36,9 +38,7 @@ reference docs for the repository, grouped by contract.
 - [**On-Chain Audit Trail in ROSCA**](rosca-audit-trail.md) — Comprehensive cycle audit trail recording, contribution history pagination, retention window management, and archival lifecycle.
 - [**ROSCA Collective Savings Goals**](rosca-savings-goals.md) — Group-wide savings targets, progress tracking against the target, and goal finalization.
 - [**ROSCA Savings Milestone Rewards**](rosca-savings-milestone-rewards.md) — Automatic token rewards when savings goal milestones are crossed.
-- [**ROSCA Hardship Contribution Reduction**](rosca-hardship-reduction.md) — Requesting a one-round reduced contribution, approval and execution-time checks, and how the reserve-funded shortfall keeps the payout whole.
-- [**ROSCA Round Extension and Penalty Waiver**](rosca-round-extension-and-penalty-waiver.md) — `ExtendRound` and `WaivePenalty` proposals: the maximum extension, the once-per-cycle limit, penalty clear vs refund, and the quorum each uses.
-- [**ROSCA Ban List**](rosca-ban-list.md) — Who can ban (admin or `MemberBan` vote), every join path a ban blocks, waitlist/invite clean-up, and unbanning.
+- [**ROSCA Admin Multi-Sig**](rosca-admin-multisig.md) — Co-admin configuration, the admin actions covered by multi-sig, threshold rules, and the propose/approve lifecycle.
 
 ---
 
@@ -51,6 +51,8 @@ reference docs for the repository, grouped by contract.
 - [**Dispute Timeout Enforcement**](escrow-dispute-timeout.md) — How stalled disputes are auto-resolved after a configurable timeout, per-escrow timeout overrides, default winner configuration, and the arbiter timeout counter.
 - [**Seller Veto Mechanism**](escrow-seller-veto.md) — How sellers can veto a fund release within a cooldown window, how the cooldown interacts with repeated veto attempts, and how admin override resets the clock.
 - [**Inspector Role**](inspector-role.md) — How a neutral inspector is assigned at escrow creation, the `submit_inspection_result` flow, dual-approval inspector replacement, and how the reputation score and threshold gate future assignments.
+- [**Escrow Revision Requests**](escrow-revision-requests.md) — Buyer revision requests, seller acknowledgement, rejection, escalation to dispute after the response deadline, the per-escrow revision cap and the response deadline setting.
+- [**Escrow Amendments and Deadline Extensions**](escrow-amendments.md) — When to use a signed amendment, a mutual deadline extension proposal, or a buyer-only extension, and how `set_max_deadline_extension` caps the buyer path.
 
 ---
 
