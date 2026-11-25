@@ -11458,3 +11458,6 @@ mod test_extend_deadline;
 
 #[cfg(test)]
 mod test_multi_asset_escrow;
+
+#[cfg(test)]
+mod test_revision_requests;
