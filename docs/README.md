@@ -39,6 +39,7 @@ reference docs for the repository, grouped by contract.
 - [**On-Chain Audit Trail in ROSCA**](rosca-audit-trail.md) — Comprehensive cycle audit trail recording, contribution history pagination, retention window management, and archival lifecycle.
 - [**ROSCA Collective Savings Goals**](rosca-savings-goals.md) — Group-wide savings targets, progress tracking against the target, and goal finalization.
 - [**ROSCA Savings Milestone Rewards**](rosca-savings-milestone-rewards.md) — Automatic token rewards when savings goal milestones are crossed.
+- [**ROSCA Catch-Up Contributions and Late-Payment Demotion**](rosca-late-contributions.md) — How waitlist promotion and succession build catch-up debt, how members settle it, and how consecutive late payments demote a member to the back of the payout queue.
 - [**ROSCA Admin Multi-Sig**](rosca-admin-multisig.md) — Co-admin configuration, the admin actions covered by multi-sig, threshold rules, and the propose/approve lifecycle.
 
 ---
