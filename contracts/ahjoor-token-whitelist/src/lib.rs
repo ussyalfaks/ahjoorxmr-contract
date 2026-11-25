@@ -314,24 +314,26 @@ const DEFAULT_MIN_PROPOSAL_STAKE: i128 = 1;
 
 mod events;
 mod client;
-#[cfg(test)]
-mod test;
-#[cfg(test)]
-mod test_contract_allowlist;
-#[cfg(test)]
-mod test_governance;
-#[cfg(test)]
-mod test_suspension;
-#[cfg(test)]
-mod test_deprecation;
-#[cfg(test)]
-mod test_guardian;
-#[cfg(test)]
-mod test_multisig;
-#[cfg(test)]
-mod test_swap_pair;
-#[cfg(test)]
-mod test_asset_identity;
+	#[cfg(test)]
+	mod test;
+	#[cfg(test)]
+	mod test_contract_allowlist;
+	#[cfg(test)]
+	mod test_governance;
+	#[cfg(test)]
+	mod test_suspension;
+	#[cfg(test)]
+	mod test_deprecation;
+	#[cfg(test)]
+	mod test_guardian;
+	#[cfg(test)]
+	mod test_multisig;
+	#[cfg(test)]
+	mod test_swap_pair;
+	#[cfg(test)]
+	mod test_asset_identity;
+	#[cfg(test)]
+	mod test_token_removal;
 
 pub use client::TokenWhitelistClient;
 
