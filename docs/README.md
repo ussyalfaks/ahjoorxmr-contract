@@ -29,6 +29,7 @@ reference docs for the repository, grouped by contract.
 - [**Co-Payer Contribution Splitting in ROSCA**](rosca-co-payer-splitting.md) — How co-payers are registered for a member's slot, how the split ratio is set and enforced, and what happens if a co-payer fails to contribute.
 - [**ROSCA Governance Quorum Requirements**](rosca-governance-quorum.md) — Specification of per-ProposalType quorum thresholds, default percentages, admin overrides, resolution formulas, and administrative controls.
 - [**ROSCA Group Split Flow**](rosca-group-split.md) — Proposal creation, member assignment and confirmation, expiry handling, execution, refunds, and resulting group identifiers.
+- [**ROSCA Group Merge**](rosca-group-merge.md) — Propose/accept/complete handshake for combining two groups: preconditions, member and payout-order handling, and why a merge transfers no balances.
 - [**ROSCA Reinvestment Flow**](rosca-reinvestment.md) — How a member rolls a round payout forward into the next round as their contribution, the deadline constraint, and how over/under-payment is handled.
 - [**ROSCA Slot Auctions**](rosca-slot-auctions.md) — Comprehensive guide to plain open-bid and commit-reveal sealed-bid slot auctions in Ahjoor ROSCA groups.
 - [**ROSCA Payout Slot Swaps**](rosca-slot-swap.md) — Request/accept/approve flow for members trading payout positions, request expiry, and how swaps interact with slot auctions and a finalized payout order.
