@@ -2,7 +2,9 @@
 
 use soroban_sdk::{Env, IntoVal, TryFromVal, Val, Vec};
 
+pub mod pause_registry;
 pub mod reputation;
+pub mod roles;
 
 /// Shared pagination helper used by all contracts.
 ///

@@ -1026,6 +1026,8 @@ pub enum DataKey3 {
     /// address calls `auto_release_expired` on an expired escrow.
     /// 0 (default) disables the reward.
     KeeperRewardBps,
+    /// Instance: global `ahjoor-pause-registry` consulted by `require_not_paused`.
+    PauseRegistry,
 }
 
 /// A third party's pre-funded protocol fee for a specific escrow.
@@ -6360,6 +6362,20 @@ impl AhjoorEscrowContract {
             .unwrap_or(false)
     }
 
+    /// Admin: set (or clear) the global `ahjoor-pause-registry`. While the
+    /// registry is paused, state changes are blocked here as well.
+    pub fn set_pause_registry(env: Env, admin: Address, registry: Option<Address>) {
+        Self::require_admin(&env, &admin);
+        match registry {
+            Some(r) => env.storage().instance().set(&DataKey3::PauseRegistry, &r),
+            None => env.storage().instance().remove(&DataKey3::PauseRegistry),
+        }
+    }
+
+    pub fn get_pause_registry(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey3::PauseRegistry)
+    }
+
     pub fn get_pause_reason(env: Env) -> String {
         env.storage()
             .instance()
@@ -9030,6 +9046,12 @@ impl AhjoorEscrowContract {
         {
             panic_with_error!(&env, EscrowErrorExt4::ContractIsPaused);
         }
+        if ahjoor_common::pause_registry::is_globally_paused(
+            env,
+            env.storage().instance().get(&DataKey3::PauseRegistry),
+        ) {
+            panic_with_error!(&env, EscrowErrorExt4::ContractIsPaused);
+        }
     }
 
     fn require_or_bootstrap_admin(env: &Env, admin: &Address) {
@@ -11436,3 +11458,6 @@ mod test_extend_deadline;
 
 #[cfg(test)]
 mod test_multi_asset_escrow;
+
+#[cfg(test)]
+mod test_revision_requests;

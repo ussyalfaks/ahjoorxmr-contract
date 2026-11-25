@@ -443,56 +443,8 @@ pub enum DataKey3 {
     RevokeApprovalWindow,
     /// #1177: Installment plan for a refund.
     InstallmentPlan(u32),
-    /// #1170: Swap router used to pay refunds in a customer-preferred token.
-    SwapRouter,
-    /// #1170: Admin-configured max slippage (bps) tolerated on refund swaps.
-    RefundSwapMaxSlippageBps,
-    /// #1170: Token the customer asked to be refunded in.
-    RefundPreferredToken(u32),
-    /// #1170: What a processed refund actually paid the customer.
-    RefundPayout(u32),
-}
-
-/// #1170: Record of what a processed refund actually paid the customer.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefundPayout {
-    /// Token delivered to the recipient.
-    pub token: Address,
-    /// Amount delivered to the recipient, in `token` units.
-    pub amount: i128,
-    /// True when the payout was swapped into the customer's preferred token.
-    pub swapped: bool,
-}
-
-/// #1170: Default max slippage on refund swaps (1%).
-const DEFAULT_REFUND_SWAP_MAX_SLIPPAGE_BPS: u32 = 100;
-
-// ---------------------------------------------------------------------------
-// #1170: Swap router interface used to pay refunds in a preferred token.
-//
-// `quote` returns the expected output for `amount_in`. `swap` pulls
-// `amount_in` of `token_in` from `sender` via `transfer_from` (this contract
-// grants the router a one-ledger allowance first), delivers at least
-// `min_amount_out` of `token_out` to `recipient`, and must revert otherwise.
-// ---------------------------------------------------------------------------
-mod swap_router {
-    use soroban_sdk::{contractclient, Address, Env};
-
-    #[allow(dead_code)]
-    #[contractclient(name = "SwapRouterClient")]
-    pub trait SwapRouterInterface {
-        fn quote(env: Env, token_in: Address, token_out: Address, amount_in: i128) -> i128;
-        fn swap(
-            env: Env,
-            sender: Address,
-            token_in: Address,
-            token_out: Address,
-            amount_in: i128,
-            min_amount_out: i128,
-            recipient: Address,
-        ) -> i128;
-    }
+    /// Instance: global `ahjoor-pause-registry` consulted by `require_not_paused`.
+    PauseRegistry,
 }
 
 /// #1174: A delegate and its optional approval cap.
@@ -4066,6 +4018,16 @@ impl AhjoorRefundContract {
         env.storage().instance().get(&DataKey::FeeRecipient)
     }
 
+    /// Admin: set (or clear) where refund fees are sent. Point this at the
+    /// `ahjoor-treasury` contract to pool fees with the rest of the protocol.
+    pub fn set_fee_recipient(env: Env, admin: Address, recipient: Option<Address>) {
+        Self::require_admin(&env, &admin);
+        match recipient {
+            Some(r) => env.storage().instance().set(&DataKey::FeeRecipient, &r),
+            None => env.storage().instance().remove(&DataKey::FeeRecipient),
+        }
+    }
+
     /// Get the configured dispute window in seconds.
     pub fn get_dispute_window(env: Env) -> u64 {
         env.storage()
@@ -4397,6 +4359,20 @@ impl AhjoorRefundContract {
             .unwrap_or(String::from_str(&env, ""))
     }
 
+    /// Admin: set (or clear) the global `ahjoor-pause-registry`. While the
+    /// registry is paused, state changes are blocked here as well.
+    pub fn set_pause_registry(env: Env, admin: Address, registry: Option<Address>) {
+        Self::require_admin(&env, &admin);
+        match registry {
+            Some(r) => env.storage().instance().set(&DataKey3::PauseRegistry, &r),
+            None => env.storage().instance().remove(&DataKey3::PauseRegistry),
+        }
+    }
+
+    pub fn get_pause_registry(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey3::PauseRegistry)
+    }
+
     // --- Internal Helpers ---
 
     /// Address that receives funds for `refund`: the customer-designated
@@ -4595,6 +4571,12 @@ impl AhjoorRefundContract {
             .unwrap_or(false)
         {
             panic!("Contract is paused");
+        }
+        if ahjoor_common::pause_registry::is_globally_paused(
+            env,
+            env.storage().instance().get(&DataKey3::PauseRegistry),
+        ) {
+            panic!("Protocol is paused");
         }
     }
 

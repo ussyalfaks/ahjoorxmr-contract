@@ -20,7 +20,7 @@ fn test_deprecate_token_records_state() {
     client.add_token(&admin, &token);
 
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &token, &(now + 100));
+    client.deprecate_token(&admin, &token, &(now + 100), &None);
 
     let dep = client.get_token_deprecation(&token).unwrap();
     assert_eq!(dep.deprecated_at_ledger, now);
@@ -48,7 +48,7 @@ fn test_pre_sunset_rejected_for_new_but_allowed_for_existing() {
     client.add_token(&admin, &token);
 
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &token, &(now + 100));
+    client.deprecate_token(&admin, &token, &(now + 100), &None);
 
     env.ledger().with_mut(|l| l.sequence_number += 50);
 
@@ -66,7 +66,7 @@ fn test_post_sunset_both_checks_return_false() {
     client.add_token(&admin, &token);
 
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &token, &(now + 100));
+    client.deprecate_token(&admin, &token, &(now + 100), &None);
 
     env.ledger().with_mut(|l| l.sequence_number += 100);
 
@@ -87,7 +87,7 @@ fn test_is_whitelisted_applies_sunset() {
     client.add_token(&admin, &token);
 
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &token, &(now + 10));
+    client.deprecate_token(&admin, &token, &(now + 10), &None);
     env.ledger().with_mut(|l| l.sequence_number += 20);
 
     assert!(!client.is_whitelisted(&token));
@@ -103,7 +103,7 @@ fn test_undeprecate_restores_full_status() {
     client.add_token(&admin, &token);
 
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &token, &(now + 100));
+    client.deprecate_token(&admin, &token, &(now + 100), &None);
     assert!(!client.is_token_allowed_for_new(&token));
 
     client.undeprecate_token(&admin, &token);
@@ -125,7 +125,7 @@ fn test_readd_after_sunset_starts_clean() {
     client.add_token(&admin, &token);
 
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &token, &(now + 10));
+    client.deprecate_token(&admin, &token, &(now + 10), &None);
     env.ledger().with_mut(|l| l.sequence_number += 20);
     assert!(!client.is_token_allowed(&token));
 
@@ -143,7 +143,7 @@ fn test_undeprecate_after_sunset_panics() {
     client.add_token(&admin, &token);
 
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &token, &(now + 10));
+    client.deprecate_token(&admin, &token, &(now + 10), &None);
     env.ledger().with_mut(|l| l.sequence_number += 20);
     client.undeprecate_token(&admin, &token);
 }
@@ -168,8 +168,8 @@ fn test_double_deprecate_panics() {
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &token, &(now + 100));
-    client.deprecate_token(&admin, &token, &(now + 200));
+    client.deprecate_token(&admin, &token, &(now + 100), &None);
+    client.deprecate_token(&admin, &token, &(now + 200), &None);
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn test_deprecate_with_past_sunset_panics() {
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &token, &now);
+    client.deprecate_token(&admin, &token, &now, &None);
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn test_deprecate_unlisted_token_panics() {
     env.mock_all_auths();
     let (client, admin) = setup(&env);
     let token = Address::generate(&env);
-    client.deprecate_token(&admin, &token, &1000);
+    client.deprecate_token(&admin, &token, &1000, &None);
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn test_deprecate_non_admin_panics() {
     let token = Address::generate(&env);
     client.add_token(&admin, &token);
     let stranger = Address::generate(&env);
-    client.deprecate_token(&stranger, &token, &1000);
+    client.deprecate_token(&stranger, &token, &1000, &None);
 }
 
 /// Consuming contracts call the deprecation checks through the hand-written
@@ -221,7 +221,7 @@ fn test_cross_contract_client_deprecation_checks() {
     assert!(cross.is_token_allowed_for_new(&token));
 
     let now = env.ledger().sequence();
-    cross.deprecate_token(&admin, &token, &(now + 100));
+    cross.deprecate_token(&admin, &token, &(now + 100), &None);
     assert!(!cross.is_token_allowed_for_new(&token));
     assert!(cross.is_token_allowed(&token));
     assert_eq!(cross.get_token_deprecation(&token).unwrap().sunset_ledger, now + 100);
@@ -241,9 +241,9 @@ fn test_sunset_still_applies_after_other_deprecations_resolve() {
     client.add_token(&admin, &c);
 
     let now = env.ledger().sequence();
-    client.deprecate_token(&admin, &a, &(now + 10));
-    client.deprecate_token(&admin, &b, &(now + 10));
-    client.deprecate_token(&admin, &c, &(now + 10));
+    client.deprecate_token(&admin, &a, &(now + 10), &None);
+    client.deprecate_token(&admin, &b, &(now + 10), &None);
+    client.deprecate_token(&admin, &c, &(now + 10), &None);
     // Resolve two deprecations through different paths.
     client.undeprecate_token(&admin, &a);
     client.remove_token(&admin, &b);
