@@ -12,6 +12,13 @@ pub mod pre_approved_spending;
 pub mod pre_approved_spending_impl;
 pub mod customer_spend;
 pub mod fulfilment;
+// Disabled: a second, independent security-deposit implementation that
+// landed alongside `security_deposits` and redefines the same contract
+// functions (`create_security_deposit`, `claim_deductions`, ...), so the
+// crate cannot compile with both. `security_deposits` is the one that is
+// re-exported and covered by wired tests; reconcile the two before
+// re-enabling this module.
+#[cfg(any())]
 pub mod security_deposit;
 pub mod withdrawal_policy;
 
@@ -1351,6 +1358,22 @@ pub enum DataKey3 {
     PaymentRequestPayment(u32),
     /// Persistent: per-merchant sales-tax configuration (tax_bps + tax_address).
     MerchantTax(Address),
+
+    // --- Split Bill keys (#split-bill) ---
+    /// Instance: monotonically incrementing split bill counter.
+    SplitBillCounter,
+    /// Persistent: split bill header record (bill_id → SplitBill).
+    SplitBill(u32),
+    /// Persistent: list of per-participant shares (bill_id → Vec<SplitBillShare>).
+    SplitBillShares(u32),
+
+    // --- Subscription seat keys (#sub-seats) ---
+    /// Persistent: current active seats for a plan in this billing period
+    /// (plan_id → Vec<Address>).
+    PlanSeats(u32),
+    /// Persistent: seats queued for removal at next period start
+    /// (plan_id → Vec<Address>).
+    PlanPendingSeatRemoval(u32),
 }
 
 /// Per-merchant sales-tax configuration.
