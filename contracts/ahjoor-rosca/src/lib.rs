@@ -13837,4 +13837,5 @@ mod test_ban_list;
 mod test_upcoming_payouts;
 mod test_member_payout_history;
 mod test_hardship_reduction;
+mod test_late_contributions;
 pub use events::*;
