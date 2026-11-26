@@ -168,7 +168,7 @@ Consequences worth knowing:
 - **Rounds keep running.** `contribute` and the round/`finalize_round` paths reject a group only when its status is `GroupStatus::Dissolved`, so an in-flight round on a split group continues to accept contributions and complete normally under the original group's schedule and member list.
 - **`is_active()` returns `false`.** The view returns true only when the timestamp has reached the start time **and** `GroupStatus::Active`.
 - **No further splits.** `propose_group_split` fails with `ExtError::SourceGroupAlreadySplit` once the status is `Split`.
-- **No merges.** `propose_merge` requires `GroupStatus::Active`, so it fails with a plain `"Group is not active"` panic on a split group.
+- **No merges.** `propose_merge` requires `GroupStatus::Active`, so it fails with a plain `"Group is not active"` panic on a split group. See [ROSCA Group Merge](rosca-group-merge.md) for the inverse flow.
 - **No new groups are created.** The A/B identifiers exist only in the `GroupSplitExecuted` event; off-chain systems are expected to provision the two sub-groups from the event and the stored member assignment.
 
 ---
@@ -242,4 +242,11 @@ Coverage is in `contracts/ahjoor-rosca/src/test_group_split.rs`:
 | `test_confirmation_window_enforced` | Confirming after the window is rejected |
 | `test_split_confirmation_rejects_after_expiry` | Past `expiry_ledger`, confirmation returns `SplitConfirmationWindowClosed`, `expire_split_proposal` marks the proposal `Expired`, and executing it returns `SplitProposalNotFound` |
 
-The same file also contains `propose_merge` / `complete_merge` tests, which cover the separate group merge feature.
+The same file also contains `propose_merge` / `complete_merge` tests, which cover the separate [group merge](rosca-group-merge.md) feature.
+
+---
+
+## See Also
+
+- [ROSCA Group Merge](rosca-group-merge.md) — the inverse operation: two groups combining into one, with an admin accept step instead of per-member confirmation.
+- [Group Dissolution and Emergency Payout Voting in ROSCA](rosca-dissolution-and-emergency-payout.md) — what happens to funds when a group stops operating.

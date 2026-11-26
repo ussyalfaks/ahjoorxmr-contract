@@ -226,6 +226,7 @@ pub struct TokenDeprecated {
     pub token: Address,
     pub admin: Address,
     pub sunset_ledger: u32,
+    pub replacement: Option<Address>,
 }
 
 #[contractevent]
@@ -243,8 +244,14 @@ pub struct TokenSunset {
     pub ledger: u32,
 }
 
-pub fn emit_token_deprecated(e: &Env, token: Address, admin: Address, sunset_ledger: u32) {
-    TokenDeprecated { token, admin, sunset_ledger }.publish(e);
+pub fn emit_token_deprecated(
+    e: &Env,
+    token: Address,
+    admin: Address,
+    sunset_ledger: u32,
+    replacement: Option<Address>,
+) {
+    TokenDeprecated { token, admin, sunset_ledger, replacement }.publish(e);
 }
 
 pub fn emit_token_undeprecated(e: &Env, token: Address, admin: Address) {
@@ -436,4 +443,26 @@ pub struct AssetIdentitySet {
 
 pub fn emit_asset_identity_set(e: &Env, token: Address, asset_code: soroban_sdk::String, issuer: Address) {
     AssetIdentitySet { token, asset_code, issuer }.publish(e);
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CuratorAdded {
+    pub curator: Address,
+    pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CuratorRemoved {
+    pub curator: Address,
+    pub admin: Address,
+}
+
+pub fn emit_curator_added(e: &Env, curator: Address, admin: Address) {
+    CuratorAdded { curator, admin }.publish(e);
+}
+
+pub fn emit_curator_removed(e: &Env, curator: Address, admin: Address) {
+    CuratorRemoved { curator, admin }.publish(e);
 }

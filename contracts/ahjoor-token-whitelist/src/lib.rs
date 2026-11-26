@@ -54,6 +54,14 @@ pub enum Error {
     InvalidAssetIssuer = 19,
     /// #1185: Token address is not the SAC derived from asset code + issuer.
     AssetAddressMismatch = 20,
+    /// Address is already a governance curator.
+    CuratorAlreadyExists = 21,
+    /// Address is not a governance curator.
+    CuratorNotFound = 22,
+    /// Curator already has the maximum number of open listing proposals.
+    CuratorProposalLimitReached = 23,
+    /// Curator open-proposal limit must be at least 1.
+    InvalidCuratorLimit = 24,
 }
 
 #[contracttype]
@@ -247,6 +255,16 @@ pub enum DataKey {
     SwapPair(Address, Address),
     /// #1185: Verified classic-asset identity (code + issuer) of a SAC token.
     AssetIdentity(Address),
+    /// Trusted curator whose listing proposals skip `MinProposalStake`.
+    Curator(Address),
+    /// Number of the curator's stake-free proposals that are still open
+    /// (`Active` or `PendingEnactment`).
+    CuratorOpenProposals(Address),
+    /// Curator that sponsored a stake-free proposal, keyed by proposal id.
+    /// Removed when the proposal reaches a terminal status.
+    CuratorProposal(u32),
+    /// Maximum open stake-free proposals per curator.
+    CuratorMaxOpenProposals,
 }
 
 #[contracttype]
@@ -311,6 +329,8 @@ const DEFAULT_ENACTMENT_DELAY_LEDGERS: u32 = 34_560;
 const DEFAULT_QUORUM_BPS: u32 = 5_000;
 /// Minimum governance-token balance required to propose when `set_min_proposal_stake` was never called.
 const DEFAULT_MIN_PROPOSAL_STAKE: i128 = 1;
+/// Maximum open stake-free proposals per curator when not configured.
+const DEFAULT_CURATOR_MAX_OPEN_PROPOSALS: u32 = 3;
 
 mod events;
 mod client;
@@ -334,6 +354,28 @@ mod client;
 	mod test_asset_identity;
 	#[cfg(test)]
 	mod test_token_removal;
+#[cfg(test)]
+mod test;
+#[cfg(test)]
+mod test_contract_allowlist;
+#[cfg(test)]
+mod test_governance;
+#[cfg(test)]
+mod test_suspension;
+#[cfg(test)]
+mod test_deprecation;
+#[cfg(test)]
+mod test_replacement;
+#[cfg(test)]
+mod test_guardian;
+#[cfg(test)]
+mod test_multisig;
+#[cfg(test)]
+mod test_swap_pair;
+#[cfg(test)]
+mod test_asset_identity;
+#[cfg(test)]
+mod test_curator;
 
 pub use client::TokenWhitelistClient;
 
@@ -392,6 +434,9 @@ impl TokenWhitelistContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        // A re-listed token is live again, so a replacement pointer left
+        // over from an earlier deprecation no longer applies.
+        env.storage().persistent().remove(&DataKey::TokenReplacement(token.clone()));
         Self::increment_whitelist_version(&env);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_token_whitelisted(&env, token, admin);
@@ -747,7 +792,17 @@ impl TokenWhitelistContract {
     /// `is_token_allowed_for_new` immediately, stays valid for
     /// `is_token_allowed` / `is_whitelisted` until `sunset_ledger`, and is
     /// then lazily delisted. Admin-gated.
-    pub fn deprecate_token(env: Env, admin: Address, token: Address, sunset_ledger: u32) {
+    ///
+    /// `replacement` optionally names the token integrators should migrate
+    /// to; it must be a different, whitelisted, non-deprecated token. Read it
+    /// back with `get_replacement_token`.
+    pub fn deprecate_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+        sunset_ledger: u32,
+        replacement: Option<Address>,
+    ) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
         if !env.storage().persistent().has(&DataKey::WhitelistMembership(token.clone())) {
@@ -761,14 +816,44 @@ impl TokenWhitelistContract {
         if sunset_ledger <= current_ledger {
             panic!("sunset_ledger must be in the future");
         }
+        if let Some(ref r) = replacement {
+            if *r == token {
+                panic!("Replacement cannot be the deprecated token");
+            }
+            if !env.storage().persistent().has(&DataKey::WhitelistMembership(r.clone())) {
+                panic!("Replacement token not whitelisted");
+            }
+            if env.storage().persistent().has(&DataKey::TokenDeprecation(r.clone())) {
+                panic!("Replacement token is deprecated");
+            }
+        }
         env.storage().persistent().set(
             &key,
             &TokenDeprecation { deprecated_at_ledger: current_ledger, sunset_ledger },
         );
         env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        let replacement_key = DataKey::TokenReplacement(token.clone());
+        match replacement {
+            Some(ref r) => {
+                env.storage().persistent().set(&replacement_key, r);
+                env.storage().persistent().extend_ttl(
+                    &replacement_key,
+                    PERSISTENT_LIFETIME_THRESHOLD,
+                    PERSISTENT_BUMP_AMOUNT,
+                );
+            }
+            None => env.storage().persistent().remove(&replacement_key),
+        }
         Self::adjust_deprecated_count(&env, true);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        events::emit_token_deprecated(&env, token, admin, sunset_ledger);
+        events::emit_token_deprecated(&env, token, admin, sunset_ledger, replacement);
+    }
+
+    /// Returns the token integrators should migrate to from `token`, if one
+    /// was given to `deprecate_token`. Still answers after the sunset, when
+    /// `token` itself has been delisted.
+    pub fn get_replacement_token(env: Env, token: Address) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::TokenReplacement(token))
     }
 
     /// Reverts a deprecation, restoring the token's full status. Only
@@ -786,6 +871,7 @@ impl TokenWhitelistContract {
             panic!("Token already sunset");
         }
         env.storage().persistent().remove(&key);
+        env.storage().persistent().remove(&DataKey::TokenReplacement(token.clone()));
         Self::adjust_deprecated_count(&env, false);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         events::emit_token_undeprecated(&env, token, admin);
@@ -1746,13 +1832,21 @@ impl TokenWhitelistContract {
             .storage().instance()
             .get(&DataKey::GovernanceToken)
             .expect("GovernanceTokenNotConfigured");
-        let min_stake: i128 = env
-            .storage().instance()
-            .get(&DataKey::MinProposalStake)
-            .unwrap_or(1);
-        let proposer_balance = token::Client::new(&env, &governance_token).balance(&proposer);
-        if proposer_balance < min_stake {
-            panic!("InsufficientProposerStake");
+        let is_curator = env.storage().persistent().has(&DataKey::Curator(proposer.clone()));
+        if is_curator {
+            let open = Self::get_curator_open_proposals(env.clone(), proposer.clone());
+            if open >= Self::get_curator_max_open_proposals(env.clone()) {
+                panic_with_error!(&env, Error::CuratorProposalLimitReached);
+            }
+        } else {
+            let min_stake: i128 = env
+                .storage().instance()
+                .get(&DataKey::MinProposalStake)
+                .unwrap_or(1);
+            let proposer_balance = token::Client::new(&env, &governance_token).balance(&proposer);
+            if proposer_balance < min_stake {
+                panic!("InsufficientProposerStake");
+            }
         }
         let voting_window: u32 = env
             .storage().instance()
@@ -1777,6 +1871,15 @@ impl TokenWhitelistContract {
         env.storage().persistent().extend_ttl(&DataKey::ListingProposal(proposal_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::ProposalCounter, &(proposal_id + 1));
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        if is_curator {
+            let open = Self::get_curator_open_proposals(env.clone(), proposer.clone());
+            let count_key = DataKey::CuratorOpenProposals(proposer.clone());
+            env.storage().persistent().set(&count_key, &(open + 1));
+            env.storage().persistent().extend_ttl(&count_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+            let sponsor_key = DataKey::CuratorProposal(proposal_id);
+            env.storage().persistent().set(&sponsor_key, &proposer);
+            env.storage().persistent().extend_ttl(&sponsor_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        }
         events::emit_listing_proposed(&env, proposal_id, token, proposer);
         proposal_id
     }
@@ -1855,6 +1958,7 @@ impl TokenWhitelistContract {
             proposal.enactment_deadline_ledger = env.ledger().sequence() + enactment_delay;
         } else {
             proposal.status = ProposalStatus::Failed;
+            Self::release_curator_slot(&env, proposal_id);
         }
         env.storage().persistent().set(&DataKey::ListingProposal(proposal_id), &proposal);
         env.storage().persistent().extend_ttl(&DataKey::ListingProposal(proposal_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
@@ -1881,6 +1985,7 @@ impl TokenWhitelistContract {
             env.storage().persistent().extend_ttl(&membership_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         }
         proposal.status = ProposalStatus::Enacted;
+        Self::release_curator_slot(&env, proposal_id);
         env.storage().persistent().set(&DataKey::ListingProposal(proposal_id), &proposal);
         env.storage().persistent().extend_ttl(&DataKey::ListingProposal(proposal_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         events::emit_listing_enacted(&env, proposal_id, proposal.token);
@@ -1898,6 +2003,7 @@ impl TokenWhitelistContract {
             panic!("ProposalAlreadyTerminal");
         }
         proposal.status = ProposalStatus::Vetoed;
+        Self::release_curator_slot(&env, proposal_id);
         env.storage().persistent().set(&DataKey::ListingProposal(proposal_id), &proposal);
         env.storage().persistent().extend_ttl(&DataKey::ListingProposal(proposal_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
         events::emit_listing_vetoed(&env, proposal_id, reason_hash);
@@ -1926,6 +2032,90 @@ impl TokenWhitelistContract {
     /// voter's live token balance later changes.
     pub fn get_vote_weight_snapshot(env: Env, proposal_id: u32, voter: Address) -> Option<i128> {
         env.storage().persistent().get(&DataKey::VoteWeightSnapshot(proposal_id, voter))
+    }
+
+    // ==================== GOVERNANCE CURATORS ====================
+
+    /// Register `curator` as a trusted reviewer. Curator listing proposals
+    /// skip `MinProposalStake` but still go through voting, finalisation and
+    /// enactment like any other proposal. Admin-gated.
+    pub fn add_curator(env: Env, admin: Address, curator: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        let key = DataKey::Curator(curator.clone());
+        if env.storage().persistent().has(&key) {
+            panic_with_error!(&env, Error::CuratorAlreadyExists);
+        }
+        env.storage().persistent().set(&key, &true);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        events::emit_curator_added(&env, curator, admin);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Remove `curator`. Their already-open proposals keep running through
+    /// voting; new proposals from them need the normal stake. Admin-gated.
+    pub fn remove_curator(env: Env, admin: Address, curator: Address) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        let key = DataKey::Curator(curator.clone());
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, Error::CuratorNotFound);
+        }
+        env.storage().persistent().remove(&key);
+        events::emit_curator_removed(&env, curator, admin);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn is_curator(env: Env, curator: Address) -> bool {
+        env.storage().persistent().has(&DataKey::Curator(curator))
+    }
+
+    /// Set how many stake-free proposals a curator may have open at once.
+    /// Admin-gated; `max` must be at least 1.
+    pub fn set_curator_max_open_proposals(env: Env, admin: Address, max: u32) {
+        admin.require_auth();
+        Self::require_admin(&env, &admin);
+        if max == 0 {
+            panic_with_error!(&env, Error::InvalidCuratorLimit);
+        }
+        env.storage().instance().set(&DataKey::CuratorMaxOpenProposals, &max);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Defaults to `DEFAULT_CURATOR_MAX_OPEN_PROPOSALS` (3).
+    pub fn get_curator_max_open_proposals(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::CuratorMaxOpenProposals)
+            .unwrap_or(DEFAULT_CURATOR_MAX_OPEN_PROPOSALS)
+    }
+
+    /// Number of the curator's stake-free proposals still `Active` or
+    /// `PendingEnactment`.
+    pub fn get_curator_open_proposals(env: Env, curator: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CuratorOpenProposals(curator))
+            .unwrap_or(0)
+    }
+
+    /// Frees the sponsoring curator's open-proposal slot once a proposal
+    /// reaches a terminal status. No-op for stake-backed proposals and for
+    /// proposals whose slot was already released.
+    fn release_curator_slot(env: &Env, proposal_id: u32) {
+        let sponsor_key = DataKey::CuratorProposal(proposal_id);
+        let curator: Option<Address> = env.storage().persistent().get(&sponsor_key);
+        if let Some(curator) = curator {
+            env.storage().persistent().remove(&sponsor_key);
+            let count_key = DataKey::CuratorOpenProposals(curator);
+            let open: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+            if open <= 1 {
+                env.storage().persistent().remove(&count_key);
+            } else {
+                env.storage().persistent().set(&count_key, &(open - 1));
+                env.storage().persistent().extend_ttl(&count_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+            }
+        }
     }
 
     // ==================== TIMELOCKED TOKEN REMOVAL ====================

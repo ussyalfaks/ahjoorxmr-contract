@@ -1,4 +1,6 @@
-use soroban_sdk::{contracttype, Address, BytesN, Map, String, Symbol, Vec};
+use soroban_sdk::{
+    contracttype, Address, BytesN, Map, String, Symbol, Vec,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
@@ -1276,6 +1278,14 @@ pub enum DataKey6 {
     /// Address — cross-contract reputation registry that credit score
     /// changes are reported to. Absent = reporting disabled.
     ReputationRegistry,
+
+    // ── Curator Role for Governance ───────────────────────────────────────────
+    /// Map<Address, Curator> — registered curators who can propose without stake.
+    Curators,
+    /// Map<Address, u32> — curator → count of currently open proposals.
+    CuratorOpenProposalCount,
+    /// u32 — default max open proposals per curator (when not set on curator).
+    DefaultCuratorMaxProposals,
 }
 
 // ── Cross-Group Member Obligations ────────────────────────────────────────────
@@ -1361,6 +1371,9 @@ pub struct MemberPayoutEntry {
 /// A member's request to contribute `reduced_amount` instead of their full
 /// contribution for one `round`, with `shortfall` drawn from the emergency
 /// reserve once the `HardshipReduction` proposal is approved.
+/// A member's request to contribute `reduced_amount` instead of their full
+/// contribution for one `round`, with `shortfall` drawn from the emergency
+/// reserve once the `HardshipReduction` proposal is approved.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HardshipRequest {
@@ -1371,6 +1384,17 @@ pub struct HardshipRequest {
     pub reduced_amount: i128,
     pub shortfall: i128,
     pub approved: bool,
+}
+
+// ── Curator Role for Governance (#XXXX) ──────────────────────────────────────
+
+/// Curator record: trusted reviewers who can propose without stake.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Curator {
+    pub added_at: u64,
+    pub max_open_proposals: u32,
+    pub is_active: bool,
 }
 
 // ── Admin-Attested Offline (Cash) Contributions ───────────────────────────────

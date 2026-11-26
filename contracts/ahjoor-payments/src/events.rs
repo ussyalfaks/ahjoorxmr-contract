@@ -2576,3 +2576,100 @@ pub fn emit_tax_refunded(
     }
     .publish(e);
 }
+
+// ===========================================================================
+//  Split Bill events (#split-bill)
+// ===========================================================================
+
+/// A new split bill was created by a merchant.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SplitBillCreated {
+    pub bill_id: u32,
+    pub merchant: Address,
+    pub token: Address,
+    pub total: i128,
+    pub expiry: u64,
+}
+pub fn emit_split_bill_created(
+    e: &Env,
+    bill_id: u32,
+    merchant: Address,
+    token: Address,
+    total: i128,
+    expiry: u64,
+) {
+    SplitBillCreated { bill_id, merchant, token, total, expiry }.publish(e);
+}
+
+/// One participant paid their share.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SplitBillSharePaid {
+    pub bill_id: u32,
+    pub customer: Address,
+    /// Running total funded so far (including this payment).
+    pub funded: i128,
+    pub total: i128,
+}
+pub fn emit_split_bill_share_paid(
+    e: &Env,
+    bill_id: u32,
+    customer: Address,
+    funded: i128,
+    total: i128,
+) {
+    SplitBillSharePaid { bill_id, customer, funded, total }.publish(e);
+}
+
+/// All shares were paid and the merchant received the full amount.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SplitBillCompleted {
+    pub bill_id: u32,
+    pub merchant: Address,
+    pub total: i128,
+}
+pub fn emit_split_bill_completed(e: &Env, bill_id: u32, merchant: Address, total: i128) {
+    SplitBillCompleted { bill_id, merchant, total }.publish(e);
+}
+
+/// The bill expired; paid shares were refunded.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SplitBillRefunded {
+    pub bill_id: u32,
+    /// Amount that was funded (and now refunded) at expiry.
+    pub refunded_amount: i128,
+}
+pub fn emit_split_bill_refunded(e: &Env, bill_id: u32, refunded_amount: i128) {
+    SplitBillRefunded { bill_id, refunded_amount }.publish(e);
+}
+
+// ===========================================================================
+//  Subscription Seat events (#sub-seats)
+// ===========================================================================
+
+/// A seat was added to a subscription plan immediately.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SeatAdded {
+    pub subscription_id: u32,
+    pub plan_id: u32,
+    pub seat: Address,
+}
+pub fn emit_seat_added(e: &Env, subscription_id: u32, plan_id: u32, seat: Address) {
+    SeatAdded { subscription_id, plan_id, seat }.publish(e);
+}
+
+/// A seat was scheduled for removal at the next billing period.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SeatRemovalScheduled {
+    pub subscription_id: u32,
+    pub plan_id: u32,
+    pub seat: Address,
+}
+pub fn emit_seat_removal_scheduled(e: &Env, subscription_id: u32, plan_id: u32, seat: Address) {
+    SeatRemovalScheduled { subscription_id, plan_id, seat }.publish(e);
+}

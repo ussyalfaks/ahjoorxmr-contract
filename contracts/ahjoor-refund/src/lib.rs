@@ -409,6 +409,24 @@ pub enum DataKey2 {
     SlaPenaltyBps,
     /// SLA penalty paid out for a refund.
     RefundSlaPenaltyPaid(u32),
+
+    // --- Feature: Trusted-Customer Fast Lane ---
+    /// Admin-configured eligibility criteria for the fast lane (absent = disabled).
+    FastLaneCriteria,
+    /// Merchant opt-in: largest refund amount the fast lane may auto-approve
+    /// for this merchant (absent = merchant has not opted in).
+    FastLaneMaxAmount(Address),
+
+    // --- Feature: Cross-Contract Reputation Registry (#1191) ---
+    /// Address of the reputation registry that abuse score changes are
+    /// reported to. Absent = reporting disabled.
+    ReputationRegistry,
+
+    // --- Feature: Merchant Reserve Lock During Appeal ---
+    /// Total canonical reserve currently locked for pending appeals, per merchant.
+    MerchantReserveLocked(Address),
+    /// Reserve amount locked for one refund's pending appeal.
+    AppealLockedAmount(u32),
 }
 
 #[derive(Clone)]
@@ -425,6 +443,8 @@ pub enum DataKey3 {
     RevokeApprovalWindow,
     /// #1177: Installment plan for a refund.
     InstallmentPlan(u32),
+    /// Instance: global `ahjoor-pause-registry` consulted by `require_not_paused`.
+    PauseRegistry,
 }
 
 /// #1174: A delegate and its optional approval cap.
@@ -811,7 +831,39 @@ impl AhjoorRefundContract {
         reason_code: u32,
     ) -> u32 {
         Self::request_refund_internal(
-            env, customer, payment_id, amount, reason, reason_code, None, None,
+            env, customer, payment_id, amount, reason, reason_code, None, None, None,
+        )
+    }
+
+    /// #1170: Like `request_refund`, but the customer asks to be refunded in
+    /// `preferred_token` (e.g. a stablecoin) instead of the payment token.
+    ///
+    /// `preferred_token` must pass the token whitelist check and, when a
+    /// whitelist is configured, the (payment token, preferred token) swap
+    /// pair must be allowlisted. A swap router must be configured. At
+    /// processing time the refund is swapped through the router with a
+    /// slippage guard; if the swap cannot be performed the customer is
+    /// refunded in the original token instead. Passing the payment token
+    /// itself is the same as calling `request_refund`.
+    pub fn request_refund_in_token(
+        env: Env,
+        customer: Address,
+        payment_id: u32,
+        amount: i128,
+        reason: String,
+        reason_code: u32,
+        preferred_token: Address,
+    ) -> u32 {
+        Self::request_refund_internal(
+            env,
+            customer,
+            payment_id,
+            amount,
+            reason,
+            reason_code,
+            None,
+            None,
+            Some(preferred_token),
         )
     }
 
@@ -838,6 +890,7 @@ impl AhjoorRefundContract {
             reason_code,
             None,
             Some((line_item_indices, proof)),
+            None,
         )
     }
 
@@ -881,6 +934,7 @@ impl AhjoorRefundContract {
             reason_code,
             Some(destination),
             None,
+            None,
         )
     }
 
@@ -914,6 +968,7 @@ impl AhjoorRefundContract {
         reason_code: u32,
         destination: Option<Address>,
         line_items: Option<(Vec<u32>, InvoiceProof)>,
+        preferred_token: Option<Address>,
     ) -> u32 {
         Self::require_not_paused(&env);
         customer.require_auth();
@@ -1077,6 +1132,16 @@ impl AhjoorRefundContract {
 
         // Token whitelist validation
         Self::require_token_allowed(&env, &token);
+
+        // #1170: Validate the customer's preferred payout token, if any.
+        let preferred_token = match preferred_token {
+            Some(preferred) if preferred == token => None,
+            Some(preferred) => {
+                Self::require_preferred_token_swappable(&env, &token, &preferred);
+                Some(preferred)
+            }
+            None => None,
+        };
 
         // Escrow funds to this contract so approved refunds can be processed.
         let client = token::Client::new(&env, &token);
@@ -1252,6 +1317,17 @@ impl AhjoorRefundContract {
         Self::append_index(&env, &DataKey::MerchantRefunds(merchant.clone()), refund_id);
         Self::append_index(&env, &DataKey::PaymentRefunds(payment_id), refund_id);
 
+        // #1170: Remember the token the customer wants to be refunded in.
+        if let Some(preferred) = preferred_token.clone() {
+            let key = DataKey3::RefundPreferredToken(refund_id);
+            env.storage().persistent().set(&key, &preferred);
+            env.storage().persistent().extend_ttl(
+                &key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+
         // #1180: Claim the line items so they can never be refunded again.
         if let Some(indices) = line_item_indices {
             Self::record_line_items(&env, payment_id, refund_id, &indices);
@@ -1307,12 +1383,15 @@ impl AhjoorRefundContract {
             refund_id,
             customer,
             effective_amount,
-            token,
+            token.clone(),
             refund.reason,
         );
         events::emit_refund_reason_recorded(&env, refund_id, reason_code);
         if let Some(dest) = destination {
             events::emit_refund_destination_set(&env, refund_id, customer_for_event, dest);
+        }
+        if let Some(preferred) = preferred_token {
+            events::emit_refund_preferred_token_set(&env, refund_id, token.clone(), preferred);
         }
 
         if let (Some(tier_bps), Some(max_refundable)) = (applied_tier_bps, tier_max_refundable) {
@@ -3939,6 +4018,16 @@ impl AhjoorRefundContract {
         env.storage().instance().get(&DataKey::FeeRecipient)
     }
 
+    /// Admin: set (or clear) where refund fees are sent. Point this at the
+    /// `ahjoor-treasury` contract to pool fees with the rest of the protocol.
+    pub fn set_fee_recipient(env: Env, admin: Address, recipient: Option<Address>) {
+        Self::require_admin(&env, &admin);
+        match recipient {
+            Some(r) => env.storage().instance().set(&DataKey::FeeRecipient, &r),
+            None => env.storage().instance().remove(&DataKey::FeeRecipient),
+        }
+    }
+
     /// Get the configured dispute window in seconds.
     pub fn get_dispute_window(env: Env) -> u64 {
         env.storage()
@@ -4120,6 +4209,71 @@ impl AhjoorRefundContract {
 
     // --- Token Whitelist Integration ---
 
+    // --- #1170: Refunds paid in a customer-preferred token ---
+
+    /// Admin sets (or, with `None`, clears) the swap router used to pay
+    /// refunds in a customer's preferred token. While no router is set,
+    /// `request_refund_in_token` is rejected and pending preferred-token
+    /// refunds are paid in their original token.
+    pub fn set_swap_router(env: Env, admin: Address, router: Option<Address>) {
+        Self::require_admin(&env, &admin);
+        if let Some(r) = &router {
+            if *r == env.current_contract_address() {
+                panic!("InvalidSwapRouter");
+            }
+        }
+        match router.clone() {
+            Some(r) => env.storage().instance().set(&DataKey3::SwapRouter, &r),
+            None => env.storage().instance().remove(&DataKey3::SwapRouter),
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        events::emit_refund_swap_router_set(&env, router);
+    }
+
+    pub fn get_swap_router(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey3::SwapRouter)
+    }
+
+    /// Admin sets the max slippage (bps, below the router's quote) a refund
+    /// swap may incur. A whitelist swap-pair cap tightens it further.
+    pub fn set_refund_swap_max_slippage_bps(env: Env, admin: Address, max_slippage_bps: u32) {
+        Self::require_admin(&env, &admin);
+        if max_slippage_bps >= 10_000 {
+            panic!("InvalidMaxSlippageBps");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey3::RefundSwapMaxSlippageBps, &max_slippage_bps);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        events::emit_refund_swap_max_slippage_set(&env, max_slippage_bps);
+    }
+
+    pub fn get_refund_swap_max_slippage_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::RefundSwapMaxSlippageBps)
+            .unwrap_or(DEFAULT_REFUND_SWAP_MAX_SLIPPAGE_BPS)
+    }
+
+    /// Token the customer asked to be refunded in (None = the payment token).
+    pub fn get_refund_preferred_token(env: Env, refund_id: u32) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::RefundPreferredToken(refund_id))
+    }
+
+    /// What a processed refund actually delivered (None until processed via
+    /// `process_refund` / `bulk_process_refunds`).
+    pub fn get_refund_payout(env: Env, refund_id: u32) -> Option<RefundPayout> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::RefundPayout(refund_id))
+    }
+
     /// Set the token whitelist contract address (admin only)
     pub fn set_token_whitelist_contract(env: Env, admin: Address, whitelist_contract: Address) {
         Self::require_not_paused(&env);
@@ -4203,6 +4357,20 @@ impl AhjoorRefundContract {
             .instance()
             .get(&DataKey::PauseReason)
             .unwrap_or(String::from_str(&env, ""))
+    }
+
+    /// Admin: set (or clear) the global `ahjoor-pause-registry`. While the
+    /// registry is paused, state changes are blocked here as well.
+    pub fn set_pause_registry(env: Env, admin: Address, registry: Option<Address>) {
+        Self::require_admin(&env, &admin);
+        match registry {
+            Some(r) => env.storage().instance().set(&DataKey3::PauseRegistry, &r),
+            None => env.storage().instance().remove(&DataKey3::PauseRegistry),
+        }
+    }
+
+    pub fn get_pause_registry(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey3::PauseRegistry)
     }
 
     // --- Internal Helpers ---
@@ -4404,6 +4572,12 @@ impl AhjoorRefundContract {
         {
             panic!("Contract is paused");
         }
+        if ahjoor_common::pause_registry::is_globally_paused(
+            env,
+            env.storage().instance().get(&DataKey3::PauseRegistry),
+        ) {
+            panic!("Protocol is paused");
+        }
     }
 
     fn require_admin(env: &Env, admin: &Address) {
@@ -4430,6 +4604,104 @@ impl AhjoorRefundContract {
                 panic!("TokenNotAllowed");
             }
         }
+    }
+
+    /// #1170: Request-time checks for a preferred payout token.
+    fn require_preferred_token_swappable(env: &Env, token_in: &Address, preferred: &Address) {
+        Self::require_token_allowed(env, preferred);
+        if let Some(whitelist_contract) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::TokenWhitelistContract)
+        {
+            let wl = TokenWhitelistClient::new(env, &whitelist_contract);
+            if !wl.is_swap_pair_allowed(token_in, preferred) {
+                panic!("SwapPairNotAllowed");
+            }
+        }
+        if !env.storage().instance().has(&DataKey3::SwapRouter) {
+            panic!("SwapRouterNotConfigured");
+        }
+    }
+
+    /// #1170: Swap `amount_in` of `token_in` (held by this contract) into
+    /// `token_out`, delivered straight to `recipient`.
+    ///
+    /// Returns `Err(reason)` without moving any funds when the swap cannot be
+    /// performed, so the caller can fall back to the original token. The
+    /// slippage guard is `min_out = quote * (10_000 - max_slippage_bps) / 10_000`,
+    /// enforced by the router and re-checked against the recipient's actual
+    /// balance change; a router that reports success but under-delivers
+    /// aborts the whole transaction (the refund stays Approved).
+    fn swap_refund_payout(
+        env: &Env,
+        token_in: &Address,
+        token_out: &Address,
+        amount_in: i128,
+        recipient: &Address,
+    ) -> Result<i128, Symbol> {
+        let router: Address = match env.storage().instance().get(&DataKey3::SwapRouter) {
+            Some(r) => r,
+            None => return Err(Symbol::new(env, "SwapRouterNotConfigured")),
+        };
+
+        let this = env.current_contract_address();
+        let mut max_slippage_bps = Self::get_refund_swap_max_slippage_bps(env.clone());
+
+        // Re-check the whitelist: the token or pair may have been removed
+        // since the refund was requested.
+        if let Some(whitelist_contract) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::TokenWhitelistContract)
+        {
+            let wl = TokenWhitelistClient::new(env, &whitelist_contract);
+            if !wl.is_token_allowed_for_contract(&this, token_out) {
+                return Err(Symbol::new(env, "TokenNotAllowed"));
+            }
+            if !wl.is_swap_pair_allowed(token_in, token_out) {
+                return Err(Symbol::new(env, "SwapPairNotAllowed"));
+            }
+            if let Some(pair_max) = wl.get_swap_pair_max_slippage(token_in, token_out) {
+                if pair_max < max_slippage_bps {
+                    max_slippage_bps = pair_max;
+                }
+            }
+        }
+
+        let router_client = swap_router::SwapRouterClient::new(env, &router);
+        let quoted = match router_client.try_quote(token_in, token_out, &amount_in) {
+            Ok(Ok(q)) if q > 0 => q,
+            _ => return Err(Symbol::new(env, "SwapQuoteFailed")),
+        };
+        let min_out = match quoted.checked_mul(10_000 - max_slippage_bps as i128) {
+            Some(v) => v / 10_000,
+            None => return Err(Symbol::new(env, "SwapQuoteFailed")),
+        };
+        if min_out <= 0 {
+            return Err(Symbol::new(env, "SwapQuoteFailed"));
+        }
+
+        let in_client = token::Client::new(env, token_in);
+        let out_client = token::Client::new(env, token_out);
+        let recipient_before = out_client.balance(recipient);
+        let seq = env.ledger().sequence();
+
+        // One-ledger allowance; revoked right after the call either way.
+        in_client.approve(&this, &router, &amount_in, &seq);
+        let result =
+            router_client.try_swap(&this, token_in, token_out, &amount_in, &min_out, recipient);
+        in_client.approve(&this, &router, &0, &seq);
+
+        if !matches!(result, Ok(Ok(_))) {
+            return Err(Symbol::new(env, "SwapFailed"));
+        }
+
+        let received = out_client.balance(recipient) - recipient_before;
+        if received < min_out {
+            panic!("SlippageExceeded");
+        }
+        Ok(received)
     }
 
     fn append_index(env: &Env, key: &DataKey, refund_id: u32) {
@@ -4777,13 +5049,68 @@ impl AhjoorRefundContract {
         let customer_amount = refundable_amount - fee_amount;
 
         let client = token::Client::new(env, &refund.token);
+        let mut payout = RefundPayout {
+            token: refund.token.clone(),
+            amount: customer_amount,
+            swapped: false,
+        };
         if customer_amount > 0 {
-            client.transfer(
-                &env.current_contract_address(),
-                &Self::refund_recipient(&refund),
-                &customer_amount,
-            );
+            let recipient = Self::refund_recipient(&refund);
+
+            // #1170: Pay in the customer's preferred token when possible,
+            // otherwise fall back to the original token.
+            let preferred: Option<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey3::RefundPreferredToken(refund_id));
+            if let Some(preferred) = preferred {
+                match Self::swap_refund_payout(
+                    env,
+                    &refund.token,
+                    &preferred,
+                    customer_amount,
+                    &recipient,
+                ) {
+                    Ok(amount_out) => {
+                        events::emit_refund_paid_in_preferred_token(
+                            env,
+                            refund_id,
+                            refund.token.clone(),
+                            preferred.clone(),
+                            customer_amount,
+                            amount_out,
+                        );
+                        payout = RefundPayout {
+                            token: preferred,
+                            amount: amount_out,
+                            swapped: true,
+                        };
+                    }
+                    Err(reason) => {
+                        events::emit_refund_swap_failed(
+                            env,
+                            refund_id,
+                            refund.token.clone(),
+                            preferred,
+                            customer_amount,
+                            reason,
+                        );
+                    }
+                }
+            }
+
+            if !payout.swapped {
+                client.transfer(&env.current_contract_address(), &recipient, &customer_amount);
+            }
         }
+        env.storage()
+            .persistent()
+            .set(&DataKey3::RefundPayout(refund_id), &payout);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::RefundPayout(refund_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
 
         if fee_amount > 0 {
             if let Some(fee_recipient) = env
@@ -8236,6 +8563,9 @@ mod test_revoke_approval;
 
 #[cfg(test)]
 mod test_installments;
+
+#[cfg(test)]
+mod test_preferred_token_refund;
 /// Event: Customer appealed a rejected refund (#159)
 #[contractevent]
 #[derive(Clone, Debug)]
